@@ -35,23 +35,23 @@ import static android.system.OsConstants.IPPROTO_TCP;
 
 import static com.android.net.module.util.Inet4AddressUtils.getBroadcastAddress;
 import static com.android.net.module.util.Inet4AddressUtils.getPrefixMaskAsInet4Address;
-import static com.android.server.util.NetworkStackConstants.ARP_REPLY;
-import static com.android.server.util.NetworkStackConstants.ARP_REQUEST;
-import static com.android.server.util.NetworkStackConstants.ETHER_ADDR_LEN;
-import static com.android.server.util.NetworkStackConstants.ETHER_HEADER_LEN;
-import static com.android.server.util.NetworkStackConstants.ETHER_TYPE_IPV6;
-import static com.android.server.util.NetworkStackConstants.ETHER_TYPE_OFFSET;
-import static com.android.server.util.NetworkStackConstants.ICMPV6_CHECKSUM_OFFSET;
-import static com.android.server.util.NetworkStackConstants.ICMPV6_ND_OPTION_LENGTH_SCALING_FACTOR;
-import static com.android.server.util.NetworkStackConstants.ICMPV6_ND_OPTION_PIO;
-import static com.android.server.util.NetworkStackConstants.ICMPV6_ND_OPTION_RDNSS;
-import static com.android.server.util.NetworkStackConstants.ICMPV6_RA_HEADER_LEN;
-import static com.android.server.util.NetworkStackConstants.ICMPV6_ROUTER_ADVERTISEMENT;
-import static com.android.server.util.NetworkStackConstants.ICMPV6_ROUTER_SOLICITATION;
-import static com.android.server.util.NetworkStackConstants.IPV4_ADDR_ANY;
-import static com.android.server.util.NetworkStackConstants.IPV6_HEADER_LEN;
-import static com.android.server.util.NetworkStackConstants.IPV6_LEN_OFFSET;
-import static com.android.server.util.NetworkStackConstants.IPV6_PROTOCOL_OFFSET;
+import static com.android.net.module.util.NetworkStackConstants.ARP_REPLY;
+import static com.android.net.module.util.NetworkStackConstants.ARP_REQUEST;
+import static com.android.net.module.util.NetworkStackConstants.ETHER_ADDR_LEN;
+import static com.android.net.module.util.NetworkStackConstants.ETHER_HEADER_LEN;
+import static com.android.net.module.util.NetworkStackConstants.ETHER_TYPE_IPV6;
+import static com.android.net.module.util.NetworkStackConstants.ETHER_TYPE_OFFSET;
+import static com.android.net.module.util.NetworkStackConstants.ICMPV6_CHECKSUM_OFFSET;
+import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ND_OPTION_LENGTH_SCALING_FACTOR;
+import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ND_OPTION_PIO;
+import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ND_OPTION_RDNSS;
+import static com.android.net.module.util.NetworkStackConstants.ICMPV6_RA_HEADER_LEN;
+import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ROUTER_ADVERTISEMENT;
+import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ROUTER_SOLICITATION;
+import static com.android.net.module.util.NetworkStackConstants.IPV4_ADDR_ANY;
+import static com.android.net.module.util.NetworkStackConstants.IPV6_HEADER_LEN;
+import static com.android.net.module.util.NetworkStackConstants.IPV6_LEN_OFFSET;
+import static com.android.net.module.util.NetworkStackConstants.IPV6_PROTOCOL_OFFSET;
 
 import static junit.framework.Assert.fail;
 
@@ -120,7 +120,6 @@ import android.net.shared.Layer2Information;
 import android.net.shared.ProvisioningConfiguration;
 import android.net.shared.ProvisioningConfiguration.ScanResultInfo;
 import android.net.util.InterfaceParams;
-import android.net.util.IpUtils;
 import android.net.util.NetworkStackUtils;
 import android.os.Build;
 import android.os.Handler;
@@ -141,6 +140,7 @@ import androidx.test.runner.AndroidJUnit4;
 
 import com.android.internal.util.StateMachine;
 import com.android.net.module.util.ArrayTrackRecord;
+import com.android.net.module.util.IpUtils;
 import com.android.networkstack.apishim.CaptivePortalDataShimImpl;
 import com.android.networkstack.apishim.ConstantsShim;
 import com.android.networkstack.apishim.common.ShimUtils;
@@ -169,6 +169,7 @@ import org.mockito.MockitoAnnotations;
 import org.mockito.Spy;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.FileDescriptor;
 import java.io.FileReader;
 import java.io.IOException;
@@ -2653,5 +2654,39 @@ public abstract class IpClientIntegrationTestCommon {
         // Client processes DHCPACK packet normally and transits to the ConfiguringInterfaceState
         // due to the null V6ONLY_WAIT.
         assertIpMemoryStoreNetworkAttributes(TEST_LEASE_DURATION_S, currentTime, TEST_DEFAULT_MTU);
+    }
+
+    private static int getNumOpenFds() {
+        return new File("/proc/" + Os.getpid() + "/fd").listFiles().length;
+    }
+
+    private void shutdownAndRecreateIpClient() throws Exception {
+        mIpc.shutdown();
+        awaitIpClientShutdown();
+        mIpc = makeIpClient();
+    }
+
+    @Test @SignatureRequiredTest(reason = "Only counts FDs from the current process. TODO: fix")
+    public void testNoFdLeaks() throws Exception {
+        // Shut down and restart IpClient once to ensure that any fds that are opened the first
+        // time it runs do not cause the test to fail.
+        doDualStackProvisioning();
+        shutdownAndRecreateIpClient();
+
+        // Unfortunately we cannot use a large number of iterations as it would make the test run
+        // too slowly. On crosshatch-eng each iteration takes ~250ms.
+        final int iterations = 10;
+        final int before = getNumOpenFds();
+        for (int i = 0; i < iterations; i++) {
+            doDualStackProvisioning();
+            shutdownAndRecreateIpClient();
+            // The last time this loop runs, mIpc will be shut down in tearDown.
+        }
+        final int after = getNumOpenFds();
+
+        // Check that the number of open fds is the same as before.
+        // If this exact match becomes flaky, we could add some tolerance here (e.g., allow 2-3
+        // extra fds), since it's likely that any leak would at least leak one FD per loop.
+        assertEquals("Fd leak after " + iterations + " iterations: ", before, after);
     }
 }
