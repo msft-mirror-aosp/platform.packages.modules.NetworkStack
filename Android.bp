@@ -43,6 +43,7 @@
 // Common defaults to define SDK level
 java_defaults {
     name: "NetworkStackDevApiLevel",
+    min_sdk_version: "29",
     sdk_version: "system_current",
 }
 
@@ -113,6 +114,7 @@ android_library {
         ":statslog-networkstack-java-gen"
     ],
     manifest: "AndroidManifestBase.xml",
+    enabled: false, // Disabled in mainline-prod
 }
 
 // For API stable, first build the dependencies using jarjar compat rules, then build the sources
@@ -145,6 +147,7 @@ filegroup {
         "//packages/modules/NetworkStack/tests/unit",
         "//packages/modules/NetworkStack/tests/integration",
         "//frameworks/base/packages/Tethering/tests/integration",
+        "//packages/modules/Connectivity/Tethering/tests/integration",
     ]
 }
 
@@ -178,6 +181,7 @@ android_app {
     // The InProcessNetworkStack goes together with the PlatformCaptivePortalLogin, which replaces
     // the default CaptivePortalLogin.
     required: ["PlatformNetworkPermissionConfig", "PlatformCaptivePortalLogin"],
+    enabled: false, // Disabled in mainline-prod
 }
 
 // Pre-merge the AndroidManifest for NetworkStackNext, so that its manifest can be merged on top
@@ -185,7 +189,8 @@ android_library {
     name: "NetworkStackNextManifestBase",
     defaults: ["NetworkStackAppDefaults", "NetworkStackDevApiLevel"],
     static_libs: ["NetworkStackApiCurrentLib"],
-    manifest: "AndroidManifest.xml"
+    manifest: "AndroidManifest.xml",
+    enabled: false, // Disabled in mainline-prod
 }
 
 // NetworkStack build targeting the current API release, for testing on in-development SDK
@@ -197,6 +202,7 @@ android_app {
     manifest: "AndroidManifest_Next.xml",
     // The permission configuration *must* be included to ensure security of the device
     required: ["NetworkPermissionConfig"],
+    enabled: false, // Disabled in mainline-prod
 }
 
 // Updatable network stack for finalized API
@@ -220,6 +226,7 @@ android_library {
     visibility: [
         "//frameworks/base/tests/net/integration",
         "//cts/tests/tests/net",
+        "//packages/modules/Connectivity/tests/cts/net",
     ],
 }
 
@@ -233,6 +240,9 @@ cc_library_shared {
     shared_libs: [
         "liblog",
         "libnativehelper_compat_libc++",
+    ],
+    static_libs: [
+        "libnetjniutils",
     ],
 
     // We cannot use plain "libc++" here to link libc++ dynamically because it results in:
@@ -278,8 +288,8 @@ genrule {
 
 android_app {
     name: "TestNetworkStack",
-    defaults: ["NetworkStackAppDefaults", "NetworkStackDevApiLevel"],
-    static_libs: ["NetworkStackApiCurrentLib"],
+    defaults: ["NetworkStackAppDefaults", "NetworkStackReleaseApiLevel"],
+    static_libs: ["NetworkStackApiStableLib"],
     certificate: "networkstack",
     manifest: ":NetworkStackTestAndroidManifest",
     // The permission configuration *must* be included to ensure security of the device
