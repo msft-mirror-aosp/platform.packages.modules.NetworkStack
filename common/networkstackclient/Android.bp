@@ -65,7 +65,10 @@ aidl_interface {
     name: "networkstack-aidl-interfaces",
     local_include_dir: "src",
     include_dirs: [
-        "frameworks/base/core/java", // For framework parcelables.
+        // For framework parcelables.
+        "frameworks/base/core/java",
+        // For API parcelables in connectivity
+        "frameworks/base/packages/Connectivity/framework/src",
         "frameworks/native/aidl/binder", // For PersistableBundle.aidl
     ],
     srcs: [
@@ -94,6 +97,7 @@ aidl_interface {
         "src/android/net/ip/IIpClientCallbacks.aidl",
         // New AIDL classes should go into android.net.networkstack.aidl so they can be clearly
         // identified
+        "src/android/net/networkstack/aidl/dhcp/DhcpOption.aidl",
     ],
     backend: {
         java: {
@@ -124,6 +128,7 @@ aidl_interface {
         "7",
         "8",
         "9",
+        "10",
     ],
     // TODO: have tethering depend on networkstack-client and set visibility to private
     visibility: [

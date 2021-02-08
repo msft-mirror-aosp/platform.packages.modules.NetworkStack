@@ -402,4 +402,32 @@ public class ConntrackMessageTest {
         }
         assertEquals(4, messageCount);
     }
+
+    @Test
+    public void testToString() {
+        assumeTrue(USING_LE);
+
+        final ByteBuffer byteBuffer = ByteBuffer.wrap(CT_V4NEW_TCP_BYTES);
+        byteBuffer.order(ByteOrder.nativeOrder());
+        final NetlinkMessage msg = NetlinkMessage.parse(byteBuffer, OsConstants.NETLINK_NETFILTER);
+        assertNotNull(msg);
+        assertTrue(msg instanceof ConntrackMessage);
+        final ConntrackMessage conntrackMessage = (ConntrackMessage) msg;
+
+        // Bug: "nlmsg_flags{1536(NLM_F_MATCH))" is not correct because StructNlMsgHdr
+        // #stringForNlMsgFlags can't convert all flags (ex: NLM_F_CREATE) and can't distinguish
+        // the flags which have the same value (ex: NLM_F_MATCH <0x200> and NLM_F_EXCL <0x200>).
+        // The flags output string should be "NLM_F_CREATE|NLM_F_EXCL" in this case.
+        // TODO: correct the flag converted string once #stringForNlMsgFlags does.
+        final String expected = ""
+                + "ConntrackMessage{"
+                + "nlmsghdr{StructNlMsgHdr{ nlmsg_len{140}, nlmsg_type{256(IPCTNL_MSG_CT_NEW)}, "
+                + "nlmsg_flags{1536(NLM_F_MATCH))}, nlmsg_seq{0}, nlmsg_pid{0} }}, "
+                + "nfgenmsg{NfGenMsg{ nfgen_family{AF_INET}, version{0}, res_id{4660} }}, "
+                + "tuple_orig{Tuple{IPPROTO_TCP: 192.168.80.12:62449 -> 140.112.8.116:443}}, "
+                + "tuple_reply{Tuple{IPPROTO_TCP: 140.112.8.116:443 -> 100.81.179.1:62449}}, "
+                + "status{408(IPS_CONFIRMED|IPS_SRC_NAT|IPS_SRC_NAT_DONE|IPS_DST_NAT_DONE)}, "
+                + "timeout_sec{120}}";
+        assertEquals(expected, conntrackMessage.toString());
+    }
 }
