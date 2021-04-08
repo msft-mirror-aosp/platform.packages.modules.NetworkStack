@@ -39,11 +39,15 @@ import static com.android.net.module.util.NetworkStackConstants.ARP_REQUEST;
 import static com.android.net.module.util.NetworkStackConstants.ETHER_ADDR_LEN;
 import static com.android.net.module.util.NetworkStackConstants.ETHER_HEADER_LEN;
 import static com.android.net.module.util.NetworkStackConstants.ETHER_TYPE_OFFSET;
+import static com.android.net.module.util.NetworkStackConstants.ICMPV6_NEIGHBOR_ADVERTISEMENT;
 import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ROUTER_SOLICITATION;
 import static com.android.net.module.util.NetworkStackConstants.IPV4_ADDR_ANY;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ALL_NODES_MULTICAST;
+import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ALL_ROUTERS_MULTICAST;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_HEADER_LEN;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_PROTOCOL_OFFSET;
+import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_AUTONOMOUS;
+import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_ON_LINK;
 
 import static junit.framework.Assert.fail;
 
@@ -141,6 +145,7 @@ import com.android.networkstack.apishim.ConstantsShim;
 import com.android.networkstack.apishim.common.ShimUtils;
 import com.android.networkstack.arp.ArpPacket;
 import com.android.networkstack.metrics.IpProvisioningMetrics;
+import com.android.networkstack.packets.NeighborAdvertisement;
 import com.android.server.NetworkObserver;
 import com.android.server.NetworkObserverRegistry;
 import com.android.server.NetworkStackService.NetworkStackServiceManager;
@@ -343,32 +348,12 @@ public abstract class IpClientIntegrationTestCommon {
     };
 
     protected class Dependencies extends IpClient.Dependencies {
-        private boolean mIsDhcpLeaseCacheEnabled;
-        private boolean mIsDhcpRapidCommitEnabled;
-        private boolean mIsDhcpIpConflictDetectEnabled;
         // Can't use SparseIntArray, it doesn't have an easy way to know if a key is not present.
         private HashMap<String, Integer> mIntConfigProperties = new HashMap<>();
         private DhcpClient mDhcpClient;
         private boolean mIsHostnameConfigurationEnabled;
         private String mHostname;
         private boolean mIsInterfaceRecovered;
-        private boolean mIsIPv6OnlyPreferredEnabled;
-
-        public void setDhcpLeaseCacheEnabled(final boolean enable) {
-            mIsDhcpLeaseCacheEnabled = enable;
-        }
-
-        public void setDhcpRapidCommitEnabled(final boolean enable) {
-            mIsDhcpRapidCommitEnabled = enable;
-        }
-
-        public void setDhcpIpConflictDetectEnabled(final boolean enable) {
-            mIsDhcpIpConflictDetectEnabled = enable;
-        }
-
-        public void setIPv6OnlyPreferredEnabled(final boolean enable) {
-            mIsIPv6OnlyPreferredEnabled = enable;
-        }
 
         public void setHostnameConfiguration(final boolean enable, final String hostname) {
             mIsHostnameConfigurationEnabled = enable;
@@ -411,25 +396,19 @@ public abstract class IpClientIntegrationTestCommon {
         }
 
         @Override
+        public boolean isFeatureEnabled(final Context context, final String name,
+                final boolean defaultEnabled) {
+            return IpClientIntegrationTestCommon.this.isFeatureEnabled(name, defaultEnabled);
+        }
+
+        @Override
         public DhcpClient.Dependencies getDhcpClientDependencies(
                 NetworkStackIpMemoryStore ipMemoryStore, IpProvisioningMetrics metrics) {
             return new DhcpClient.Dependencies(ipMemoryStore, metrics) {
                 @Override
                 public boolean isFeatureEnabled(final Context context, final String name,
                         final boolean defaultEnabled) {
-                    switch (name) {
-                        case NetworkStackUtils.DHCP_RAPID_COMMIT_VERSION:
-                            return mIsDhcpRapidCommitEnabled;
-                        case NetworkStackUtils.DHCP_INIT_REBOOT_VERSION:
-                            return mIsDhcpLeaseCacheEnabled;
-                        case NetworkStackUtils.DHCP_IP_CONFLICT_DETECT_VERSION:
-                            return mIsDhcpIpConflictDetectEnabled;
-                        case NetworkStackUtils.DHCP_IPV6_ONLY_PREFERRED_VERSION:
-                            return mIsIPv6OnlyPreferredEnabled;
-                        default:
-                            fail("Invalid experiment flag: " + name);
-                            return false;
-                    }
+                    return Dependencies.this.isFeatureEnabled(context, name, defaultEnabled);
                 }
 
                 @Override
@@ -473,9 +452,9 @@ public abstract class IpClientIntegrationTestCommon {
     protected abstract IIpClient makeIIpClient(
             @NonNull String ifaceName, @NonNull IIpClientCallbacks cb);
 
-    protected abstract void setDhcpFeatures(boolean isDhcpLeaseCacheEnabled,
-            boolean isRapidCommitEnabled, boolean isDhcpIpConflictDetectEnabled,
-            boolean isIPv6OnlyPreferredEnabled);
+    protected abstract void setFeatureEnabled(String name, boolean enabled);
+
+    protected abstract boolean isFeatureEnabled(String name, boolean defaultEnabled);
 
     protected abstract boolean useNetworkStackSignature();
 
@@ -488,6 +467,17 @@ public abstract class IpClientIntegrationTestCommon {
         // if it is run on devices where TestNetworkStackServiceClient is not supported
         return !useNetworkStackSignature()
                 && (mIsSignatureRequiredTest || !TestNetworkStackServiceClient.isSupported());
+    }
+
+    protected void setDhcpFeatures(final boolean isDhcpLeaseCacheEnabled,
+            final boolean isRapidCommitEnabled, final boolean isDhcpIpConflictDetectEnabled,
+            final boolean isIPv6OnlyPreferredEnabled) {
+        setFeatureEnabled(NetworkStackUtils.DHCP_INIT_REBOOT_VERSION, isDhcpLeaseCacheEnabled);
+        setFeatureEnabled(NetworkStackUtils.DHCP_RAPID_COMMIT_VERSION, isRapidCommitEnabled);
+        setFeatureEnabled(NetworkStackUtils.DHCP_IP_CONFLICT_DETECT_VERSION,
+                isDhcpIpConflictDetectEnabled);
+        setFeatureEnabled(NetworkStackUtils.DHCP_IPV6_ONLY_PREFERRED_VERSION,
+                isIPv6OnlyPreferredEnabled);
     }
 
     @Before
@@ -700,6 +690,14 @@ public abstract class IpClientIntegrationTestCommon {
         try {
             return ArpPacket.parseArpPacket(packet, packet.length);
         } catch (ArpPacket.ParseException e) {
+            return null;
+        }
+    }
+
+    private NeighborAdvertisement parseNeighborAdvertisementOrNull(final byte[] packet) {
+        try {
+            return NeighborAdvertisement.parse(packet, packet.length);
+        } catch (NeighborAdvertisement.ParseException e) {
             return null;
         }
     }
@@ -1434,6 +1432,24 @@ public abstract class IpClientIntegrationTestCommon {
                         == (byte) ICMPV6_ROUTER_SOLICITATION;
     }
 
+    private boolean isNeighborAdvertisement(final byte[] packetBytes) {
+        ByteBuffer packet = ByteBuffer.wrap(packetBytes);
+        return packet.getShort(ETHER_TYPE_OFFSET) == (short) ETH_P_IPV6
+                && packet.get(ETHER_HEADER_LEN + IPV6_PROTOCOL_OFFSET) == (byte) IPPROTO_ICMPV6
+                && packet.get(ETHER_HEADER_LEN + IPV6_HEADER_LEN)
+                        == (byte) ICMPV6_NEIGHBOR_ADVERTISEMENT;
+    }
+
+    private NeighborAdvertisement getNextNeighborAdvertisement() throws ParseException {
+        final byte[] packet = mPacketReader.popPacket(PACKET_TIMEOUT_MS,
+                this::isNeighborAdvertisement);
+        if (packet == null) return null;
+
+        final NeighborAdvertisement na = parseNeighborAdvertisementOrNull(packet);
+        assertNotNull("Invalid neighbour advertisement received", na);
+        return na;
+    }
+
     private void waitForRouterSolicitation() throws ParseException {
         assertNotNull("No router solicitation received on interface within timeout",
                 mPacketReader.popPacket(PACKET_TIMEOUT_MS, this::isRouterSolicitation));
@@ -1464,7 +1480,7 @@ public abstract class IpClientIntegrationTestCommon {
     private static ByteBuffer buildPioOption(int valid, int preferred, String prefixString)
             throws Exception {
         return PrefixInformationOption.build(new IpPrefix(prefixString),
-                (byte) 0b11000000 /* L = 1, A = 1 */, valid, preferred);
+                (byte) (PIO_FLAG_ON_LINK | PIO_FLAG_AUTONOMOUS), valid, preferred);
     }
 
     private static ByteBuffer buildRdnssOption(int lifetime, String... servers) throws Exception {
@@ -2759,5 +2775,51 @@ public abstract class IpClientIntegrationTestCommon {
         assertEquals(packet.mVendorId, TEST_OEM_VENDOR_ID);
         assertArrayEquals(packet.mUserClass, TEST_OEM_USER_CLASS_INFO);
         assertFalse(packet.hasRequestedParam((byte) 42 /* NTP_SERVER */));
+    }
+
+    private void assertGratuitousNa(final NeighborAdvertisement na) throws Exception {
+        final MacAddress etherMulticast =
+                NetworkStackUtils.ipv6MulticastToEthernetMulticast(IPV6_ADDR_ALL_ROUTERS_MULTICAST);
+        final LinkAddress target = new LinkAddress(na.naHdr.target, 64);
+
+        assertEquals(etherMulticast, na.ethHdr.dstMac);
+        assertEquals(ETH_P_IPV6, na.ethHdr.etherType);
+        assertEquals(IPPROTO_ICMPV6, na.ipv6Hdr.nextHeader);
+        assertEquals(0xff, na.ipv6Hdr.hopLimit);
+        assertTrue(na.ipv6Hdr.srcIp.isLinkLocalAddress());
+        assertEquals(IPV6_ADDR_ALL_ROUTERS_MULTICAST, na.ipv6Hdr.dstIp);
+        assertEquals(ICMPV6_NEIGHBOR_ADVERTISEMENT, na.icmpv6Hdr.type);
+        assertEquals(0, na.icmpv6Hdr.code);
+        assertEquals(0, na.naHdr.flags);
+        assertTrue(target.isGlobalPreferred());
+    }
+
+    @Test
+    public void testGratuitousNa() throws Exception {
+        final ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
+                .withoutIpReachabilityMonitor()
+                .withoutIPv4()
+                .build();
+
+        setFeatureEnabled(NetworkStackUtils.IPCLIENT_GRATUITOUS_NA_VERSION,
+                true /* isGratuitousNaEnabled */);
+        assertTrue(isFeatureEnabled(NetworkStackUtils.IPCLIENT_GRATUITOUS_NA_VERSION, false));
+        startIpClientProvisioning(config);
+
+        final InOrder inOrder = inOrder(mCb);
+        final String dnsServer = "2001:4860:4860::64";
+        final ByteBuffer pio = buildPioOption(3600, 1800, "2001:db8:1::/64");
+        final ByteBuffer rdnss = buildRdnssOption(3600, dnsServer);
+        final ByteBuffer ra = buildRaPacket(pio, rdnss);
+
+        doIpv6OnlyProvisioning(inOrder, ra);
+
+        final List<NeighborAdvertisement> naList = new ArrayList<>();
+        NeighborAdvertisement packet;
+        while ((packet = getNextNeighborAdvertisement()) != null) {
+            assertGratuitousNa(packet);
+            naList.add(packet);
+        }
+        assertEquals(2, naList.size()); // privacy address and stable privacy address
     }
 }
