@@ -22,11 +22,14 @@ import android.net.ConnectivityManager.NetworkCallback;
 import android.net.NetworkRequest;
 import android.os.Build;
 import android.os.Handler;
+import android.util.Range;
 
 import androidx.annotation.NonNull;
 
 import com.android.networkstack.apishim.common.ConnectivityManagerShim;
 import com.android.networkstack.apishim.common.ShimUtils;
+
+import java.util.Collection;
 
 /**
  * Implementation of {@link ConnectivityManagerShim} for API 31.
@@ -56,8 +59,8 @@ public class ConnectivityManagerShimImpl
      */
     @Override
     public void requestBackgroundNetwork(@NonNull NetworkRequest request,
-            @NonNull Handler handler, @NonNull NetworkCallback networkCallback) {
-        mCm.requestBackgroundNetwork(request, handler, networkCallback);
+            @NonNull NetworkCallback networkCallback, @NonNull Handler handler) {
+        mCm.requestBackgroundNetwork(request, networkCallback, handler);
     }
 
     /**
@@ -73,8 +76,24 @@ public class ConnectivityManagerShimImpl
      * See android.net.ConnectivityManager#registerDefaultNetworkCallbackAsUid
      */
     @Override
-    public void registerDefaultNetworkCallbackAsUid(
+    public void registerDefaultNetworkCallbackForUid(
             int uid, @NonNull NetworkCallback networkCallback, @NonNull Handler handler) {
-        mCm.registerDefaultNetworkCallbackAsUid(uid, networkCallback, handler);
+        mCm.registerDefaultNetworkCallbackForUid(uid, networkCallback, handler);
+    }
+
+    /**
+     * See android.net.ConnectivityManager#setLegacyLockdownVpnEnabled
+     */
+    @Override
+    public void setLegacyLockdownVpnEnabled(boolean enabled) {
+        mCm.setLegacyLockdownVpnEnabled(enabled);
+    }
+
+    /**
+     * See android.net.ConnectivityManager#setRequireVpnForUids
+     */
+    @Override
+    public void setRequireVpnForUids(boolean requireVpn, Collection<Range<Integer>> ranges) {
+        mCm.setRequireVpnForUids(requireVpn, ranges);
     }
 }
