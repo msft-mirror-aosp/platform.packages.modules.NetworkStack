@@ -18,13 +18,18 @@ package android.net.ip;
 
 import static android.net.RouteInfo.RTN_UNICAST;
 import static android.net.dhcp.DhcpResultsParcelableUtil.toStableParcelable;
+import static android.net.util.NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION;
 import static android.net.util.NetworkStackUtils.IPCLIENT_GRATUITOUS_NA_VERSION;
+import static android.net.util.SocketUtils.makePacketSocketAddress;
 import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
 import static android.system.OsConstants.AF_PACKET;
+import static android.system.OsConstants.ETH_P_ARP;
 import static android.system.OsConstants.ETH_P_IPV6;
 import static android.system.OsConstants.SOCK_NONBLOCK;
 import static android.system.OsConstants.SOCK_RAW;
 
+import static com.android.net.module.util.NetworkStackConstants.ARP_REPLY;
+import static com.android.net.module.util.NetworkStackConstants.ETHER_BROADCAST;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ALL_ROUTERS_MULTICAST;
 import static com.android.net.module.util.NetworkStackConstants.VENDOR_SPECIFIC_IE_ID;
 import static com.android.server.util.PermissionUtil.enforceNetworkStackCallingPermission;
@@ -68,6 +73,7 @@ import android.os.RemoteException;
 import android.os.ServiceSpecificException;
 import android.os.SystemClock;
 import android.stats.connectivity.DisconnectCode;
+import android.stats.connectivity.NetworkQuirkEvent;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.text.TextUtils;
@@ -91,13 +97,16 @@ import com.android.networkstack.apishim.NetworkInformationShimImpl;
 import com.android.networkstack.apishim.SocketUtilsShimImpl;
 import com.android.networkstack.apishim.common.NetworkInformationShim;
 import com.android.networkstack.apishim.common.ShimUtils;
+import com.android.networkstack.arp.ArpPacket;
 import com.android.networkstack.metrics.IpProvisioningMetrics;
+import com.android.networkstack.metrics.NetworkQuirkMetrics;
 import com.android.networkstack.packets.NeighborAdvertisement;
 import com.android.server.NetworkObserverRegistry;
 import com.android.server.NetworkStackService.NetworkStackServiceManager;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
+import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.MalformedURLException;
@@ -148,6 +157,7 @@ public class IpClient extends StateMachine {
     private final NetworkStackIpMemoryStore mIpMemoryStore;
     private final NetworkInformationShim mShim = NetworkInformationShimImpl.newInstance();
     private final IpProvisioningMetrics mIpProvisioningMetrics = new IpProvisioningMetrics();
+    private final NetworkQuirkMetrics mNetworkQuirkMetrics;
 
     /**
      * Dump all state machine and connectivity packet logs to the specified writer.
@@ -581,6 +591,10 @@ public class IpClient extends StateMachine {
             return new IpConnectivityLog();
         }
 
+        public NetworkQuirkMetrics getNetworkQuirkMetrics() {
+            return new NetworkQuirkMetrics();
+        }
+
         /**
          * Return whether a feature guarded by a feature flag is enabled.
          * @see NetworkStackUtils#isFeatureEnabled(Context, String, String)
@@ -612,6 +626,7 @@ public class IpClient extends StateMachine {
         mClatInterfaceName = CLAT_PREFIX + ifName;
         mDependencies = deps;
         mMetricsLog = deps.getIpConnectivityLog();
+        mNetworkQuirkMetrics = deps.getNetworkQuirkMetrics();
         mShutdownLatch = new CountDownLatch(1);
         mCm = mContext.getSystemService(ConnectivityManager.class);
         mObserverRegistry = observerRegistry;
@@ -836,6 +851,11 @@ public class IpClient extends StateMachine {
 
     private boolean isGratuitousNaEnabled() {
         return mDependencies.isFeatureEnabled(mContext, IPCLIENT_GRATUITOUS_NA_VERSION,
+                false /* defaultEnabled */);
+    }
+
+    private boolean isGratuitousArpNaRoamingEnabled() {
+        return mDependencies.isFeatureEnabled(mContext, IPCLIENT_GARP_NA_ROAMING_VERSION,
                 false /* defaultEnabled */);
     }
 
@@ -1250,11 +1270,11 @@ public class IpClient extends StateMachine {
             // b/131781810.
             if (newLp.isIpv4Provisioned()) {
                 mInterfaceCtrl.disableIPv6();
+                mNetworkQuirkMetrics.setEvent(NetworkQuirkEvent.QE_IPV6_PROVISIONING_ROUTER_LOST);
+                mNetworkQuirkMetrics.statsWrite();
                 mHasDisabledIPv6OnProvLoss = true;
                 delta = PROV_CHANGE_STILL_PROVISIONED;
-                if (DBG) {
-                    mLog.log("Disable IPv6 stack completely when the default router has gone");
-                }
+                mLog.log("Disable IPv6 stack completely when the default router has gone");
             } else {
                 delta = PROV_CHANGE_LOST_PROVISIONING;
             }
@@ -1423,30 +1443,47 @@ public class IpClient extends StateMachine {
         }
     }
 
-    private void sendGratuitousNA(final Inet6Address srcIp, final Inet6Address target) {
-        final int flags = 0; // R=0, S=0, O=0
-        final Inet6Address dstIp = IPV6_ADDR_ALL_ROUTERS_MULTICAST;
-        // Ethernet multicast destination address: 33:33:00:00:00:02.
-        final MacAddress dstMac = NetworkStackUtils.ipv6MulticastToEthernetMulticast(dstIp);
-        final ByteBuffer packet = NeighborAdvertisement.build(mInterfaceParams.macAddr, dstMac,
-                srcIp, dstIp, flags, target);
+    private void transmitPacket(final ByteBuffer packet, final SocketAddress sockAddress,
+            final String msg) {
         FileDescriptor sock = null;
         try {
             sock = Os.socket(AF_PACKET, SOCK_RAW | SOCK_NONBLOCK, 0 /* protocol */);
-            final SocketAddress sockAddress =
-                    SocketUtilsShimImpl.newInstance().makePacketSocketAddress(ETH_P_IPV6,
-                            mInterfaceParams.index, dstMac.toByteArray());
             Os.sendto(sock, packet.array(), 0 /* byteOffset */, packet.limit() /* byteCount */,
                     0 /* flags */, sockAddress);
         } catch (SocketException | ErrnoException e) {
-            logError("Fail to send Gratuitous Neighbor Advertisement", e);
+            logError(msg, e);
         } finally {
             NetworkStackUtils.closeSocketQuietly(sock);
         }
     }
 
-    private Inet6Address getIpv6LinkLocalAddress(final LinkProperties newLp) {
-        Inet6Address src = null;
+    private void sendGratuitousNA(final Inet6Address srcIp, final Inet6Address targetIp) {
+        final int flags = 0; // R=0, S=0, O=0
+        final Inet6Address dstIp = IPV6_ADDR_ALL_ROUTERS_MULTICAST;
+        // Ethernet multicast destination address: 33:33:00:00:00:02.
+        final MacAddress dstMac = NetworkStackUtils.ipv6MulticastToEthernetMulticast(dstIp);
+        final ByteBuffer packet = NeighborAdvertisement.build(mInterfaceParams.macAddr, dstMac,
+                srcIp, dstIp, flags, targetIp);
+        final SocketAddress sockAddress =
+                SocketUtilsShimImpl.newInstance().makePacketSocketAddress(ETH_P_IPV6,
+                        mInterfaceParams.index, dstMac.toByteArray());
+
+        transmitPacket(packet, sockAddress, "Failed to send Gratuitous Neighbor Advertisement");
+    }
+
+    private void sendGratuitousARP(final Inet4Address srcIp) {
+        final ByteBuffer packet = ArpPacket.buildArpPacket(ETHER_BROADCAST /* dstMac */,
+                mInterfaceParams.macAddr.toByteArray() /* srcMac */,
+                srcIp.getAddress() /* targetIp */,
+                ETHER_BROADCAST /* targetHwAddress */,
+                srcIp.getAddress() /* senderIp */, (short) ARP_REPLY);
+        final SocketAddress sockAddress =
+                makePacketSocketAddress(ETH_P_ARP, mInterfaceParams.index);
+
+        transmitPacket(packet, sockAddress, "Failed to send GARP");
+    }
+
+    private static Inet6Address getIpv6LinkLocalAddress(final LinkProperties newLp) {
         for (LinkAddress la : newLp.getLinkAddresses()) {
             if (!la.isIpv6()) continue;
             final Inet6Address ip = (Inet6Address) la.getAddress();
@@ -1455,22 +1492,40 @@ public class IpClient extends StateMachine {
         return null;
     }
 
-    private void maybeSendGratuitousNAs(final LinkProperties newLp) {
-        if (!newLp.hasGlobalIpv6Address() || !isGratuitousNaEnabled()) return;
+    private void maybeSendGratuitousNAs(final LinkProperties lp, boolean afterRoaming) {
+        if (!lp.hasGlobalIpv6Address()) return;
 
-        final Inet6Address src = getIpv6LinkLocalAddress(newLp);
-        if (src == null) return;
-        for (LinkAddress la : newLp.getLinkAddresses()) {
+        final Inet6Address srcIp = getIpv6LinkLocalAddress(lp);
+        if (srcIp == null) return;
+
+        // TODO: add experiment with sending only one gratuitous NA packet instead of one
+        // packet per address.
+        for (LinkAddress la : lp.getLinkAddresses()) {
             if (!la.isIpv6() || !la.isGlobalPreferred()) continue;
             final Inet6Address targetIp = (Inet6Address) la.getAddress();
-            // Already sent gratuitous NA with this target global IPv6 address.
-            if (mGratuitousNaTargetAddresses.contains(targetIp)) continue;
+            // Already sent gratuitous NA with this target global IPv6 address. But for
+            // the L2 roaming case, device should always (re)transmit Gratuitous NA for
+            // each IPv6 global unicast address respectively after roaming.
+            if (!afterRoaming && mGratuitousNaTargetAddresses.contains(targetIp)) continue;
             if (DBG) {
-                Log.d(mTag, "send Gratuitous NA from " + src + ", target Address is "
-                            + targetIp);
+                mLog.log("send Gratuitous NA from " + srcIp.getHostAddress() + " for "
+                        + targetIp.getHostAddress() + (afterRoaming ? " after roaming" : ""));
             }
-            sendGratuitousNA(src, targetIp);
-            mGratuitousNaTargetAddresses.add(targetIp);
+            sendGratuitousNA(srcIp, targetIp);
+            if (!afterRoaming) mGratuitousNaTargetAddresses.add(targetIp);
+        }
+    }
+
+    private void maybeSendGratuitousARP(final LinkProperties lp) {
+        for (LinkAddress address : lp.getLinkAddresses()) {
+            if (address.getAddress() instanceof Inet4Address) {
+                final Inet4Address srcIp = (Inet4Address) address.getAddress();
+                if (DBG) {
+                    mLog.log("send GARP for " + srcIp.getHostAddress() + " HW address: "
+                            + mInterfaceParams.macAddr);
+                }
+                sendGratuitousARP(srcIp);
+            }
         }
     }
 
@@ -1484,7 +1539,9 @@ public class IpClient extends StateMachine {
         // Check if new assigned IPv6 GUA is available in the LinkProperties now. If so, initiate
         // gratuitous multicast unsolicited Neighbor Advertisements as soon as possible to inform
         // first-hop routers that the new GUA host is goning to use.
-        maybeSendGratuitousNAs(newLp);
+        if (isGratuitousNaEnabled()) {
+            maybeSendGratuitousNAs(newLp, false /* isGratuitousNaAfterRoaming */);
+        }
 
         // Either success IPv4 or IPv6 provisioning triggers new LinkProperties update,
         // wait for the provisioning completion and record the latency.
@@ -1740,6 +1797,13 @@ public class IpClient extends StateMachine {
 
         // If the BSSID has not changed, there is nothing to do.
         if (info.bssid.equals(mCurrentBssid)) return;
+
+        // Before trigger probing to the interesting neighbors, send Gratuitous ARP
+        // and Neighbor Advertisment in advance to propgate host's IPv4/v6 addresses.
+        if (isGratuitousArpNaRoamingEnabled()) {
+            maybeSendGratuitousARP(mLinkProperties);
+            maybeSendGratuitousNAs(mLinkProperties, true /* isGratuitousNaAfterRoaming */);
+        }
 
         if (mIpReachabilityMonitor != null) {
             mIpReachabilityMonitor.probeAll();
