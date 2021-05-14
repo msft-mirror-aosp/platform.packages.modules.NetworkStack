@@ -16,21 +16,24 @@
 
 package com.android.networkstack.apishim;
 
+import static com.android.modules.utils.build.SdkLevel.isAtLeastS;
+
 import android.net.NetworkRequest;
 import android.os.Build;
 import android.util.Range;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
 
 import com.android.networkstack.apishim.common.NetworkRequestShim;
-import com.android.networkstack.apishim.common.ShimUtils;
 
 import java.util.Set;
 
 /**
  * Implementation of {@link NetworkRequestShim} for API 31.
  */
+@RequiresApi(Build.VERSION_CODES.S)
 public class NetworkRequestShimImpl
         extends com.android.networkstack.apishim.api30.NetworkRequestShimImpl {
     protected NetworkRequestShimImpl() {
@@ -40,10 +43,10 @@ public class NetworkRequestShimImpl
     /**
      * Get a new instance of {@link NetworkRequestShim}.
      */
+    @RequiresApi(Build.VERSION_CODES.Q)
     public static NetworkRequestShim newInstance() {
-        if (!ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.R)) {
-            return com.android.networkstack.apishim.api30.NetworkRequestShimImpl
-                    .newInstance();
+        if (!isAtLeastS()) {
+            return com.android.networkstack.apishim.api30.NetworkRequestShimImpl.newInstance();
         }
         return new NetworkRequestShimImpl();
     }
@@ -52,5 +55,10 @@ public class NetworkRequestShimImpl
     public void setUids(@NonNull NetworkRequest.Builder builder,
             @Nullable Set<Range<Integer>> uids) {
         builder.setUids(uids);
+    }
+
+    @Override
+    public NetworkRequest.Builder newBuilder(@NonNull NetworkRequest request) {
+        return new NetworkRequest.Builder(request);
     }
 }
