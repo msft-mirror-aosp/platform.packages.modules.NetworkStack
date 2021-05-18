@@ -73,6 +73,7 @@ import android.os.RemoteException;
 import android.os.ServiceSpecificException;
 import android.os.SystemClock;
 import android.stats.connectivity.DisconnectCode;
+import android.stats.connectivity.NetworkQuirkEvent;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.text.TextUtils;
@@ -98,6 +99,7 @@ import com.android.networkstack.apishim.common.NetworkInformationShim;
 import com.android.networkstack.apishim.common.ShimUtils;
 import com.android.networkstack.arp.ArpPacket;
 import com.android.networkstack.metrics.IpProvisioningMetrics;
+import com.android.networkstack.metrics.NetworkQuirkMetrics;
 import com.android.networkstack.packets.NeighborAdvertisement;
 import com.android.server.NetworkObserverRegistry;
 import com.android.server.NetworkStackService.NetworkStackServiceManager;
@@ -155,6 +157,7 @@ public class IpClient extends StateMachine {
     private final NetworkStackIpMemoryStore mIpMemoryStore;
     private final NetworkInformationShim mShim = NetworkInformationShimImpl.newInstance();
     private final IpProvisioningMetrics mIpProvisioningMetrics = new IpProvisioningMetrics();
+    private final NetworkQuirkMetrics mNetworkQuirkMetrics;
 
     /**
      * Dump all state machine and connectivity packet logs to the specified writer.
@@ -588,6 +591,10 @@ public class IpClient extends StateMachine {
             return new IpConnectivityLog();
         }
 
+        public NetworkQuirkMetrics getNetworkQuirkMetrics() {
+            return new NetworkQuirkMetrics();
+        }
+
         /**
          * Return whether a feature guarded by a feature flag is enabled.
          * @see NetworkStackUtils#isFeatureEnabled(Context, String, String)
@@ -619,6 +626,7 @@ public class IpClient extends StateMachine {
         mClatInterfaceName = CLAT_PREFIX + ifName;
         mDependencies = deps;
         mMetricsLog = deps.getIpConnectivityLog();
+        mNetworkQuirkMetrics = deps.getNetworkQuirkMetrics();
         mShutdownLatch = new CountDownLatch(1);
         mCm = mContext.getSystemService(ConnectivityManager.class);
         mObserverRegistry = observerRegistry;
@@ -851,6 +859,28 @@ public class IpClient extends StateMachine {
                 false /* defaultEnabled */);
     }
 
+    private void setInitialBssid(final ProvisioningConfiguration req) {
+        final ScanResultInfo scanResultInfo = req.mScanResultInfo;
+        mCurrentBssid = null;
+        // http://b/185202634
+        // ScanResultInfo is not populated in some situations.
+        // On S and above, prefer getting the BSSID from the Layer2Info.
+        // On R and below, get the BSSID from the ScanResultInfo and fall back to
+        // getting it from the Layer2Info. This ensures no regressions if any R
+        // devices pass in a null or meaningless BSSID in the Layer2Info.
+        if (!ShimUtils.isAtLeastS() && scanResultInfo != null) {
+            try {
+                mCurrentBssid = MacAddress.fromString(scanResultInfo.getBssid());
+            } catch (IllegalArgumentException e) {
+                Log.wtf(mTag, "Invalid BSSID: " + scanResultInfo.getBssid()
+                        + " in provisioning configuration", e);
+            }
+        }
+        if (mCurrentBssid == null && req.mLayer2Info != null) {
+            mCurrentBssid = req.mLayer2Info.mBssid;
+        }
+    }
+
     @Override
     protected void onQuitting() {
         mCallback.onQuit();
@@ -874,17 +904,7 @@ public class IpClient extends StateMachine {
             return;
         }
 
-        final ScanResultInfo scanResultInfo = req.mScanResultInfo;
-        mCurrentBssid = null;
-        if (scanResultInfo != null) {
-            try {
-                mCurrentBssid = MacAddress.fromString(scanResultInfo.getBssid());
-            } catch (IllegalArgumentException e) {
-                Log.wtf(mTag, "Invalid BSSID: " + scanResultInfo.getBssid()
-                        + " in provisioning configuration", e);
-            }
-        }
-
+        setInitialBssid(req);
         if (req.mLayer2Info != null) {
             mL2Key = req.mLayer2Info.mL2Key;
             mCluster = req.mLayer2Info.mCluster;
@@ -1262,11 +1282,11 @@ public class IpClient extends StateMachine {
             // b/131781810.
             if (newLp.isIpv4Provisioned()) {
                 mInterfaceCtrl.disableIPv6();
+                mNetworkQuirkMetrics.setEvent(NetworkQuirkEvent.QE_IPV6_PROVISIONING_ROUTER_LOST);
+                mNetworkQuirkMetrics.statsWrite();
                 mHasDisabledIPv6OnProvLoss = true;
                 delta = PROV_CHANGE_STILL_PROVISIONED;
-                if (DBG) {
-                    mLog.log("Disable IPv6 stack completely when the default router has gone");
-                }
+                mLog.log("Disable IPv6 stack completely when the default router has gone");
             } else {
                 delta = PROV_CHANGE_LOST_PROVISIONING;
             }
