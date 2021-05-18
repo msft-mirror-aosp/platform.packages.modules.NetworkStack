@@ -16,7 +16,6 @@
 
 package com.android.networkstack.apishim.common;
 
-import android.net.CaptivePortalData;
 import android.net.IpPrefix;
 import android.net.LinkProperties;
 import android.net.NetworkCapabilities;
@@ -83,5 +82,18 @@ public interface NetworkInformationShim {
      * @param captivePortalData Captive portal data to be used
      */
     void setCaptivePortalData(@NonNull LinkProperties lp,
-            @Nullable CaptivePortalData captivePortalData);
+            @Nullable CaptivePortalDataShim captivePortalData);
+
+    /**
+     * Get the name of the given capability that carriers use.
+     * If the capability does not have a carrier-name, returns null.
+     *
+     * @param capability The capability to get the carrier-name of.
+     * @return The carrier-name of the capability, or null if it doesn't exist.
+     * @hide
+     */
+    @Nullable
+    default String getCapabilityCarrierName(int capability) {
+        return null;
+    }
 }
