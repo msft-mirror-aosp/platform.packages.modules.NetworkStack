@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.android.networkstack.apishim;
+package com.android.networkstack.apishim.api31;
 
 import android.net.CaptivePortalData;
 import android.net.Uri;
@@ -33,7 +33,7 @@ public class CaptivePortalDataShimImpl
     }
 
     @Override
-    public String getVenueFriendlyName() {
+    public CharSequence getVenueFriendlyName() {
         return mData.getVenueFriendlyName();
     }
 

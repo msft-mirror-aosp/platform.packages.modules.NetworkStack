@@ -155,6 +155,7 @@ import com.android.server.connectivity.nano.CellularData;
 import com.android.server.connectivity.nano.DnsEvent;
 import com.android.server.connectivity.nano.WifiData;
 import com.android.testutils.DevSdkIgnoreRule;
+import com.android.testutils.DevSdkIgnoreRule.IgnoreAfter;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo;
 import com.android.testutils.HandlerUtils;
 
@@ -283,7 +284,9 @@ public class NetworkMonitorTest {
     private static final int DEFAULT_DNS_TIMEOUT_THRESHOLD = 5;
 
     private static final int HANDLER_TIMEOUT_MS = 1000;
-
+    private static final int TEST_MIN_STALL_EVALUATE_INTERVAL_MS = 500;
+    private static final int STALL_EXPECTED_LAST_PROBE_TIME_MS =
+            TEST_MIN_STALL_EVALUATE_INTERVAL_MS + HANDLER_TIMEOUT_MS;
     private static final LinkProperties TEST_LINK_PROPERTIES = new LinkProperties();
 
     // Cannot have a static member for the LinkProperties with captive portal API information, as
@@ -543,7 +546,7 @@ public class NetworkMonitorTest {
 
         resetCallbacks();
 
-        setMinDataStallEvaluateInterval(500);
+        setMinDataStallEvaluateInterval(TEST_MIN_STALL_EVALUATE_INTERVAL_MS);
         setDataStallEvaluationType(DATA_STALL_EVALUATION_TYPE_DNS);
         setValidDataStallDnsTimeThreshold(500);
         setConsecutiveDnsTimeoutThreshold(5);
@@ -1064,6 +1067,34 @@ public class NetworkMonitorTest {
         setSslException(mHttpsConnection);
         setPortal302(mHttpConnection);
         runPortalNetworkTest();
+    }
+
+    @Test
+    public void testIsCaptivePortal_Http200EmptyResponse() throws Exception {
+        setSslException(mHttpsConnection);
+        setStatus(mHttpConnection, 200);
+        // Invalid if there is no content (can't login to an empty page)
+        runNetworkTest(VALIDATION_RESULT_INVALID, 0 /* probesSucceeded */, null);
+        verify(mCallbacks, never()).showProvisioningNotification(any(), any());
+    }
+
+    private void doCaptivePortal200ResponseTest(String expectedRedirectUrl) throws Exception {
+        setSslException(mHttpsConnection);
+        setStatus(mHttpConnection, 200);
+        doReturn(100L).when(mHttpConnection).getContentLengthLong();
+        // Redirect URL was null before S
+        runNetworkTest(VALIDATION_RESULT_PORTAL, 0 /* probesSucceeded */, expectedRedirectUrl);
+        verify(mCallbacks, timeout(HANDLER_TIMEOUT_MS)).showProvisioningNotification(any(), any());
+    }
+
+    @Test @IgnoreAfter(Build.VERSION_CODES.R)
+    public void testIsCaptivePortal_HttpProbeIs200Portal_R() throws Exception {
+        doCaptivePortal200ResponseTest(null);
+    }
+
+    @Test @IgnoreUpTo(Build.VERSION_CODES.R)
+    public void testIsCaptivePortal_HttpProbeIs200Portal() throws Exception {
+        doCaptivePortal200ResponseTest(TEST_HTTP_URL);
     }
 
     private void setupPrivateIpResponse(String privateAddr) throws Exception {
@@ -1603,7 +1634,8 @@ public class NetworkMonitorTest {
         wrappedMonitor.setLastProbeTime(SystemClock.elapsedRealtime() - 100);
         assertFalse(wrappedMonitor.isDataStall());
 
-        wrappedMonitor.setLastProbeTime(SystemClock.elapsedRealtime() - 1000);
+        wrappedMonitor.setLastProbeTime(
+                SystemClock.elapsedRealtime() - STALL_EXPECTED_LAST_PROBE_TIME_MS);
         makeDnsTimeoutEvent(wrappedMonitor, DEFAULT_DNS_TIMEOUT_THRESHOLD);
         assertTrue(wrappedMonitor.isDataStall());
         verify(mCallbacks).notifyDataStallSuspected(
@@ -1613,7 +1645,8 @@ public class NetworkMonitorTest {
     @Test
     public void testIsDataStall_EvaluationDnsWithDnsTimeoutCount() throws Exception {
         WrappedNetworkMonitor wrappedMonitor = makeCellMeteredNetworkMonitor();
-        wrappedMonitor.setLastProbeTime(SystemClock.elapsedRealtime() - 1000);
+        wrappedMonitor.setLastProbeTime(
+                SystemClock.elapsedRealtime() - STALL_EXPECTED_LAST_PROBE_TIME_MS);
         makeDnsTimeoutEvent(wrappedMonitor, 3);
         assertFalse(wrappedMonitor.isDataStall());
         // Reset consecutive timeout counts.
@@ -1631,7 +1664,8 @@ public class NetworkMonitorTest {
         // Set the value to larger than the default dns log size.
         setConsecutiveDnsTimeoutThreshold(51);
         wrappedMonitor = makeCellMeteredNetworkMonitor();
-        wrappedMonitor.setLastProbeTime(SystemClock.elapsedRealtime() - 1000);
+        wrappedMonitor.setLastProbeTime(
+                SystemClock.elapsedRealtime() - STALL_EXPECTED_LAST_PROBE_TIME_MS);
         makeDnsTimeoutEvent(wrappedMonitor, 50);
         assertFalse(wrappedMonitor.isDataStall());
 
@@ -1663,7 +1697,8 @@ public class NetworkMonitorTest {
         wrappedMonitor.setLastProbeTime(SystemClock.elapsedRealtime() - 100);
         makeDnsTimeoutEvent(wrappedMonitor, DEFAULT_DNS_TIMEOUT_THRESHOLD);
         assertFalse(wrappedMonitor.isDataStall());
-        wrappedMonitor.setLastProbeTime(SystemClock.elapsedRealtime() - 1000);
+        wrappedMonitor.setLastProbeTime(
+                SystemClock.elapsedRealtime() - STALL_EXPECTED_LAST_PROBE_TIME_MS);
         assertTrue(wrappedMonitor.isDataStall());
         verify(mCallbacks).notifyDataStallSuspected(
                 matchDnsDataStallParcelable(DEFAULT_DNS_TIMEOUT_THRESHOLD));
@@ -1674,7 +1709,8 @@ public class NetworkMonitorTest {
         wrappedMonitor.setLastProbeTime(SystemClock.elapsedRealtime() - 100);
         makeDnsTimeoutEvent(wrappedMonitor, DEFAULT_DNS_TIMEOUT_THRESHOLD);
         assertFalse(wrappedMonitor.isDataStall());
-        wrappedMonitor.setLastProbeTime(SystemClock.elapsedRealtime() - 1000);
+        wrappedMonitor.setLastProbeTime(
+                SystemClock.elapsedRealtime() - STALL_EXPECTED_LAST_PROBE_TIME_MS);
         assertFalse(wrappedMonitor.isDataStall());
     }
 
@@ -1708,7 +1744,7 @@ public class NetworkMonitorTest {
         setDataStallEvaluationType(DATA_STALL_EVALUATION_TYPE_DNS | DATA_STALL_EVALUATION_TYPE_TCP);
         setupTcpDataStall();
         final WrappedNetworkMonitor nm = makeMonitor(CELL_METERED_CAPABILITIES);
-        nm.setLastProbeTime(SystemClock.elapsedRealtime() - 1000);
+        nm.setLastProbeTime(SystemClock.elapsedRealtime() - STALL_EXPECTED_LAST_PROBE_TIME_MS);
         makeDnsTimeoutEvent(nm, DEFAULT_DNS_TIMEOUT_THRESHOLD);
         assertTrue(nm.isDataStall());
         verify(mCallbacks).notifyDataStallSuspected(
@@ -2001,7 +2037,7 @@ public class NetworkMonitorTest {
         nm.notifyNetworkConnected(TEST_LINK_PROPERTIES, nc);
         verifyNetworkTested(NETWORK_VALIDATION_RESULT_VALID,
                 NETWORK_VALIDATION_PROBE_DNS | NETWORK_VALIDATION_PROBE_HTTPS);
-        nm.setLastProbeTime(SystemClock.elapsedRealtime() - 1000);
+        nm.setLastProbeTime(SystemClock.elapsedRealtime() - STALL_EXPECTED_LAST_PROBE_TIME_MS);
         return nm;
     }
 
@@ -2023,6 +2059,8 @@ public class NetworkMonitorTest {
                 ArgumentCaptor.forClass(DataStallDetectionStats.class);
         verify(mDependencies, timeout(HANDLER_TIMEOUT_MS).times(1))
                 .writeDataStallDetectionStats(statsCaptor.capture(), probeResultCaptor.capture());
+        // Ensure probe will not stop due to rate-limiting mechanism.
+        nm.setLastProbeTime(SystemClock.elapsedRealtime() - STALL_EXPECTED_LAST_PROBE_TIME_MS);
         assertTrue(nm.isDataStall());
         assertTrue(probeResultCaptor.getValue().isSuccessful());
         verifyTestDataStallDetectionStats(evalType, transport, statsCaptor.getValue());
