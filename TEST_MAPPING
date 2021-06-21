@@ -5,14 +5,14 @@
     },
     {
       "name": "NetworkStackNextTests"
+    },
+    {
+      "name": "NetworkStackIntegrationTests"
     }
   ],
   "postsubmit": [
     {
       "name": "NetworkStackHostTests"
-    },
-    {
-      "name": "NetworkStackIntegrationTests"
     }
   ],
   "auto-postsubmit": [
@@ -40,7 +40,13 @@
     // We must specify at least one module here or the tests won't run. Use the same set as CTS
     // so in theory the infra would not need to reinstall/reboot devices to run both.
     {
-      "name": "NetworkStackTests[CaptivePortalLoginGoogle.apk+NetworkStackGoogle.apk+com.google.android.resolv.apex+com.google.android.tethering.apex]"
+      // TODO: add back tethering when it is updatable in this branch
+      "name": "NetworkStackTests[CaptivePortalLoginGoogle.apk+NetworkStackGoogle.apk+com.google.android.resolv.apex]"
+    }
+  ],
+  "mainline-postsubmit": [
+    {
+      "name": "NetworkStackIntegrationTests[CaptivePortalLoginGoogle.apk+NetworkStackGoogle.apk+com.google.android.resolv.apex+com.google.android.tethering.apex]"
     }
   ],
   "imports": [

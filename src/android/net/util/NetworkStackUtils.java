@@ -242,6 +242,19 @@ public class NetworkStackUtils {
      */
     public static final String IPCLIENT_GRATUITOUS_NA_VERSION = "ipclient_gratuitous_na_version";
 
+    /**
+     * Experiment flag to enable sending Gratuitous APR and Gratuitous Neighbor Advertisement for
+     * all assigned IPv4 and IPv6 GUAs after completing L2 roaming.
+     */
+    public static final String IPCLIENT_GARP_NA_ROAMING_VERSION =
+            "ipclient_garp_na_roaming_version";
+
+    /**
+     * Experiment flag to disable accept_ra parameter when IPv6 provisioning loss happens due to
+     * the default route has gone.
+     */
+    public static final String IPCLIENT_DISABLE_ACCEPT_RA_VERSION = "ipclient_disable_accept_ra";
+
     static {
         System.loadLibrary("networkstackutilsjni");
     }
