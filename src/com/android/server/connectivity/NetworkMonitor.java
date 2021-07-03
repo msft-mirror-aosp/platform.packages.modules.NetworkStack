@@ -31,8 +31,10 @@ import static android.net.INetworkMonitor.NETWORK_VALIDATION_PROBE_HTTP;
 import static android.net.INetworkMonitor.NETWORK_VALIDATION_PROBE_HTTPS;
 import static android.net.INetworkMonitor.NETWORK_VALIDATION_PROBE_PRIVDNS;
 import static android.net.INetworkMonitor.NETWORK_VALIDATION_RESULT_PARTIAL;
+import static android.net.INetworkMonitor.NETWORK_VALIDATION_RESULT_SKIPPED;
 import static android.net.INetworkMonitor.NETWORK_VALIDATION_RESULT_VALID;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED;
+import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED;
 import static android.net.captiveportal.CaptivePortalProbeSpec.parseCaptivePortalProbeSpecs;
 import static android.net.metrics.ValidationProbeEvent.DNS_FAILURE;
 import static android.net.metrics.ValidationProbeEvent.DNS_SUCCESS;
@@ -671,6 +673,7 @@ public class NetworkMonitor extends StateMachine {
                 (Pair<LinkProperties, NetworkCapabilities>) connectedMsg.obj;
         mLinkProperties = attrs.first;
         mNetworkCapabilities = attrs.second;
+        suppressNotificationIfNetworkRestricted();
     }
 
     /**
@@ -733,6 +736,12 @@ public class NetworkMonitor extends StateMachine {
 
     private boolean isPrivateDnsValidationRequired() {
         return NetworkMonitorUtils.isPrivateDnsValidationRequired(mNetworkCapabilities);
+    }
+
+    private void suppressNotificationIfNetworkRestricted() {
+        if (!mNetworkCapabilities.hasCapability(NET_CAPABILITY_NOT_RESTRICTED)) {
+            mDontDisplaySigninNotification = true;
+        }
     }
 
     private void notifyNetworkTested(NetworkTestResultParcelable result) {
@@ -984,6 +993,7 @@ public class NetworkMonitor extends StateMachine {
                     break;
                 case EVENT_NETWORK_CAPABILITIES_CHANGED:
                     mNetworkCapabilities = (NetworkCapabilities) message.obj;
+                    suppressNotificationIfNetworkRestricted();
                     break;
                 default:
                     break;
@@ -3426,6 +3436,14 @@ public class NetworkMonitor extends StateMachine {
         }
 
         protected void reportEvaluationResult(int result, @Nullable String redirectUrl) {
+            if (!isValidationRequired() && mProbeCompleted == 0 && ShimUtils.isAtLeastS()) {
+                // If validation is not required AND no probes were attempted, the validation was
+                // skipped. Report this to ConnectivityService for ConnectivityDiagnostics, but only
+                // if the platform is Android S+, as ConnectivityService must also know how to
+                // understand this bit.
+                result |= NETWORK_VALIDATION_RESULT_SKIPPED;
+            }
+
             mEvaluationResult = result;
             mRedirectUrl = redirectUrl;
             final NetworkTestResultParcelable p = new NetworkTestResultParcelable();
