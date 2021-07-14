@@ -14,43 +14,41 @@
  * limitations under the License.
  */
 
-package com.android.networkstack.apishim;
+package com.android.networkstack.apishim.api31;
 
-import android.net.NetworkRequest;
+import android.content.Context;
 import android.os.Build;
-import android.util.Range;
+import android.provider.Settings;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
-import com.android.networkstack.apishim.common.NetworkRequestShim;
+import com.android.networkstack.apishim.common.SettingsShim;
 import com.android.networkstack.apishim.common.ShimUtils;
 
-import java.util.Set;
-
 /**
- * Implementation of {@link NetworkRequestShim} for API 31.
+ * Implementation of {@link SettingsShim} for API 31.
  */
-public class NetworkRequestShimImpl
-        extends com.android.networkstack.apishim.api30.NetworkRequestShimImpl {
-    protected NetworkRequestShimImpl() {
-        super();
-    }
+public class SettingsShimImpl
+        extends com.android.networkstack.apishim.api30.SettingsShimImpl {
+    protected SettingsShimImpl() { }
 
     /**
-     * Get a new instance of {@link NetworkRequestShim}.
+     * Get a new instance of {@link SettingsShim}.
      */
-    public static NetworkRequestShim newInstance() {
+    public static SettingsShim newInstance() {
         if (!ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.R)) {
-            return com.android.networkstack.apishim.api30.NetworkRequestShimImpl
+            return com.android.networkstack.apishim.api30.SettingsShimImpl
                     .newInstance();
         }
-        return new NetworkRequestShimImpl();
+        return new SettingsShimImpl();
     }
 
     @Override
-    public void setUids(@NonNull NetworkRequest.Builder builder,
-            @Nullable Set<Range<Integer>> uids) {
-        builder.setUids(uids);
+    public boolean checkAndNoteWriteSettingsOperation(@NonNull Context context, int uid,
+            @NonNull String callingPackage, @Nullable String callingAttributionTag,
+            boolean throwException) {
+        return Settings.checkAndNoteWriteSettingsOperation(context, uid, callingPackage,
+                callingAttributionTag, throwException);
     }
 }

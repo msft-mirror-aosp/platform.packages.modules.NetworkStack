@@ -16,6 +16,8 @@
 
 package com.android.networkstack.apishim.api30;
 
+import static com.android.modules.utils.build.SdkLevel.isAtLeastR;
+
 import android.content.Context;
 import android.net.ConnectivityManager.NetworkCallback;
 import android.net.NetworkRequest;
@@ -23,14 +25,15 @@ import android.os.Build;
 import android.os.Handler;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.RequiresApi;
 
 import com.android.networkstack.apishim.common.ConnectivityManagerShim;
-import com.android.networkstack.apishim.common.ShimUtils;
 import com.android.networkstack.apishim.common.UnsupportedApiLevelException;
 
 /**
  * Implementation of {@link ConnectivityManagerShim} for API 30.
  */
+@RequiresApi(Build.VERSION_CODES.R)
 public class ConnectivityManagerShimImpl
         extends com.android.networkstack.apishim.api29.ConnectivityManagerShimImpl {
     protected ConnectivityManagerShimImpl(Context context) {
@@ -40,8 +43,9 @@ public class ConnectivityManagerShimImpl
     /**
      * Get a new instance of {@link ConnectivityManagerShim}.
      */
+    @RequiresApi(Build.VERSION_CODES.Q)
     public static ConnectivityManagerShim newInstance(Context context) {
-        if (!ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.Q)) {
+        if (!isAtLeastR()) {
             return com.android.networkstack.apishim.api29.ConnectivityManagerShimImpl
                     .newInstance(context);
         }
@@ -54,20 +58,15 @@ public class ConnectivityManagerShimImpl
      */
     @Override
     public void requestBackgroundNetwork(@NonNull NetworkRequest request,
-            @NonNull Handler handler, @NonNull NetworkCallback networkCallback)
+            @NonNull NetworkCallback networkCallback, @NonNull Handler handler)
             throws UnsupportedApiLevelException {
         // Not supported for API 30.
         throw new UnsupportedApiLevelException("Not supported in API 30.");
     }
 
-    /**
-     * See android.net.ConnectivityManager#registerSystemDefaultNetworkCallback
-     * @throws UnsupportedApiLevelException if API is not available in this API level.
-     */
+    @NonNull
     @Override
-    public void registerSystemDefaultNetworkCallback(@NonNull NetworkCallback networkCallback,
-            @NonNull Handler handler) throws UnsupportedApiLevelException {
-        // Not supported for API 30.
-        throw new UnsupportedApiLevelException("Not supported in API 30.");
+    protected NetworkRequest.Builder makeEmptyCapabilitiesRequest() {
+        return new NetworkRequest.Builder().clearCapabilities();
     }
 }

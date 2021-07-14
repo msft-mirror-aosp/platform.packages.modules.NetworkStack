@@ -25,9 +25,14 @@ import static android.net.INetworkMonitor.NETWORK_VALIDATION_PROBE_HTTP;
 import static android.net.INetworkMonitor.NETWORK_VALIDATION_PROBE_HTTPS;
 import static android.net.INetworkMonitor.NETWORK_VALIDATION_PROBE_PRIVDNS;
 import static android.net.INetworkMonitor.NETWORK_VALIDATION_RESULT_PARTIAL;
+import static android.net.INetworkMonitor.NETWORK_VALIDATION_RESULT_SKIPPED;
 import static android.net.INetworkMonitor.NETWORK_VALIDATION_RESULT_VALID;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED;
+import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED;
+import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VCN_MANAGED;
+import static android.net.NetworkCapabilities.NET_CAPABILITY_OEM_PAID;
+import static android.net.NetworkCapabilities.NET_CAPABILITY_TRUSTED;
 import static android.net.NetworkCapabilities.TRANSPORT_CELLULAR;
 import static android.net.NetworkCapabilities.TRANSPORT_VPN;
 import static android.net.NetworkCapabilities.TRANSPORT_WIFI;
@@ -91,6 +96,7 @@ import static java.util.Collections.singletonList;
 import static java.util.stream.Collectors.toList;
 
 import android.annotation.NonNull;
+import android.annotation.SuppressLint;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.ContextWrapper;
@@ -155,6 +161,7 @@ import com.android.server.connectivity.nano.CellularData;
 import com.android.server.connectivity.nano.DnsEvent;
 import com.android.server.connectivity.nano.WifiData;
 import com.android.testutils.DevSdkIgnoreRule;
+import com.android.testutils.DevSdkIgnoreRule.IgnoreAfter;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo;
 import com.android.testutils.HandlerUtils;
 
@@ -201,6 +208,7 @@ import javax.net.ssl.SSLHandshakeException;
 
 @RunWith(AndroidJUnit4.class)
 @SmallTest
+@SuppressLint("NewApi")  // Uses hidden APIs, which the linter would identify as missing APIs.
 public class NetworkMonitorTest {
     private static final String LOCATION_HEADER = "location";
     private static final String CONTENT_TYPE_HEADER = "Content-Type";
@@ -283,7 +291,9 @@ public class NetworkMonitorTest {
     private static final int DEFAULT_DNS_TIMEOUT_THRESHOLD = 5;
 
     private static final int HANDLER_TIMEOUT_MS = 1000;
-
+    private static final int TEST_MIN_STALL_EVALUATE_INTERVAL_MS = 500;
+    private static final int STALL_EXPECTED_LAST_PROBE_TIME_MS =
+            TEST_MIN_STALL_EVALUATE_INTERVAL_MS + HANDLER_TIMEOUT_MS;
     private static final LinkProperties TEST_LINK_PROPERTIES = new LinkProperties();
 
     // Cannot have a static member for the LinkProperties with captive portal API information, as
@@ -312,6 +322,14 @@ public class NetworkMonitorTest {
 
     private static final NetworkCapabilities CELL_NO_INTERNET_CAPABILITIES =
             new NetworkCapabilities().addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR);
+
+    private static final NetworkCapabilities WIFI_OEM_PAID_CAPABILITIES =
+            new NetworkCapabilities()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .addCapability(NET_CAPABILITY_INTERNET)
+                .addCapability(NET_CAPABILITY_NOT_METERED)
+                .addCapability(NET_CAPABILITY_OEM_PAID)
+                .removeCapability(NET_CAPABILITY_NOT_RESTRICTED);
 
     /**
      * Fakes DNS responses.
@@ -543,7 +561,7 @@ public class NetworkMonitorTest {
 
         resetCallbacks();
 
-        setMinDataStallEvaluateInterval(500);
+        setMinDataStallEvaluateInterval(TEST_MIN_STALL_EVALUATE_INTERVAL_MS);
         setDataStallEvaluationType(DATA_STALL_EVALUATION_TYPE_DNS);
         setValidDataStallDnsTimeThreshold(500);
         setConsecutiveDnsTimeoutThreshold(5);
@@ -1064,6 +1082,34 @@ public class NetworkMonitorTest {
         setSslException(mHttpsConnection);
         setPortal302(mHttpConnection);
         runPortalNetworkTest();
+    }
+
+    @Test
+    public void testIsCaptivePortal_Http200EmptyResponse() throws Exception {
+        setSslException(mHttpsConnection);
+        setStatus(mHttpConnection, 200);
+        // Invalid if there is no content (can't login to an empty page)
+        runNetworkTest(VALIDATION_RESULT_INVALID, 0 /* probesSucceeded */, null);
+        verify(mCallbacks, never()).showProvisioningNotification(any(), any());
+    }
+
+    private void doCaptivePortal200ResponseTest(String expectedRedirectUrl) throws Exception {
+        setSslException(mHttpsConnection);
+        setStatus(mHttpConnection, 200);
+        doReturn(100L).when(mHttpConnection).getContentLengthLong();
+        // Redirect URL was null before S
+        runNetworkTest(VALIDATION_RESULT_PORTAL, 0 /* probesSucceeded */, expectedRedirectUrl);
+        verify(mCallbacks, timeout(HANDLER_TIMEOUT_MS)).showProvisioningNotification(any(), any());
+    }
+
+    @Test @IgnoreAfter(Build.VERSION_CODES.R)
+    public void testIsCaptivePortal_HttpProbeIs200Portal_R() throws Exception {
+        doCaptivePortal200ResponseTest(null);
+    }
+
+    @Test @IgnoreUpTo(Build.VERSION_CODES.R)
+    public void testIsCaptivePortal_HttpProbeIs200Portal() throws Exception {
+        doCaptivePortal200ResponseTest(TEST_HTTP_URL);
     }
 
     private void setupPrivateIpResponse(String privateAddr) throws Exception {
@@ -1603,7 +1649,8 @@ public class NetworkMonitorTest {
         wrappedMonitor.setLastProbeTime(SystemClock.elapsedRealtime() - 100);
         assertFalse(wrappedMonitor.isDataStall());
 
-        wrappedMonitor.setLastProbeTime(SystemClock.elapsedRealtime() - 1000);
+        wrappedMonitor.setLastProbeTime(
+                SystemClock.elapsedRealtime() - STALL_EXPECTED_LAST_PROBE_TIME_MS);
         makeDnsTimeoutEvent(wrappedMonitor, DEFAULT_DNS_TIMEOUT_THRESHOLD);
         assertTrue(wrappedMonitor.isDataStall());
         verify(mCallbacks).notifyDataStallSuspected(
@@ -1613,7 +1660,8 @@ public class NetworkMonitorTest {
     @Test
     public void testIsDataStall_EvaluationDnsWithDnsTimeoutCount() throws Exception {
         WrappedNetworkMonitor wrappedMonitor = makeCellMeteredNetworkMonitor();
-        wrappedMonitor.setLastProbeTime(SystemClock.elapsedRealtime() - 1000);
+        wrappedMonitor.setLastProbeTime(
+                SystemClock.elapsedRealtime() - STALL_EXPECTED_LAST_PROBE_TIME_MS);
         makeDnsTimeoutEvent(wrappedMonitor, 3);
         assertFalse(wrappedMonitor.isDataStall());
         // Reset consecutive timeout counts.
@@ -1631,7 +1679,8 @@ public class NetworkMonitorTest {
         // Set the value to larger than the default dns log size.
         setConsecutiveDnsTimeoutThreshold(51);
         wrappedMonitor = makeCellMeteredNetworkMonitor();
-        wrappedMonitor.setLastProbeTime(SystemClock.elapsedRealtime() - 1000);
+        wrappedMonitor.setLastProbeTime(
+                SystemClock.elapsedRealtime() - STALL_EXPECTED_LAST_PROBE_TIME_MS);
         makeDnsTimeoutEvent(wrappedMonitor, 50);
         assertFalse(wrappedMonitor.isDataStall());
 
@@ -1663,7 +1712,8 @@ public class NetworkMonitorTest {
         wrappedMonitor.setLastProbeTime(SystemClock.elapsedRealtime() - 100);
         makeDnsTimeoutEvent(wrappedMonitor, DEFAULT_DNS_TIMEOUT_THRESHOLD);
         assertFalse(wrappedMonitor.isDataStall());
-        wrappedMonitor.setLastProbeTime(SystemClock.elapsedRealtime() - 1000);
+        wrappedMonitor.setLastProbeTime(
+                SystemClock.elapsedRealtime() - STALL_EXPECTED_LAST_PROBE_TIME_MS);
         assertTrue(wrappedMonitor.isDataStall());
         verify(mCallbacks).notifyDataStallSuspected(
                 matchDnsDataStallParcelable(DEFAULT_DNS_TIMEOUT_THRESHOLD));
@@ -1674,7 +1724,8 @@ public class NetworkMonitorTest {
         wrappedMonitor.setLastProbeTime(SystemClock.elapsedRealtime() - 100);
         makeDnsTimeoutEvent(wrappedMonitor, DEFAULT_DNS_TIMEOUT_THRESHOLD);
         assertFalse(wrappedMonitor.isDataStall());
-        wrappedMonitor.setLastProbeTime(SystemClock.elapsedRealtime() - 1000);
+        wrappedMonitor.setLastProbeTime(
+                SystemClock.elapsedRealtime() - STALL_EXPECTED_LAST_PROBE_TIME_MS);
         assertFalse(wrappedMonitor.isDataStall());
     }
 
@@ -1708,7 +1759,7 @@ public class NetworkMonitorTest {
         setDataStallEvaluationType(DATA_STALL_EVALUATION_TYPE_DNS | DATA_STALL_EVALUATION_TYPE_TCP);
         setupTcpDataStall();
         final WrappedNetworkMonitor nm = makeMonitor(CELL_METERED_CAPABILITIES);
-        nm.setLastProbeTime(SystemClock.elapsedRealtime() - 1000);
+        nm.setLastProbeTime(SystemClock.elapsedRealtime() - STALL_EXPECTED_LAST_PROBE_TIME_MS);
         makeDnsTimeoutEvent(nm, DEFAULT_DNS_TIMEOUT_THRESHOLD);
         assertTrue(nm.isDataStall());
         verify(mCallbacks).notifyDataStallSuspected(
@@ -1744,11 +1795,85 @@ public class NetworkMonitorTest {
         runFailedNetworkTest();
     }
 
+    private void doValidationSkippedTest(NetworkCapabilities nc) throws Exception {
+        // For S+, the RESULT_SKIPPED bit will be included on networks that both do not require
+        // validation and for which validation is not performed.
+        final int validationResult = ShimUtils.isAtLeastS()
+                ? NETWORK_VALIDATION_RESULT_VALID | NETWORK_VALIDATION_RESULT_SKIPPED
+                : NETWORK_VALIDATION_RESULT_VALID;
+        runNetworkTest(TEST_LINK_PROPERTIES, nc, validationResult,
+                0 /* probesSucceeded */, null /* redirectUrl */);
+        verify(mCleartextDnsNetwork, never()).openConnection(any());
+    }
+
     @Test
     public void testNoInternetCapabilityValidated() throws Exception {
-        runNetworkTest(TEST_LINK_PROPERTIES, CELL_NO_INTERNET_CAPABILITIES,
-                NETWORK_VALIDATION_RESULT_VALID, 0 /* probesSucceeded */, null /* redirectUrl */);
-        verify(mCleartextDnsNetwork, never()).openConnection(any());
+        doValidationSkippedTest(CELL_NO_INTERNET_CAPABILITIES);
+    }
+
+    @Test
+    public void testNoTrustedCapabilityValidated() throws Exception {
+        final NetworkCapabilities.Builder nc = new NetworkCapabilities.Builder()
+                .addCapability(NET_CAPABILITY_INTERNET)
+                .removeCapability(NET_CAPABILITY_TRUSTED)
+                .addTransportType(TRANSPORT_CELLULAR);
+        if (ShimUtils.isAtLeastS()) {
+            nc.addCapability(NET_CAPABILITY_NOT_VCN_MANAGED);
+        }
+        doValidationSkippedTest(nc.build());
+    }
+
+    @Test
+    public void testRestrictedCapabilityValidated() throws Exception {
+        final NetworkCapabilities.Builder nc = new NetworkCapabilities.Builder()
+                .addCapability(NET_CAPABILITY_INTERNET)
+                .removeCapability(NET_CAPABILITY_NOT_RESTRICTED)
+                .addTransportType(TRANSPORT_CELLULAR);
+        if (ShimUtils.isAtLeastS()) {
+            nc.addCapability(NET_CAPABILITY_NOT_VCN_MANAGED);
+        }
+        doValidationSkippedTest(nc.build());
+    }
+
+    private NetworkCapabilities getVcnUnderlyingCarrierWifiCaps() {
+        // Must be called from within the test because NOT_VCN_MANAGED is an invalid capability
+        // value up to Android R. Thus, this must be guarded by an SDK check in tests that use this.
+        return new NetworkCapabilities.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VCN_MANAGED)
+                .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
+                .removeCapability(NetworkCapabilities.NET_CAPABILITY_TRUSTED)
+                .addCapability(NET_CAPABILITY_INTERNET)
+                .build();
+    }
+
+    @Test
+    public void testVcnUnderlyingNetwork() throws Exception {
+        assumeTrue(ShimUtils.isAtLeastS());
+        setStatus(mHttpsConnection, 204);
+        setStatus(mHttpConnection, 204);
+
+        final NetworkMonitor nm = runNetworkTest(
+                TEST_LINK_PROPERTIES, getVcnUnderlyingCarrierWifiCaps(),
+                NETWORK_VALIDATION_RESULT_VALID,
+                NETWORK_VALIDATION_PROBE_DNS | NETWORK_VALIDATION_PROBE_HTTPS,
+                null /* redirectUrl */);
+        assertEquals(NETWORK_VALIDATION_RESULT_VALID,
+                nm.getEvaluationState().getEvaluationResult());
+    }
+
+    @Test
+    public void testVcnUnderlyingNetworkBadNetwork() throws Exception {
+        assumeTrue(ShimUtils.isAtLeastS());
+        setSslException(mHttpsConnection);
+        setStatus(mHttpConnection, 500);
+        setStatus(mFallbackConnection, 404);
+
+        final NetworkMonitor nm = runNetworkTest(
+                TEST_LINK_PROPERTIES, getVcnUnderlyingCarrierWifiCaps(),
+                VALIDATION_RESULT_INVALID, 0 /* probesSucceeded */, null /* redirectUrl */);
+        assertEquals(VALIDATION_RESULT_INVALID,
+                nm.getEvaluationState().getEvaluationResult());
     }
 
     @Test
@@ -2001,7 +2126,7 @@ public class NetworkMonitorTest {
         nm.notifyNetworkConnected(TEST_LINK_PROPERTIES, nc);
         verifyNetworkTested(NETWORK_VALIDATION_RESULT_VALID,
                 NETWORK_VALIDATION_PROBE_DNS | NETWORK_VALIDATION_PROBE_HTTPS);
-        nm.setLastProbeTime(SystemClock.elapsedRealtime() - 1000);
+        nm.setLastProbeTime(SystemClock.elapsedRealtime() - STALL_EXPECTED_LAST_PROBE_TIME_MS);
         return nm;
     }
 
@@ -2023,6 +2148,8 @@ public class NetworkMonitorTest {
                 ArgumentCaptor.forClass(DataStallDetectionStats.class);
         verify(mDependencies, timeout(HANDLER_TIMEOUT_MS).times(1))
                 .writeDataStallDetectionStats(statsCaptor.capture(), probeResultCaptor.capture());
+        // Ensure probe will not stop due to rate-limiting mechanism.
+        nm.setLastProbeTime(SystemClock.elapsedRealtime() - STALL_EXPECTED_LAST_PROBE_TIME_MS);
         assertTrue(nm.isDataStall());
         assertTrue(probeResultCaptor.getValue().isSuccessful());
         verifyTestDataStallDetectionStats(evalType, transport, statsCaptor.getValue());
@@ -2593,6 +2720,65 @@ public class NetworkMonitorTest {
                         ConnectivityManager.EXTRA_CAPTIVE_PORTAL_URL).equals(TEST_LOGIN_URL)
                         && TEST_NETID == ((Network) bundle.getParcelable(
                         ConnectivityManager.EXTRA_NETWORK)).netId));
+    }
+
+    @Test
+    public void testOemPaidNetworkValidated() throws Exception {
+        setValidProbes();
+
+        final NetworkMonitor nm = runNetworkTest(TEST_LINK_PROPERTIES,
+                WIFI_OEM_PAID_CAPABILITIES,
+                NETWORK_VALIDATION_RESULT_VALID,
+                NETWORK_VALIDATION_PROBE_DNS | NETWORK_VALIDATION_PROBE_HTTPS,
+                null /* redirectUrl */);
+        assertEquals(NETWORK_VALIDATION_RESULT_VALID,
+                nm.getEvaluationState().getEvaluationResult());
+    }
+
+    @Test
+    public void testOemPaidNetwork_AllProbesFailed() throws Exception {
+        setSslException(mHttpsConnection);
+        setStatus(mHttpConnection, 500);
+        setStatus(mFallbackConnection, 404);
+
+        runNetworkTest(TEST_LINK_PROPERTIES,
+                WIFI_OEM_PAID_CAPABILITIES,
+                VALIDATION_RESULT_INVALID, 0 /* probesSucceeded */, null /* redirectUrl */);
+    }
+
+    @Test
+    public void testOemPaidNetworkNoInternetCapabilityValidated() throws Exception {
+        setSslException(mHttpsConnection);
+        setStatus(mHttpConnection, 500);
+        setStatus(mFallbackConnection, 404);
+
+        final NetworkCapabilities networkCapabilities =
+                new NetworkCapabilities(WIFI_OEM_PAID_CAPABILITIES);
+        networkCapabilities.removeCapability(NET_CAPABILITY_INTERNET);
+
+        final int validationResult = ShimUtils.isAtLeastS()
+                ? NETWORK_VALIDATION_RESULT_VALID | NETWORK_VALIDATION_RESULT_SKIPPED
+                : NETWORK_VALIDATION_RESULT_VALID;
+        runNetworkTest(TEST_LINK_PROPERTIES, networkCapabilities,
+                validationResult, 0 /* probesSucceeded */, null /* redirectUrl */);
+
+        verify(mCleartextDnsNetwork, never()).openConnection(any());
+        verify(mHttpsConnection, never()).getResponseCode();
+        verify(mHttpConnection, never()).getResponseCode();
+        verify(mFallbackConnection, never()).getResponseCode();
+    }
+
+    @Test
+    public void testOemPaidNetwork_CaptivePortalNotLaunched() throws Exception {
+        setSslException(mHttpsConnection);
+        setStatus(mFallbackConnection, 404);
+        setPortal302(mHttpConnection);
+
+        runNetworkTest(TEST_LINK_PROPERTIES, WIFI_OEM_PAID_CAPABILITIES,
+                VALIDATION_RESULT_PORTAL, 0 /* probesSucceeded */,
+                TEST_LOGIN_URL);
+
+        verify(mCallbacks, never()).showProvisioningNotification(any(), any());
     }
 
     private void setupResourceForMultipleProbes() {
