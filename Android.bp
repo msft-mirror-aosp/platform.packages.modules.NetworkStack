@@ -45,10 +45,6 @@ package {
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
-// Whether to enable the targets in this file that target current SDKs.
-// Set to false in branches like mainline-prod where API classes are too old to build current code.
-enable_current_sdk_targets = false
-
 java_defaults {
     name: "NetworkStackDevApiLevel",
     min_sdk_version: "29",
@@ -57,9 +53,14 @@ java_defaults {
 
 java_defaults {
     name: "NetworkStackReleaseApiLevel",
-    sdk_version: "system_30",
+    sdk_version: "module_31",
     min_sdk_version: "29",
-    target_sdk_version: "30",
+    target_sdk_version: "31",
+    libs: [
+        "framework-connectivity",
+        "framework-statsd",
+        "framework-wifi",
+    ]
 }
 
 // Libraries for the API shims
@@ -127,7 +128,6 @@ java_library {
 // integer so if the next SDK release happens to use that integer, we don't need to rename them.
 java_library {
     name: "NetworkStackApi31Shims",
-    enabled: enable_current_sdk_targets,
     defaults: ["NetworkStackShimsDefaults"],
     srcs: [
         "apishim/31/**/*.java",
@@ -136,6 +136,27 @@ java_library {
         "NetworkStackShimsCommon",
         "NetworkStackApi29Shims",
         "NetworkStackApi30Shims",
+        "framework-connectivity",
+    ],
+    sdk_version: "module_31",
+    visibility: ["//visibility:private"],
+}
+
+
+// Shims for APIs being added to the current development version of Android. These APIs are not
+// stable and have no defined version number. These could be called 10000, but they use the next
+// integer so if the next SDK release happens to use that integer, we don't need to rename them.
+java_library {
+    name: "NetworkStackApi32Shims",
+    defaults: ["NetworkStackShimsDefaults"],
+    srcs: [
+        "apishim/32/**/*.java",
+    ],
+    libs: [
+        "NetworkStackShimsCommon",
+        "NetworkStackApi29Shims",
+        "NetworkStackApi30Shims",
+        "NetworkStackApi31Shims",
         "framework-connectivity",
     ],
     sdk_version: "module_current",
@@ -147,13 +168,13 @@ java_library {
 // called directly by the networkstack code.
 java_library {
     name: "NetworkStackApiCurrentShims",
-    enabled: enable_current_sdk_targets,
     defaults: ["NetworkStackShimsDefaults"],
     static_libs: [
         "NetworkStackShimsCommon",
         "NetworkStackApi29Shims",
         "NetworkStackApi30Shims",
         "NetworkStackApi31Shims",
+        "NetworkStackApi32Shims",
     ],
     sdk_version: "module_current",
     visibility: [
@@ -172,9 +193,10 @@ java_library {
         "NetworkStackShimsCommon",
         "NetworkStackApi29Shims",
         "NetworkStackApi30Shims",
+        "NetworkStackApi31Shims",
     ],
     jarjar_rules: "apishim/jarjar-rules-compat.txt",
-    sdk_version: "system_30",
+    sdk_version: "module_31",
     visibility: [
         "//packages/modules/Connectivity/Tethering",
         "//packages/modules/Connectivity/tests/cts/net",
@@ -192,6 +214,7 @@ java_defaults {
     libs: ["unsupportedappusage"],
     static_libs: [
         "androidx.annotation_annotation",
+        "modules-utils-build_system",
         "netd_aidl_interface-lateststable-java",
         "netlink-client",
         "networkstack-client",
@@ -215,7 +238,6 @@ android_library {
     ],
     static_libs: ["NetworkStackApiCurrentShims"],
     manifest: "AndroidManifestBase.xml",
-    enabled: enable_current_sdk_targets,
     visibility: [
         "//frameworks/base/tests/net/integration",
         "//packages/modules/Connectivity/Tethering/tests/integration",
@@ -290,8 +312,10 @@ android_app {
     // The permission configuration *must* be included to ensure security of the device
     // The InProcessNetworkStack goes together with the PlatformCaptivePortalLogin, which replaces
     // the default CaptivePortalLogin.
-    required: ["PlatformNetworkPermissionConfig", "PlatformCaptivePortalLogin"],
-    enabled: enable_current_sdk_targets,
+    required: [
+        "PlatformNetworkPermissionConfig",
+        "PlatformCaptivePortalLogin",
+    ],
 }
 
 // Pre-merge the AndroidManifest for NetworkStackNext, so that its manifest can be merged on top
@@ -299,8 +323,7 @@ android_library {
     name: "NetworkStackNextManifestBase",
     defaults: ["NetworkStackAppDefaults", "NetworkStackDevApiLevel"],
     static_libs: ["NetworkStackApiCurrentLib"],
-    manifest: "AndroidManifest.xml",
-    enabled: enable_current_sdk_targets,
+    manifest: "AndroidManifest.xml"
 }
 
 // NetworkStack build targeting the current API release, for testing on in-development SDK
@@ -311,8 +334,10 @@ android_app {
     certificate: "networkstack",
     manifest: "AndroidManifest_Next.xml",
     // The permission configuration *must* be included to ensure security of the device
-    required: ["NetworkPermissionConfig"],
-    enabled: enable_current_sdk_targets,
+    required: [
+        "NetworkPermissionConfig",
+        "privapp_whitelist_com.android.networkstack",
+    ],
 }
 
 // Updatable network stack for finalized API
@@ -323,7 +348,10 @@ android_app {
     certificate: "networkstack",
     manifest: "AndroidManifest.xml",
     // The permission configuration *must* be included to ensure security of the device
-    required: ["NetworkPermissionConfig"],
+    required: [
+        "NetworkPermissionConfig",
+        "privapp_whitelist_com.android.networkstack",
+    ],
     updatable: true,
 }
 
@@ -400,7 +428,10 @@ android_app {
     certificate: "networkstack",
     manifest: ":NetworkStackTestAndroidManifest",
     // The permission configuration *must* be included to ensure security of the device
-    required: ["NetworkPermissionConfig"],
+    required: [
+        "NetworkPermissionConfig",
+        "privapp_whitelist_com.android.networkstack",
+    ],
 }
 
 // When adding or modifying protos, the jarjar rules and possibly proguard rules need
