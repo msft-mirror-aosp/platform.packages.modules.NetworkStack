@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.android.networkstack.apishim;
+package com.android.networkstack.apishim.api31;
 
 import static com.android.modules.utils.build.SdkLevel.isAtLeastS;
 
@@ -55,6 +55,13 @@ public class NetworkRequestShimImpl
     public void setUids(@NonNull NetworkRequest.Builder builder,
             @Nullable Set<Range<Integer>> uids) {
         builder.setUids(uids);
+    }
+
+    @Override
+    public NetworkRequest.Builder setIncludeOtherUidNetworks(NetworkRequest.Builder builder,
+            boolean include) {
+        builder.setIncludeOtherUidNetworks(include);
+        return builder;
     }
 
     @Override
