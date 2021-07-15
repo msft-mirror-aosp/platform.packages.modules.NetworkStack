@@ -36,6 +36,7 @@ import static com.android.net.module.util.NetworkStackConstants.VENDOR_SPECIFIC_
 import static com.android.server.util.PermissionUtil.enforceNetworkStackCallingPermission;
 
 import android.content.Context;
+import android.content.res.Resources;
 import android.net.ConnectivityManager;
 import android.net.DhcpResults;
 import android.net.INetd;
@@ -60,6 +61,7 @@ import android.net.metrics.IpConnectivityLog;
 import android.net.metrics.IpManagerEvent;
 import android.net.networkstack.aidl.dhcp.DhcpOption;
 import android.net.shared.InitialConfiguration;
+import android.net.shared.Layer2Information;
 import android.net.shared.ProvisioningConfiguration;
 import android.net.shared.ProvisioningConfiguration.ScanResultInfo;
 import android.net.shared.ProvisioningConfiguration.ScanResultInfo.InformationElement;
@@ -68,6 +70,7 @@ import android.net.util.NetworkStackUtils;
 import android.net.util.SharedLog;
 import android.os.Build;
 import android.os.ConditionVariable;
+import android.os.Handler;
 import android.os.IBinder;
 import android.os.Message;
 import android.os.RemoteException;
@@ -94,6 +97,7 @@ import com.android.internal.util.State;
 import com.android.internal.util.StateMachine;
 import com.android.internal.util.WakeupMessage;
 import com.android.net.module.util.DeviceConfigUtils;
+import com.android.networkstack.R;
 import com.android.networkstack.apishim.NetworkInformationShimImpl;
 import com.android.networkstack.apishim.SocketUtilsShimImpl;
 import com.android.networkstack.apishim.common.NetworkInformationShim;
@@ -145,6 +149,7 @@ import java.util.stream.Collectors;
  * @hide
  */
 public class IpClient extends StateMachine {
+    private static final String TAG = IpClient.class.getSimpleName();
     private static final boolean DBG = false;
 
     // For message logging.
@@ -592,8 +597,30 @@ public class IpClient extends StateMachine {
             return new IpConnectivityLog();
         }
 
+        /**
+         * Get a NetworkQuirkMetrics instance.
+         */
         public NetworkQuirkMetrics getNetworkQuirkMetrics() {
             return new NetworkQuirkMetrics();
+        }
+
+        /**
+         * Get a IpReachabilityMonitor instance.
+         */
+        public IpReachabilityMonitor getIpReachabilityMonitor(Context context,
+                InterfaceParams ifParams, Handler h, SharedLog log,
+                IpReachabilityMonitor.Callback callback, boolean usingMultinetworkPolicyTracker,
+                IpReachabilityMonitor.Dependencies deps, final INetd netd) {
+            return new IpReachabilityMonitor(context, ifParams, h, log, callback,
+                    usingMultinetworkPolicyTracker, deps, netd);
+        }
+
+        /**
+         * Get a IpReachabilityMonitor dependencies instance.
+         */
+        public IpReachabilityMonitor.Dependencies getIpReachabilityMonitorDeps(Context context,
+                String name) {
+            return IpReachabilityMonitor.Dependencies.makeDefault(context, name);
         }
 
         /**
@@ -604,6 +631,16 @@ public class IpClient extends StateMachine {
                 boolean defaultEnabled) {
             return DeviceConfigUtils.isFeatureEnabled(context, NAMESPACE_CONNECTIVITY, name,
                     defaultEnabled);
+        }
+
+        /**
+         * Create an APF filter if apfCapabilities indicates support for packet filtering using
+         * APF programs.
+         * @see ApfFilter#maybeCreate
+         */
+        public ApfFilter maybeCreateApfFilter(Context context, ApfFilter.ApfConfiguration config,
+                InterfaceParams ifParams, IpClientCallbacksWrapper cb) {
+            return ApfFilter.maybeCreate(context, config, ifParams, cb);
         }
     }
 
@@ -860,26 +897,28 @@ public class IpClient extends StateMachine {
                 false /* defaultEnabled */);
     }
 
-    private void setInitialBssid(final ProvisioningConfiguration req) {
-        final ScanResultInfo scanResultInfo = req.mScanResultInfo;
-        mCurrentBssid = null;
+    @VisibleForTesting
+    static MacAddress getInitialBssid(final Layer2Information layer2Info,
+            final ScanResultInfo scanResultInfo, boolean isAtLeastS) {
+        MacAddress bssid = null;
         // http://b/185202634
         // ScanResultInfo is not populated in some situations.
         // On S and above, prefer getting the BSSID from the Layer2Info.
         // On R and below, get the BSSID from the ScanResultInfo and fall back to
         // getting it from the Layer2Info. This ensures no regressions if any R
         // devices pass in a null or meaningless BSSID in the Layer2Info.
-        if (!ShimUtils.isAtLeastS() && scanResultInfo != null) {
+        if (!isAtLeastS && scanResultInfo != null) {
             try {
-                mCurrentBssid = MacAddress.fromString(scanResultInfo.getBssid());
+                bssid = MacAddress.fromString(scanResultInfo.getBssid());
             } catch (IllegalArgumentException e) {
-                Log.wtf(mTag, "Invalid BSSID: " + scanResultInfo.getBssid()
+                Log.wtf(TAG, "Invalid BSSID: " + scanResultInfo.getBssid()
                         + " in provisioning configuration", e);
             }
         }
-        if (mCurrentBssid == null && req.mLayer2Info != null) {
-            mCurrentBssid = req.mLayer2Info.mBssid;
+        if (bssid == null && layer2Info != null) {
+            bssid = layer2Info.mBssid;
         }
+        return bssid;
     }
 
     private boolean shouldDisableAcceptRaOnProvisioningLoss() {
@@ -910,7 +949,8 @@ public class IpClient extends StateMachine {
             return;
         }
 
-        setInitialBssid(req);
+        mCurrentBssid = getInitialBssid(req.mLayer2Info, req.mScanResultInfo,
+                ShimUtils.isAtLeastS());
         if (req.mLayer2Info != null) {
             mL2Key = req.mLayer2Info.mL2Key;
             mCluster = req.mLayer2Info.mCluster;
@@ -1759,7 +1799,7 @@ public class IpClient extends StateMachine {
 
     private boolean startIpReachabilityMonitor() {
         try {
-            mIpReachabilityMonitor = new IpReachabilityMonitor(
+            mIpReachabilityMonitor = mDependencies.getIpReachabilityMonitor(
                     mContext,
                     mInterfaceParams,
                     getHandler(),
@@ -1771,6 +1811,7 @@ public class IpClient extends StateMachine {
                         }
                     },
                     mConfiguration.mUsingMultinetworkPolicyTracker,
+                    mDependencies.getIpReachabilityMonitorDeps(mContext, mInterfaceParams.name),
                     mNetd);
         } catch (IllegalArgumentException iae) {
             // Failed to start IpReachabilityMonitor. Log it and call
@@ -2195,10 +2236,19 @@ public class IpClient extends StateMachine {
             apfConfig.apfCapabilities = mConfiguration.mApfCapabilities;
             apfConfig.multicastFilter = mMulticastFiltering;
             // Get the Configuration for ApfFilter from Context
-            apfConfig.ieee802_3Filter = ApfCapabilities.getApfDrop8023Frames();
-            apfConfig.ethTypeBlackList = ApfCapabilities.getApfEtherTypeBlackList();
+            // Resource settings were moved from ApfCapabilities APIs to NetworkStack resources in S
+            if (ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.R)) {
+                final Resources res = mContext.getResources();
+                apfConfig.ieee802_3Filter = res.getBoolean(R.bool.config_apfDrop802_3Frames);
+                apfConfig.ethTypeBlackList = res.getIntArray(R.array.config_apfEthTypeDenyList);
+            } else {
+                apfConfig.ieee802_3Filter = ApfCapabilities.getApfDrop8023Frames();
+                apfConfig.ethTypeBlackList = ApfCapabilities.getApfEtherTypeBlackList();
+            }
+
             apfConfig.minRdnssLifetimeSec = mMinRdnssLifetimeSec;
-            mApfFilter = ApfFilter.maybeCreate(mContext, apfConfig, mInterfaceParams, mCallback);
+            mApfFilter = mDependencies.maybeCreateApfFilter(mContext, apfConfig, mInterfaceParams,
+                    mCallback);
             // TODO: investigate the effects of any multicast filtering racing/interfering with the
             // rest of this IP configuration startup.
             if (mApfFilter == null) {
