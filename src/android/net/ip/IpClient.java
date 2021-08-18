@@ -18,6 +18,9 @@ package android.net.ip;
 
 import static android.net.RouteInfo.RTN_UNICAST;
 import static android.net.dhcp.DhcpResultsParcelableUtil.toStableParcelable;
+import static android.net.ip.IIpClient.PROV_IPV4_DISABLED;
+import static android.net.ip.IIpClient.PROV_IPV6_DISABLED;
+import static android.net.ip.IIpClient.PROV_IPV6_LINKLOCAL;
 import static android.net.util.NetworkStackUtils.IPCLIENT_DISABLE_ACCEPT_RA_VERSION;
 import static android.net.util.NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION;
 import static android.net.util.NetworkStackUtils.IPCLIENT_GRATUITOUS_NA_VERSION;
@@ -395,6 +398,24 @@ public class IpClient extends StateMachine {
                 mCallback.onPreconnectionStart(packets);
             } catch (RemoteException e) {
                 log("Failed to call onPreconnectionStart", e);
+            }
+        }
+
+        /**
+         * Get the version of the IIpClientCallbacks AIDL interface.
+         */
+        public int getInterfaceVersion() {
+            log("getInterfaceVersion");
+            try {
+                return mCallback.getInterfaceVersion();
+            } catch (RemoteException e) {
+                // This can never happen for callers in the system server, because if the
+                // system server crashes, then the networkstack will crash as well. But it can
+                // happen for other callers such as bluetooth or telephony (if it starts to use
+                // IpClient). 0 will generally work but will assume an old client and disable
+                // all new features.
+                log("Failed to call getInterfaceVersion", e);
+                return 0;
             }
         }
     }
@@ -795,7 +816,8 @@ public class IpClient extends StateMachine {
         @Override
         public void startProvisioning(ProvisioningConfigurationParcelable req) {
             enforceNetworkStackCallingPermission();
-            IpClient.this.startProvisioning(ProvisioningConfiguration.fromStableParcelable(req));
+            IpClient.this.startProvisioning(ProvisioningConfiguration.fromStableParcelable(req,
+                    mCallback.getInterfaceVersion()));
         }
         @Override
         public void stop() {
@@ -1227,12 +1249,41 @@ public class IpClient extends StateMachine {
         transitionTo(mStoppingState);
     }
 
+    private static boolean hasIpv6LinkLocalInterfaceRoute(final LinkProperties lp) {
+        for (RouteInfo r : lp.getRoutes()) {
+            if (r.getDestination().equals(new IpPrefix("fe80::/64"))
+                    && r.getGateway().isAnyLocalAddress()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasIpv6LinkLocalAddress(final LinkProperties lp) {
+        for (LinkAddress address : lp.getLinkAddresses()) {
+            if (address.isIpv6() && address.getAddress().isLinkLocalAddress()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // LinkProperties has a link-local (fe80::xxx) IPv6 address and route to fe80::/64 destination.
+    private boolean isIpv6LinkLocalProvisioned(final LinkProperties lp) {
+        if (mConfiguration == null
+                || mConfiguration.mIPv6ProvisioningMode != PROV_IPV6_LINKLOCAL) return false;
+        if (hasIpv6LinkLocalAddress(lp) && hasIpv6LinkLocalInterfaceRoute(lp)) return true;
+        return false;
+    }
+
     // For now: use WifiStateMachine's historical notion of provisioned.
     @VisibleForTesting
-    static boolean isProvisioned(LinkProperties lp, InitialConfiguration config) {
-        // For historical reasons, we should connect even if all we have is
-        // an IPv4 address and nothing else.
-        if (lp.hasIpv4Address() || lp.isProvisioned()) {
+    boolean isProvisioned(final LinkProperties lp, final InitialConfiguration config) {
+        // For historical reasons, we should connect even if all we have is an IPv4
+        // address and nothing else. If IPv6 link-local only mode is enabled and
+        // it's provisioned without IPv4, then still connecting once IPv6 link-local
+        // address is ready to use and route to fe80::/64 destination is up.
+        if (lp.hasIpv4Address() || lp.isProvisioned() || isIpv6LinkLocalProvisioned(lp)) {
             return true;
         }
         if (config == null) {
@@ -1893,7 +1944,7 @@ public class IpClient extends StateMachine {
         }
 
         if (mIpReachabilityMonitor != null) {
-            mIpReachabilityMonitor.probeAll();
+            mIpReachabilityMonitor.probeAll(true /* dueToRoam */);
         }
 
         // Check whether to refresh previous IP lease on L2 roaming happened.
@@ -1990,6 +2041,9 @@ public class IpClient extends StateMachine {
             if (mDhcpClient == null) {
                 // There's no DHCPv4 for which to wait; proceed to stopped.
                 deferMessage(obtainMessage(CMD_JUMP_STOPPING_TO_STOPPED));
+            } else {
+                mDhcpClient.sendMessage(DhcpClient.CMD_STOP_DHCP);
+                mDhcpClient.doQuit();
             }
 
             // Restore the interface MTU to initial value if it has changed.
@@ -2226,6 +2280,14 @@ public class IpClient extends StateMachine {
         }
     }
 
+    private boolean isIpv6Enabled() {
+        return mConfiguration.mIPv6ProvisioningMode != PROV_IPV6_DISABLED;
+    }
+
+    private boolean isIpv4Enabled() {
+        return mConfiguration.mIPv4ProvisioningMode != PROV_IPV4_DISABLED;
+    }
+
     class RunningState extends State {
         private ConnectivityPacketTracker mPacketTracker;
         private boolean mDhcpActionInFlight;
@@ -2258,13 +2320,13 @@ public class IpClient extends StateMachine {
             mPacketTracker = createPacketTracker();
             if (mPacketTracker != null) mPacketTracker.start(mConfiguration.mDisplayName);
 
-            if (mConfiguration.mEnableIPv6 && !startIPv6()) {
+            if (isIpv6Enabled() && !startIPv6()) {
                 doImmediateProvisioningFailure(IpManagerEvent.ERROR_STARTING_IPV6);
                 enqueueJumpToStoppingState(DisconnectCode.DC_ERROR_STARTING_IPV6);
                 return;
             }
 
-            if (mConfiguration.mEnableIPv4 && !isUsingPreconnection() && !startIPv4()) {
+            if (isIpv4Enabled() && !isUsingPreconnection() && !startIPv4()) {
                 doImmediateProvisioningFailure(IpManagerEvent.ERROR_STARTING_IPV4);
                 enqueueJumpToStoppingState(DisconnectCode.DC_ERROR_STARTING_IPV4);
                 return;
@@ -2293,11 +2355,6 @@ public class IpClient extends StateMachine {
             if (mIpReachabilityMonitor != null) {
                 mIpReachabilityMonitor.stop();
                 mIpReachabilityMonitor = null;
-            }
-
-            if (mDhcpClient != null) {
-                mDhcpClient.sendMessage(DhcpClient.CMD_STOP_DHCP);
-                mDhcpClient.doQuit();
             }
 
             if (mPacketTracker != null) {
@@ -2362,7 +2419,7 @@ public class IpClient extends StateMachine {
                     // a DHCPv4 RENEW.  We used to do this on Wi-Fi framework
                     // roams.
                     if (mIpReachabilityMonitor != null) {
-                        mIpReachabilityMonitor.probeAll();
+                        mIpReachabilityMonitor.probeAll(false /* dueToRoam */);
                     }
                     break;
 
