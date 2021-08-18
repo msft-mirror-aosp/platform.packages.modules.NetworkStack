@@ -30,6 +30,7 @@ import static android.net.dhcp.DhcpResultsParcelableUtil.fromStableParcelable;
 import static android.net.ip.IpReachabilityMonitor.MIN_NUD_SOLICIT_NUM;
 import static android.net.ip.IpReachabilityMonitor.NUD_MCAST_RESOLICIT_NUM;
 import static android.net.ipmemorystore.Status.SUCCESS;
+import static android.net.shared.ProvisioningConfiguration.VERSION_ADDED_PROVISIONING_ENUM;
 import static android.system.OsConstants.ETH_P_IPV6;
 import static android.system.OsConstants.IFA_F_TEMPORARY;
 import static android.system.OsConstants.IPPROTO_ICMPV6;
@@ -56,6 +57,7 @@ import static com.android.net.module.util.NetworkStackConstants.NEIGHBOR_ADVERTI
 import static com.android.net.module.util.NetworkStackConstants.NEIGHBOR_ADVERTISEMENT_FLAG_SOLICITED;
 import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_AUTONOMOUS;
 import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_ON_LINK;
+import static com.android.testutils.MiscAsserts.assertThrows;
 
 import static junit.framework.Assert.fail;
 
@@ -106,6 +108,7 @@ import android.net.LinkAddress;
 import android.net.LinkProperties;
 import android.net.MacAddress;
 import android.net.NetworkStackIpMemoryStore;
+import android.net.RouteInfo;
 import android.net.TestNetworkInterface;
 import android.net.TestNetworkManager;
 import android.net.Uri;
@@ -119,7 +122,6 @@ import android.net.ip.IpNeighborMonitor.NeighborEventConsumer;
 import android.net.ipmemorystore.NetworkAttributes;
 import android.net.ipmemorystore.OnNetworkAttributesRetrievedListener;
 import android.net.ipmemorystore.Status;
-import android.net.netlink.StructNdOptPref64;
 import android.net.networkstack.TestNetworkStackServiceClient;
 import android.net.networkstack.aidl.dhcp.DhcpOption;
 import android.net.shared.Layer2Information;
@@ -150,6 +152,7 @@ import com.android.internal.util.HexDump;
 import com.android.internal.util.StateMachine;
 import com.android.net.module.util.ArrayTrackRecord;
 import com.android.net.module.util.Ipv6Utils;
+import com.android.net.module.util.netlink.StructNdOptPref64;
 import com.android.net.module.util.structs.LlaOption;
 import com.android.net.module.util.structs.PrefixInformationOption;
 import com.android.net.module.util.structs.RdnssOption;
@@ -158,6 +161,7 @@ import com.android.networkstack.apishim.ConstantsShim;
 import com.android.networkstack.apishim.common.ShimUtils;
 import com.android.networkstack.arp.ArpPacket;
 import com.android.networkstack.metrics.IpProvisioningMetrics;
+import com.android.networkstack.metrics.IpReachabilityMonitorMetrics;
 import com.android.networkstack.metrics.NetworkQuirkMetrics;
 import com.android.networkstack.packets.NeighborAdvertisement;
 import com.android.networkstack.packets.NeighborSolicitation;
@@ -274,6 +278,7 @@ public abstract class IpClientIntegrationTestCommon {
     @Mock private PowerManager.WakeLock mTimeoutWakeLock;
     @Mock protected NetworkStackIpMemoryStore mIpMemoryStore;
     @Mock private NetworkQuirkMetrics.Dependencies mNetworkQuirkMetricsDeps;
+    @Mock private IpReachabilityMonitorMetrics mIpReachabilityMonitorMetrics;
     @Mock protected IpReachabilityMonitor.Callback mCallback;
 
     @Spy private INetd mNetd;
@@ -482,6 +487,10 @@ public abstract class IpClientIntegrationTestCommon {
                         boolean defaultEnabled) {
                     return Dependencies.this.isFeatureEnabled(context, name, defaultEnabled);
                 }
+
+                public IpReachabilityMonitorMetrics getIpReachabilityMonitorMetrics() {
+                    return mIpReachabilityMonitorMetrics;
+                }
             };
         }
 
@@ -570,6 +579,7 @@ public abstract class IpClientIntegrationTestCommon {
         when(mContext.getContentResolver()).thenReturn(mContentResolver);
         when(mNetworkStackServiceManager.getIpMemoryStoreService())
                 .thenReturn(mIpMemoryStoreService);
+        when(mCb.getInterfaceVersion()).thenReturn(VERSION_ADDED_PROVISIONING_ENUM);
 
         mDependencies.setDeviceConfigProperty(IpClient.CONFIG_MIN_RDNSS_LIFETIME, 67);
         mDependencies.setDeviceConfigProperty(DhcpClient.DHCP_RESTART_CONFIG_DELAY, 10);
@@ -2075,6 +2085,52 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
+    @SignatureRequiredTest(reason = "needs mocked alarm and access to IpClient handler thread")
+    public void testDhcpClientPreconnection_DelayedAbortAndTransitToStoppedState()
+            throws Exception {
+        ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
+                .withoutIpReachabilityMonitor()
+                .withPreconnection()
+                .build();
+        setDhcpFeatures(false /* isDhcpLeaseCacheEnabled */, false /* shouldReplyRapidCommitAck */,
+                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+        startIpClientProvisioning(config);
+        assertDiscoverPacketOnPreconnectionStart();
+
+        // IpClient is in the PreconnectingState, simulate provisioning timeout event
+        // and force IpClient state machine transit to StoppingState.
+        final ArgumentCaptor<LinkProperties> captor = ArgumentCaptor.forClass(LinkProperties.class);
+        final OnAlarmListener alarm = expectAlarmSet(null /* inOrder */, "TIMEOUT", 18,
+                mIpc.getHandler());
+        mIpc.getHandler().post(() -> alarm.onAlarm());
+
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningFailure(captor.capture());
+        final LinkProperties lp = captor.getValue();
+        assertNotNull(lp);
+        assertEquals(mIfaceName, lp.getInterfaceName());
+        assertEquals(0, lp.getLinkAddresses().size());
+        assertEquals(0, lp.getRoutes().size());
+        assertEquals(0, lp.getMtu());
+        assertEquals(0, lp.getDnsServers().size());
+
+        // Send preconnection abort message, but IpClient should ignore it at this moment and
+        // transit to StoppedState finally.
+        mIpc.notifyPreconnectionComplete(false /* abort */);
+        mIpc.stop();
+        HandlerUtils.waitForIdle(mIpc.getHandler(), TEST_TIMEOUT_MS);
+
+        reset(mCb);
+
+        // Start provisioning again to verify IpClient can process CMD_START correctly at
+        // StoppedState.
+        startIpClientProvisioning(false /* isDhcpLeaseCacheEnabled */,
+                false /* shouldReplyRapidCommitAck */, false /* isPreConnectionEnabled */,
+                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+        final DhcpPacket discover = getNextDhcpPacket();
+        assertTrue(discover instanceof DhcpDiscoverPacket);
+    }
+
+    @Test
     public void testDhcpDecline_conflictByArpReply() throws Exception {
         doIpAddressConflictDetectionTest(true /* causeIpAddressConflict */,
                 false /* shouldReplyRapidCommitAck */, true /* isDhcpIpConflictDetectEnabled */,
@@ -3411,5 +3467,40 @@ public abstract class IpClientIntegrationTestCommon {
                 ns.ipv6Hdr.srcIp /* dstIp */, flag, ROUTER_LINK_LOCAL /* target */);
         mPacketReader.sendResponse(na);
         assertNotifyNeighborLost(ROUTER_LINK_LOCAL /* targetIp */);
+    }
+
+    @Test
+    public void testIPv6LinkLocalOnly() throws Exception {
+        ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
+                .withoutIPv4()
+                .withIpv6LinkLocalOnly()
+                .withRandomMacAddress()
+                .build();
+        startIpClientProvisioning(config);
+
+        final ArgumentCaptor<LinkProperties> captor = ArgumentCaptor.forClass(LinkProperties.class);
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningSuccess(captor.capture());
+        final LinkProperties lp = captor.getValue();
+        assertNotNull(lp);
+        assertEquals(0, lp.getDnsServers().size());
+        final List<LinkAddress> addresses = lp.getLinkAddresses();
+        assertEquals(1, addresses.size());
+        assertTrue(addresses.get(0).getAddress().isLinkLocalAddress());
+        assertEquals(1, lp.getRoutes().size());
+        final RouteInfo route = lp.getRoutes().get(0);
+        assertNotNull(route);
+        assertTrue(route.getDestination().equals(new IpPrefix("fe80::/64")));
+        assertTrue(route.getGateway().isAnyLocalAddress());
+    }
+
+    @Test
+    public void testIPv6LinkLocalOnly_enableBothIPv4andIPv6LinkLocalOnly() throws Exception {
+        assertThrows(IllegalArgumentException.class,
+                () -> new ProvisioningConfiguration.Builder()
+                        .withoutIpReachabilityMonitor()
+                        .withIpv6LinkLocalOnly()
+                        .withRandomMacAddress()
+                        .build()
+        );
     }
 }
