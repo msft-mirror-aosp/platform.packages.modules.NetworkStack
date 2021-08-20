@@ -115,6 +115,7 @@ public class IpClientTest {
     private static final String TEST_CLUSTER = "some cluster";
     private static final String TEST_SSID = "test_ssid";
     private static final String TEST_BSSID = "00:11:22:33:44:55";
+    private static final String TEST_BSSID2 = "00:1A:11:22:33:44";
 
     private static final String TEST_GLOBAL_ADDRESS = "1234:4321::548d:2db2:4fcf:ef75/64";
     private static final String[] TEST_LOCAL_ADDRESSES = {
@@ -430,6 +431,7 @@ public class IpClientTest {
 
     @Test
     public void testIsProvisioned() throws Exception {
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
         InitialConfiguration empty = conf(links(), prefixes());
         IsProvisionedTestCase[] testcases = {
             // nothing
@@ -461,7 +463,7 @@ public class IpClientTest {
         };
 
         for (IsProvisionedTestCase testcase : testcases) {
-            if (IpClient.isProvisioned(testcase.lp, testcase.config) != testcase.isProvisioned) {
+            if (ipc.isProvisioned(testcase.lp, testcase.config) != testcase.isProvisioned) {
                 fail(testcase.errorMessage());
             }
         }
@@ -735,7 +737,18 @@ public class IpClientTest {
         final IpClient ipc = makeIpClient(TEST_IFNAME);
         final Layer2Information layer2Info = new Layer2Information(TEST_L2KEY, TEST_CLUSTER,
                 MacAddress.fromString(TEST_BSSID));
-        final MacAddress bssid = ipc.getInitialBssid(layer2Info, null /* ScanReqsultInfo */,
+        final ScanResultInfo scanResultInfo = makeScanResultInfo(TEST_SSID, TEST_BSSID2);
+        final MacAddress bssid = ipc.getInitialBssid(layer2Info, scanResultInfo,
+                true /* isAtLeastS */);
+        assertEquals(bssid, MacAddress.fromString(TEST_BSSID));
+    }
+
+    @Test
+    public void testGetInitialBssidOnSOrAbove_NullScanReqsultInfo() throws Exception {
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
+        final Layer2Information layer2Info = new Layer2Information(TEST_L2KEY, TEST_CLUSTER,
+                MacAddress.fromString(TEST_BSSID));
+        final MacAddress bssid = ipc.getInitialBssid(layer2Info, null /* ScanResultInfo */,
                 true /* isAtLeastS */);
         assertEquals(bssid, MacAddress.fromString(TEST_BSSID));
     }
@@ -764,7 +777,7 @@ public class IpClientTest {
     public void testGetInitialBssidBeforeS() throws Exception {
         final IpClient ipc = makeIpClient(TEST_IFNAME);
         final Layer2Information layer2Info = new Layer2Information(TEST_L2KEY, TEST_CLUSTER,
-                MacAddress.fromString(TEST_BSSID));
+                MacAddress.fromString(TEST_BSSID2));
         final ScanResultInfo scanResultInfo = makeScanResultInfo(TEST_SSID, TEST_BSSID);
         final MacAddress bssid = ipc.getInitialBssid(layer2Info, scanResultInfo,
                 false /* isAtLeastS */);
