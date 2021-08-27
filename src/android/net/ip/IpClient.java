@@ -18,12 +18,28 @@ package android.net.ip;
 
 import static android.net.RouteInfo.RTN_UNICAST;
 import static android.net.dhcp.DhcpResultsParcelableUtil.toStableParcelable;
+import static android.net.ip.IIpClient.PROV_IPV4_DISABLED;
+import static android.net.ip.IIpClient.PROV_IPV6_DISABLED;
+import static android.net.ip.IIpClient.PROV_IPV6_LINKLOCAL;
+import static android.net.util.NetworkStackUtils.IPCLIENT_DISABLE_ACCEPT_RA_VERSION;
+import static android.net.util.NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION;
+import static android.net.util.NetworkStackUtils.IPCLIENT_GRATUITOUS_NA_VERSION;
+import static android.net.util.SocketUtils.makePacketSocketAddress;
 import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
+import static android.system.OsConstants.AF_PACKET;
+import static android.system.OsConstants.ETH_P_ARP;
+import static android.system.OsConstants.ETH_P_IPV6;
+import static android.system.OsConstants.SOCK_NONBLOCK;
+import static android.system.OsConstants.SOCK_RAW;
 
+import static com.android.net.module.util.NetworkStackConstants.ARP_REPLY;
+import static com.android.net.module.util.NetworkStackConstants.ETHER_BROADCAST;
+import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ALL_ROUTERS_MULTICAST;
 import static com.android.net.module.util.NetworkStackConstants.VENDOR_SPECIFIC_IE_ID;
 import static com.android.server.util.PermissionUtil.enforceNetworkStackCallingPermission;
 
 import android.content.Context;
+import android.content.res.Resources;
 import android.net.ConnectivityManager;
 import android.net.DhcpResults;
 import android.net.INetd;
@@ -48,19 +64,25 @@ import android.net.metrics.IpConnectivityLog;
 import android.net.metrics.IpManagerEvent;
 import android.net.networkstack.aidl.dhcp.DhcpOption;
 import android.net.shared.InitialConfiguration;
+import android.net.shared.Layer2Information;
 import android.net.shared.ProvisioningConfiguration;
 import android.net.shared.ProvisioningConfiguration.ScanResultInfo;
 import android.net.shared.ProvisioningConfiguration.ScanResultInfo.InformationElement;
 import android.net.util.InterfaceParams;
+import android.net.util.NetworkStackUtils;
 import android.net.util.SharedLog;
 import android.os.Build;
 import android.os.ConditionVariable;
+import android.os.Handler;
 import android.os.IBinder;
 import android.os.Message;
 import android.os.RemoteException;
 import android.os.ServiceSpecificException;
 import android.os.SystemClock;
 import android.stats.connectivity.DisconnectCode;
+import android.stats.connectivity.NetworkQuirkEvent;
+import android.system.ErrnoException;
+import android.system.Os;
 import android.text.TextUtils;
 import android.util.LocalLog;
 import android.util.Log;
@@ -78,17 +100,26 @@ import com.android.internal.util.State;
 import com.android.internal.util.StateMachine;
 import com.android.internal.util.WakeupMessage;
 import com.android.net.module.util.DeviceConfigUtils;
+import com.android.networkstack.R;
 import com.android.networkstack.apishim.NetworkInformationShimImpl;
+import com.android.networkstack.apishim.SocketUtilsShimImpl;
 import com.android.networkstack.apishim.common.NetworkInformationShim;
 import com.android.networkstack.apishim.common.ShimUtils;
+import com.android.networkstack.arp.ArpPacket;
 import com.android.networkstack.metrics.IpProvisioningMetrics;
+import com.android.networkstack.metrics.NetworkQuirkMetrics;
+import com.android.networkstack.packets.NeighborAdvertisement;
 import com.android.server.NetworkObserverRegistry;
 import com.android.server.NetworkStackService.NetworkStackServiceManager;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
+import java.net.Inet4Address;
+import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.MalformedURLException;
+import java.net.SocketAddress;
+import java.net.SocketException;
 import java.net.URL;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
@@ -121,6 +152,7 @@ import java.util.stream.Collectors;
  * @hide
  */
 public class IpClient extends StateMachine {
+    private static final String TAG = IpClient.class.getSimpleName();
     private static final boolean DBG = false;
 
     // For message logging.
@@ -134,6 +166,7 @@ public class IpClient extends StateMachine {
     private final NetworkStackIpMemoryStore mIpMemoryStore;
     private final NetworkInformationShim mShim = NetworkInformationShimImpl.newInstance();
     private final IpProvisioningMetrics mIpProvisioningMetrics = new IpProvisioningMetrics();
+    private final NetworkQuirkMetrics mNetworkQuirkMetrics;
 
     /**
      * Dump all state machine and connectivity packet logs to the specified writer.
@@ -367,6 +400,24 @@ public class IpClient extends StateMachine {
                 log("Failed to call onPreconnectionStart", e);
             }
         }
+
+        /**
+         * Get the version of the IIpClientCallbacks AIDL interface.
+         */
+        public int getInterfaceVersion() {
+            log("getInterfaceVersion");
+            try {
+                return mCallback.getInterfaceVersion();
+            } catch (RemoteException e) {
+                // This can never happen for callers in the system server, because if the
+                // system server crashes, then the networkstack will crash as well. But it can
+                // happen for other callers such as bluetooth or telephony (if it starts to use
+                // IpClient). 0 will generally work but will assume an old client and disable
+                // all new features.
+                log("Failed to call getInterfaceVersion", e);
+                return 0;
+            }
+        }
     }
 
     public static final String DUMP_ARG_CONFIRM = "confirm";
@@ -479,6 +530,8 @@ public class IpClient extends StateMachine {
     private final MessageHandlingLogger mMsgStateLogger;
     private final IpConnectivityLog mMetricsLog;
     private final InterfaceController mInterfaceCtrl;
+    // Set of IPv6 addresses for which unsolicited gratuitous NA packets have been sent.
+    private final Set<Inet6Address> mGratuitousNaTargetAddresses = new HashSet<>();
 
     // Ignore nonzero RDNSS option lifetimes below this value. 0 = disabled.
     private final int mMinRdnssLifetimeSec;
@@ -501,7 +554,7 @@ public class IpClient extends StateMachine {
     private boolean mMulticastFiltering;
     private long mStartTimeMillis;
     private MacAddress mCurrentBssid;
-    private boolean mHasDisabledIPv6OnProvLoss;
+    private boolean mHasDisabledIpv6OrAcceptRaOnProvLoss;
 
     /**
      * Reading the snapshot is an asynchronous operation initiated by invoking
@@ -564,6 +617,52 @@ public class IpClient extends StateMachine {
         public IpConnectivityLog getIpConnectivityLog() {
             return new IpConnectivityLog();
         }
+
+        /**
+         * Get a NetworkQuirkMetrics instance.
+         */
+        public NetworkQuirkMetrics getNetworkQuirkMetrics() {
+            return new NetworkQuirkMetrics();
+        }
+
+        /**
+         * Get a IpReachabilityMonitor instance.
+         */
+        public IpReachabilityMonitor getIpReachabilityMonitor(Context context,
+                InterfaceParams ifParams, Handler h, SharedLog log,
+                IpReachabilityMonitor.Callback callback, boolean usingMultinetworkPolicyTracker,
+                IpReachabilityMonitor.Dependencies deps, final INetd netd) {
+            return new IpReachabilityMonitor(context, ifParams, h, log, callback,
+                    usingMultinetworkPolicyTracker, deps, netd);
+        }
+
+        /**
+         * Get a IpReachabilityMonitor dependencies instance.
+         */
+        public IpReachabilityMonitor.Dependencies getIpReachabilityMonitorDeps(Context context,
+                String name) {
+            return IpReachabilityMonitor.Dependencies.makeDefault(context, name);
+        }
+
+        /**
+         * Return whether a feature guarded by a feature flag is enabled.
+         * @see NetworkStackUtils#isFeatureEnabled(Context, String, String)
+         */
+        public boolean isFeatureEnabled(final Context context, final String name,
+                boolean defaultEnabled) {
+            return DeviceConfigUtils.isFeatureEnabled(context, NAMESPACE_CONNECTIVITY, name,
+                    defaultEnabled);
+        }
+
+        /**
+         * Create an APF filter if apfCapabilities indicates support for packet filtering using
+         * APF programs.
+         * @see ApfFilter#maybeCreate
+         */
+        public ApfFilter maybeCreateApfFilter(Context context, ApfFilter.ApfConfiguration config,
+                InterfaceParams ifParams, IpClientCallbacksWrapper cb) {
+            return ApfFilter.maybeCreate(context, config, ifParams, cb);
+        }
     }
 
     public IpClient(Context context, String ifName, IIpClientCallbacks callback,
@@ -586,6 +685,7 @@ public class IpClient extends StateMachine {
         mClatInterfaceName = CLAT_PREFIX + ifName;
         mDependencies = deps;
         mMetricsLog = deps.getIpConnectivityLog();
+        mNetworkQuirkMetrics = deps.getNetworkQuirkMetrics();
         mShutdownLatch = new CountDownLatch(1);
         mCm = mContext.getSystemService(ConnectivityManager.class);
         mObserverRegistry = observerRegistry;
@@ -647,6 +747,21 @@ public class IpClient extends StateMachine {
                 logMsg(msg);
             }
 
+            @Override
+            public void onInterfaceAddressRemoved(LinkAddress address, String iface) {
+                super.onInterfaceAddressRemoved(address, iface);
+                if (!mInterfaceName.equals(iface)) return;
+                if (!address.isIpv6()) return;
+                final Inet6Address targetIp = (Inet6Address) address.getAddress();
+                if (mGratuitousNaTargetAddresses.contains(targetIp)) {
+                    mGratuitousNaTargetAddresses.remove(targetIp);
+
+                    final String msg = "Global IPv6 address: " + targetIp
+                            + " has removed from the set of gratuitous NA target address.";
+                    logMsg(msg);
+                }
+            }
+
             private void logMsg(String msg) {
                 Log.d(mTag, msg);
                 getHandler().post(() -> mLog.log("OBSERVED " + msg));
@@ -701,7 +816,8 @@ public class IpClient extends StateMachine {
         @Override
         public void startProvisioning(ProvisioningConfigurationParcelable req) {
             enforceNetworkStackCallingPermission();
-            IpClient.this.startProvisioning(ProvisioningConfiguration.fromStableParcelable(req));
+            IpClient.this.startProvisioning(ProvisioningConfiguration.fromStableParcelable(req,
+                    mCallback.getInterfaceVersion()));
         }
         @Override
         public void stop() {
@@ -793,6 +909,45 @@ public class IpClient extends StateMachine {
         mLinkObserver.shutdown();
     }
 
+    private boolean isGratuitousNaEnabled() {
+        return mDependencies.isFeatureEnabled(mContext, IPCLIENT_GRATUITOUS_NA_VERSION,
+                false /* defaultEnabled */);
+    }
+
+    private boolean isGratuitousArpNaRoamingEnabled() {
+        return mDependencies.isFeatureEnabled(mContext, IPCLIENT_GARP_NA_ROAMING_VERSION,
+                false /* defaultEnabled */);
+    }
+
+    @VisibleForTesting
+    static MacAddress getInitialBssid(final Layer2Information layer2Info,
+            final ScanResultInfo scanResultInfo, boolean isAtLeastS) {
+        MacAddress bssid = null;
+        // http://b/185202634
+        // ScanResultInfo is not populated in some situations.
+        // On S and above, prefer getting the BSSID from the Layer2Info.
+        // On R and below, get the BSSID from the ScanResultInfo and fall back to
+        // getting it from the Layer2Info. This ensures no regressions if any R
+        // devices pass in a null or meaningless BSSID in the Layer2Info.
+        if (!isAtLeastS && scanResultInfo != null) {
+            try {
+                bssid = MacAddress.fromString(scanResultInfo.getBssid());
+            } catch (IllegalArgumentException e) {
+                Log.wtf(TAG, "Invalid BSSID: " + scanResultInfo.getBssid()
+                        + " in provisioning configuration", e);
+            }
+        }
+        if (bssid == null && layer2Info != null) {
+            bssid = layer2Info.mBssid;
+        }
+        return bssid;
+    }
+
+    private boolean shouldDisableAcceptRaOnProvisioningLoss() {
+        return mDependencies.isFeatureEnabled(mContext, IPCLIENT_DISABLE_ACCEPT_RA_VERSION,
+                true /* defaultEnabled */);
+    }
+
     @Override
     protected void onQuitting() {
         mCallback.onQuit();
@@ -816,17 +971,8 @@ public class IpClient extends StateMachine {
             return;
         }
 
-        final ScanResultInfo scanResultInfo = req.mScanResultInfo;
-        mCurrentBssid = null;
-        if (scanResultInfo != null) {
-            try {
-                mCurrentBssid = MacAddress.fromString(scanResultInfo.getBssid());
-            } catch (IllegalArgumentException e) {
-                Log.wtf(mTag, "Invalid BSSID: " + scanResultInfo.getBssid()
-                        + " in provisioning configuration", e);
-            }
-        }
-
+        mCurrentBssid = getInitialBssid(req.mLayer2Info, req.mScanResultInfo,
+                ShimUtils.isAtLeastS());
         if (req.mLayer2Info != null) {
             mL2Key = req.mLayer2Info.mL2Key;
             mCluster = req.mLayer2Info.mCluster;
@@ -1103,12 +1249,41 @@ public class IpClient extends StateMachine {
         transitionTo(mStoppingState);
     }
 
+    private static boolean hasIpv6LinkLocalInterfaceRoute(final LinkProperties lp) {
+        for (RouteInfo r : lp.getRoutes()) {
+            if (r.getDestination().equals(new IpPrefix("fe80::/64"))
+                    && r.getGateway().isAnyLocalAddress()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasIpv6LinkLocalAddress(final LinkProperties lp) {
+        for (LinkAddress address : lp.getLinkAddresses()) {
+            if (address.isIpv6() && address.getAddress().isLinkLocalAddress()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // LinkProperties has a link-local (fe80::xxx) IPv6 address and route to fe80::/64 destination.
+    private boolean isIpv6LinkLocalProvisioned(final LinkProperties lp) {
+        if (mConfiguration == null
+                || mConfiguration.mIPv6ProvisioningMode != PROV_IPV6_LINKLOCAL) return false;
+        if (hasIpv6LinkLocalAddress(lp) && hasIpv6LinkLocalInterfaceRoute(lp)) return true;
+        return false;
+    }
+
     // For now: use WifiStateMachine's historical notion of provisioned.
     @VisibleForTesting
-    static boolean isProvisioned(LinkProperties lp, InitialConfiguration config) {
-        // For historical reasons, we should connect even if all we have is
-        // an IPv4 address and nothing else.
-        if (lp.hasIpv4Address() || lp.isProvisioned()) {
+    boolean isProvisioned(final LinkProperties lp, final InitialConfiguration config) {
+        // For historical reasons, we should connect even if all we have is an IPv4
+        // address and nothing else. If IPv6 link-local only mode is enabled and
+        // it's provisioned without IPv4, then still connecting once IPv6 link-local
+        // address is ready to use and route to fe80::/64 destination is up.
+        if (lp.hasIpv4Address() || lp.isProvisioned() || isIpv6LinkLocalProvisioned(lp)) {
             return true;
         }
         if (config == null) {
@@ -1118,6 +1293,21 @@ public class IpClient extends StateMachine {
         // When an InitialConfiguration is specified, ignore any difference with previous
         // properties and instead check if properties observed match the desired properties.
         return config.isProvisionedBy(lp.getLinkAddresses(), lp.getRoutes());
+    }
+
+    private void setIpv6AcceptRa(int acceptRa) {
+        try {
+            mNetd.setProcSysNet(INetd.IPV6, INetd.CONF, mInterfaceParams.name, "accept_ra",
+                    Integer.toString(acceptRa));
+        } catch (Exception e) {
+            Log.e(mTag, "Failed to set accept_ra to " + acceptRa);
+        }
+    }
+
+    private void restartIpv6WithAcceptRaDisabled() {
+        mInterfaceCtrl.disableIPv6();
+        setIpv6AcceptRa(0 /* accept_ra */);
+        startIPv6();
     }
 
     // TODO: Investigate folding all this into the existing static function
@@ -1169,7 +1359,7 @@ public class IpClient extends StateMachine {
         // Note that we can still be disconnected by IpReachabilityMonitor
         // if the IPv6 default gateway (but not the IPv6 DNS servers; see
         // accompanying code in IpReachabilityMonitor) is unreachable.
-        final boolean ignoreIPv6ProvisioningLoss = mHasDisabledIPv6OnProvLoss
+        final boolean ignoreIPv6ProvisioningLoss = mHasDisabledIpv6OrAcceptRaOnProvLoss
                 || (mConfiguration != null && mConfiguration.mUsingMultinetworkPolicyTracker
                         && !mCm.shouldAvoidBadWifi());
 
@@ -1197,18 +1387,31 @@ public class IpClient extends StateMachine {
         if (oldLp.hasGlobalIpv6Address() && (lostIPv6Router && !ignoreIPv6ProvisioningLoss)) {
             // Although link properties have lost IPv6 default route in this case, if IPv4 is still
             // working with appropriate routes and DNS servers, we can keep the current connection
-            // without disconnecting from the network, just disable IPv6 on that given network until
-            // to the next provisioning. Disabling IPv6 will result in all IPv6 connectivity torn
-            // down and all IPv6 sockets being closed, the non-routable IPv6 DNS servers will be
-            // stripped out, so applications will be able to reconnect immediately over IPv4. See
-            // b/131781810.
+            // without disconnecting from the network, just disable IPv6 or accept_ra parameter on
+            // that given network until to the next provisioning.
+            //
+            // Disabling IPv6 stack will result in all IPv6 connectivity torn down and all IPv6
+            // sockets being closed, the non-routable IPv6 DNS servers will be stripped out, so
+            // applications will be able to reconnect immediately over IPv4. See b/131781810.
+            //
+            // Sometimes disabling IPv6 stack might introduce other issues(see b/179222860),
+            // instead disabling accept_ra will result in only IPv4 provisioning and IPv6 link
+            // local address left on the interface, so applications will be able to reconnect
+            // immediately over IPv4 and keep IPv6 link-local capable.
             if (newLp.isIpv4Provisioned()) {
-                mInterfaceCtrl.disableIPv6();
-                mHasDisabledIPv6OnProvLoss = true;
-                delta = PROV_CHANGE_STILL_PROVISIONED;
-                if (DBG) {
-                    mLog.log("Disable IPv6 stack completely when the default router has gone");
+                if (shouldDisableAcceptRaOnProvisioningLoss()) {
+                    restartIpv6WithAcceptRaDisabled();
+                } else {
+                    mInterfaceCtrl.disableIPv6();
                 }
+                mNetworkQuirkMetrics.setEvent(NetworkQuirkEvent.QE_IPV6_PROVISIONING_ROUTER_LOST);
+                mNetworkQuirkMetrics.statsWrite();
+                mHasDisabledIpv6OrAcceptRaOnProvLoss = true;
+                delta = PROV_CHANGE_STILL_PROVISIONED;
+                mLog.log(shouldDisableAcceptRaOnProvisioningLoss()
+                        ? "Disabled accept_ra parameter "
+                        : "Disabled IPv6 stack completely "
+                        + "when the IPv6 default router has gone");
             } else {
                 delta = PROV_CHANGE_LOST_PROVISIONING;
             }
@@ -1377,11 +1580,104 @@ public class IpClient extends StateMachine {
         }
     }
 
+    private void transmitPacket(final ByteBuffer packet, final SocketAddress sockAddress,
+            final String msg) {
+        FileDescriptor sock = null;
+        try {
+            sock = Os.socket(AF_PACKET, SOCK_RAW | SOCK_NONBLOCK, 0 /* protocol */);
+            Os.sendto(sock, packet.array(), 0 /* byteOffset */, packet.limit() /* byteCount */,
+                    0 /* flags */, sockAddress);
+        } catch (SocketException | ErrnoException e) {
+            logError(msg, e);
+        } finally {
+            NetworkStackUtils.closeSocketQuietly(sock);
+        }
+    }
+
+    private void sendGratuitousNA(final Inet6Address srcIp, final Inet6Address targetIp) {
+        final int flags = 0; // R=0, S=0, O=0
+        final Inet6Address dstIp = IPV6_ADDR_ALL_ROUTERS_MULTICAST;
+        // Ethernet multicast destination address: 33:33:00:00:00:02.
+        final MacAddress dstMac = NetworkStackUtils.ipv6MulticastToEthernetMulticast(dstIp);
+        final ByteBuffer packet = NeighborAdvertisement.build(mInterfaceParams.macAddr, dstMac,
+                srcIp, dstIp, flags, targetIp);
+        final SocketAddress sockAddress =
+                SocketUtilsShimImpl.newInstance().makePacketSocketAddress(ETH_P_IPV6,
+                        mInterfaceParams.index, dstMac.toByteArray());
+
+        transmitPacket(packet, sockAddress, "Failed to send Gratuitous Neighbor Advertisement");
+    }
+
+    private void sendGratuitousARP(final Inet4Address srcIp) {
+        final ByteBuffer packet = ArpPacket.buildArpPacket(ETHER_BROADCAST /* dstMac */,
+                mInterfaceParams.macAddr.toByteArray() /* srcMac */,
+                srcIp.getAddress() /* targetIp */,
+                ETHER_BROADCAST /* targetHwAddress */,
+                srcIp.getAddress() /* senderIp */, (short) ARP_REPLY);
+        final SocketAddress sockAddress =
+                makePacketSocketAddress(ETH_P_ARP, mInterfaceParams.index);
+
+        transmitPacket(packet, sockAddress, "Failed to send GARP");
+    }
+
+    private static Inet6Address getIpv6LinkLocalAddress(final LinkProperties newLp) {
+        for (LinkAddress la : newLp.getLinkAddresses()) {
+            if (!la.isIpv6()) continue;
+            final Inet6Address ip = (Inet6Address) la.getAddress();
+            if (ip.isLinkLocalAddress()) return ip;
+        }
+        return null;
+    }
+
+    private void maybeSendGratuitousNAs(final LinkProperties lp, boolean afterRoaming) {
+        if (!lp.hasGlobalIpv6Address()) return;
+
+        final Inet6Address srcIp = getIpv6LinkLocalAddress(lp);
+        if (srcIp == null) return;
+
+        // TODO: add experiment with sending only one gratuitous NA packet instead of one
+        // packet per address.
+        for (LinkAddress la : lp.getLinkAddresses()) {
+            if (!la.isIpv6() || !la.isGlobalPreferred()) continue;
+            final Inet6Address targetIp = (Inet6Address) la.getAddress();
+            // Already sent gratuitous NA with this target global IPv6 address. But for
+            // the L2 roaming case, device should always (re)transmit Gratuitous NA for
+            // each IPv6 global unicast address respectively after roaming.
+            if (!afterRoaming && mGratuitousNaTargetAddresses.contains(targetIp)) continue;
+            if (DBG) {
+                mLog.log("send Gratuitous NA from " + srcIp.getHostAddress() + " for "
+                        + targetIp.getHostAddress() + (afterRoaming ? " after roaming" : ""));
+            }
+            sendGratuitousNA(srcIp, targetIp);
+            if (!afterRoaming) mGratuitousNaTargetAddresses.add(targetIp);
+        }
+    }
+
+    private void maybeSendGratuitousARP(final LinkProperties lp) {
+        for (LinkAddress address : lp.getLinkAddresses()) {
+            if (address.getAddress() instanceof Inet4Address) {
+                final Inet4Address srcIp = (Inet4Address) address.getAddress();
+                if (DBG) {
+                    mLog.log("send GARP for " + srcIp.getHostAddress() + " HW address: "
+                            + mInterfaceParams.macAddr);
+                }
+                sendGratuitousARP(srcIp);
+            }
+        }
+    }
+
     // Returns false if we have lost provisioning, true otherwise.
     private boolean handleLinkPropertiesUpdate(boolean sendCallbacks) {
         final LinkProperties newLp = assembleLinkProperties();
         if (Objects.equals(newLp, mLinkProperties)) {
             return true;
+        }
+
+        // Check if new assigned IPv6 GUA is available in the LinkProperties now. If so, initiate
+        // gratuitous multicast unsolicited Neighbor Advertisements as soon as possible to inform
+        // first-hop routers that the new GUA host is goning to use.
+        if (isGratuitousNaEnabled()) {
+            maybeSendGratuitousNAs(newLp, false /* isGratuitousNaAfterRoaming */);
         }
 
         // Either success IPv4 or IPv6 provisioning triggers new LinkProperties update,
@@ -1554,7 +1850,7 @@ public class IpClient extends StateMachine {
 
     private boolean startIpReachabilityMonitor() {
         try {
-            mIpReachabilityMonitor = new IpReachabilityMonitor(
+            mIpReachabilityMonitor = mDependencies.getIpReachabilityMonitor(
                     mContext,
                     mInterfaceParams,
                     getHandler(),
@@ -1566,6 +1862,7 @@ public class IpClient extends StateMachine {
                         }
                     },
                     mConfiguration.mUsingMultinetworkPolicyTracker,
+                    mDependencies.getIpReachabilityMonitorDeps(mContext, mInterfaceParams.name),
                     mNetd);
         } catch (IllegalArgumentException iae) {
             // Failed to start IpReachabilityMonitor. Log it and call
@@ -1639,8 +1936,15 @@ public class IpClient extends StateMachine {
         // If the BSSID has not changed, there is nothing to do.
         if (info.bssid.equals(mCurrentBssid)) return;
 
+        // Before trigger probing to the interesting neighbors, send Gratuitous ARP
+        // and Neighbor Advertisment in advance to propgate host's IPv4/v6 addresses.
+        if (isGratuitousArpNaRoamingEnabled()) {
+            maybeSendGratuitousARP(mLinkProperties);
+            maybeSendGratuitousNAs(mLinkProperties, true /* isGratuitousNaAfterRoaming */);
+        }
+
         if (mIpReachabilityMonitor != null) {
-            mIpReachabilityMonitor.probeAll();
+            mIpReachabilityMonitor.probeAll(true /* dueToRoam */);
         }
 
         // Check whether to refresh previous IP lease on L2 roaming happened.
@@ -1661,7 +1965,9 @@ public class IpClient extends StateMachine {
         @Override
         public void enter() {
             stopAllIP();
-            mHasDisabledIPv6OnProvLoss = false;
+            setIpv6AcceptRa(2 /* accept_ra */);
+            mHasDisabledIpv6OrAcceptRaOnProvLoss = false;
+            mGratuitousNaTargetAddresses.clear();
 
             mLinkObserver.clearInterfaceParams();
             resetLinkProperties();
@@ -1735,6 +2041,9 @@ public class IpClient extends StateMachine {
             if (mDhcpClient == null) {
                 // There's no DHCPv4 for which to wait; proceed to stopped.
                 deferMessage(obtainMessage(CMD_JUMP_STOPPING_TO_STOPPED));
+            } else {
+                mDhcpClient.sendMessage(DhcpClient.CMD_STOP_DHCP);
+                mDhcpClient.doQuit();
             }
 
             // Restore the interface MTU to initial value if it has changed.
@@ -1971,6 +2280,14 @@ public class IpClient extends StateMachine {
         }
     }
 
+    private boolean isIpv6Enabled() {
+        return mConfiguration.mIPv6ProvisioningMode != PROV_IPV6_DISABLED;
+    }
+
+    private boolean isIpv4Enabled() {
+        return mConfiguration.mIPv4ProvisioningMode != PROV_IPV4_DISABLED;
+    }
+
     class RunningState extends State {
         private ConnectivityPacketTracker mPacketTracker;
         private boolean mDhcpActionInFlight;
@@ -1981,10 +2298,19 @@ public class IpClient extends StateMachine {
             apfConfig.apfCapabilities = mConfiguration.mApfCapabilities;
             apfConfig.multicastFilter = mMulticastFiltering;
             // Get the Configuration for ApfFilter from Context
-            apfConfig.ieee802_3Filter = ApfCapabilities.getApfDrop8023Frames();
-            apfConfig.ethTypeBlackList = ApfCapabilities.getApfEtherTypeBlackList();
+            // Resource settings were moved from ApfCapabilities APIs to NetworkStack resources in S
+            if (ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.R)) {
+                final Resources res = mContext.getResources();
+                apfConfig.ieee802_3Filter = res.getBoolean(R.bool.config_apfDrop802_3Frames);
+                apfConfig.ethTypeBlackList = res.getIntArray(R.array.config_apfEthTypeDenyList);
+            } else {
+                apfConfig.ieee802_3Filter = ApfCapabilities.getApfDrop8023Frames();
+                apfConfig.ethTypeBlackList = ApfCapabilities.getApfEtherTypeBlackList();
+            }
+
             apfConfig.minRdnssLifetimeSec = mMinRdnssLifetimeSec;
-            mApfFilter = ApfFilter.maybeCreate(mContext, apfConfig, mInterfaceParams, mCallback);
+            mApfFilter = mDependencies.maybeCreateApfFilter(mContext, apfConfig, mInterfaceParams,
+                    mCallback);
             // TODO: investigate the effects of any multicast filtering racing/interfering with the
             // rest of this IP configuration startup.
             if (mApfFilter == null) {
@@ -1994,13 +2320,13 @@ public class IpClient extends StateMachine {
             mPacketTracker = createPacketTracker();
             if (mPacketTracker != null) mPacketTracker.start(mConfiguration.mDisplayName);
 
-            if (mConfiguration.mEnableIPv6 && !startIPv6()) {
+            if (isIpv6Enabled() && !startIPv6()) {
                 doImmediateProvisioningFailure(IpManagerEvent.ERROR_STARTING_IPV6);
                 enqueueJumpToStoppingState(DisconnectCode.DC_ERROR_STARTING_IPV6);
                 return;
             }
 
-            if (mConfiguration.mEnableIPv4 && !isUsingPreconnection() && !startIPv4()) {
+            if (isIpv4Enabled() && !isUsingPreconnection() && !startIPv4()) {
                 doImmediateProvisioningFailure(IpManagerEvent.ERROR_STARTING_IPV4);
                 enqueueJumpToStoppingState(DisconnectCode.DC_ERROR_STARTING_IPV4);
                 return;
@@ -2029,11 +2355,6 @@ public class IpClient extends StateMachine {
             if (mIpReachabilityMonitor != null) {
                 mIpReachabilityMonitor.stop();
                 mIpReachabilityMonitor = null;
-            }
-
-            if (mDhcpClient != null) {
-                mDhcpClient.sendMessage(DhcpClient.CMD_STOP_DHCP);
-                mDhcpClient.doQuit();
             }
 
             if (mPacketTracker != null) {
@@ -2098,7 +2419,7 @@ public class IpClient extends StateMachine {
                     // a DHCPv4 RENEW.  We used to do this on Wi-Fi framework
                     // roams.
                     if (mIpReachabilityMonitor != null) {
-                        mIpReachabilityMonitor.probeAll();
+                        mIpReachabilityMonitor.probeAll(false /* dueToRoam */);
                     }
                     break;
 

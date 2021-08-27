@@ -17,7 +17,14 @@
 package android.net.ip
 
 import android.net.ipmemorystore.NetworkAttributes
+import android.net.ipmemorystore.OnNetworkAttributesRetrievedListener
+import android.net.ipmemorystore.Status
+import android.net.ipmemorystore.Status.SUCCESS
+import android.util.ArrayMap
+import java.net.Inet6Address
+import kotlin.test.assertEquals
 import org.mockito.Mockito.any
+import org.mockito.Mockito.doAnswer
 import org.mockito.ArgumentCaptor
 import org.mockito.Mockito.eq
 import org.mockito.Mockito.never
@@ -28,22 +35,20 @@ import org.mockito.Mockito.verify
  * Tests for IpClient, run with signature permissions.
  */
 class IpClientIntegrationTest : IpClientIntegrationTestCommon() {
+    private val mEnabledFeatures = ArrayMap<String, Boolean>()
+
     override fun makeIIpClient(ifaceName: String, cb: IIpClientCallbacks): IIpClient {
         return mIpc.makeConnector()
     }
 
     override fun useNetworkStackSignature() = true
 
-    override fun setDhcpFeatures(
-        isDhcpLeaseCacheEnabled: Boolean,
-        isRapidCommitEnabled: Boolean,
-        isDhcpIpConflictDetectEnabled: Boolean,
-        isIPv6OnlyPreferredEnabled: Boolean
-    ) {
-        mDependencies.setDhcpLeaseCacheEnabled(isDhcpLeaseCacheEnabled)
-        mDependencies.setDhcpRapidCommitEnabled(isRapidCommitEnabled)
-        mDependencies.setDhcpIpConflictDetectEnabled(isDhcpIpConflictDetectEnabled)
-        mDependencies.setIPv6OnlyPreferredEnabled(isIPv6OnlyPreferredEnabled)
+    override fun isFeatureEnabled(name: String, defaultEnabled: Boolean): Boolean {
+        return mEnabledFeatures.get(name) ?: defaultEnabled
+    }
+
+    override fun setFeatureEnabled(name: String, enabled: Boolean) {
+        mEnabledFeatures.put(name, enabled)
     }
 
     override fun getStoredNetworkAttributes(l2Key: String, timeout: Long): NetworkAttributes {
@@ -56,5 +61,24 @@ class IpClientIntegrationTest : IpClientIntegrationTestCommon() {
 
     override fun assertIpMemoryNeverStoreNetworkAttributes(l2Key: String, timeout: Long) {
         verify(mIpMemoryStore, never()).storeNetworkAttributes(eq(l2Key), any(), any())
+    }
+
+    override fun assertNotifyNeighborLost(targetIp: Inet6Address) {
+        val target = ArgumentCaptor.forClass(Inet6Address::class.java)
+
+        verify(mCallback, timeout(TEST_TIMEOUT_MS)).notifyLost(target.capture(), any())
+        assertEquals(targetIp, target.getValue())
+    }
+
+    override fun assertNeverNotifyNeighborLost() {
+        verify(mCallback, never()).notifyLost(any(), any())
+    }
+
+    override fun storeNetworkAttributes(l2Key: String, na: NetworkAttributes) {
+        doAnswer { inv ->
+            val listener = inv.getArgument<OnNetworkAttributesRetrievedListener>(1)
+            listener.onNetworkAttributesRetrieved(Status(SUCCESS), l2Key, na)
+            true
+        }.`when`(mIpMemoryStore).retrieveNetworkAttributes(eq(l2Key), any())
     }
 }
