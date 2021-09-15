@@ -623,6 +623,10 @@ public class NetworkMonitor extends StateMachine {
         // even before notifyNetworkConnected.
         mLinkProperties = new LinkProperties();
         mNetworkCapabilities = new NetworkCapabilities(null);
+
+        Log.d(TAG, "Starting on network " + mNetwork
+                + " with capport HTTPS URL " + Arrays.toString(mCaptivePortalHttpsUrls)
+                + " and HTTP URL " + Arrays.toString(mCaptivePortalHttpUrls));
     }
 
     /**
@@ -1982,11 +1986,17 @@ public class NetworkMonitor extends StateMachine {
         }
 
         final long now = System.currentTimeMillis();
-        if (expTime < now || (expTime - now) > TEST_URL_EXPIRATION_MS) return null;
+        if (expTime < now || (expTime - now) > TEST_URL_EXPIRATION_MS) {
+            logw("Skipping test URL with expiration " + expTime + ", now " + now);
+            return null;
+        }
 
         final String strUrl = mDependencies.getDeviceConfigProperty(NAMESPACE_CONNECTIVITY,
                 key, null /* defaultValue */);
-        if (!isValidTestUrl(strUrl)) return null;
+        if (!isValidTestUrl(strUrl)) {
+            logw("Skipping invalid test URL " + strUrl);
+            return null;
+        }
         return makeURL(strUrl);
     }
 
