@@ -715,7 +715,7 @@ public class IpClient extends StateMachine {
                 (ifaceUp) -> sendMessage(EVENT_NETLINK_LINKPROPERTIES_CHANGED, ifaceUp
                         ? ARG_LINKPROP_CHANGED_LINKSTATE_UP
                         : ARG_LINKPROP_CHANGED_LINKSTATE_DOWN),
-                config, mLog) {
+                config, mLog, mDependencies) {
             @Override
             public void onInterfaceAdded(String iface) {
                 super.onInterfaceAdded(iface);
@@ -906,6 +906,7 @@ public class IpClient extends StateMachine {
 
     private void stopStateMachineUpdaters() {
         mObserverRegistry.unregisterObserver(mLinkObserver);
+        mLinkObserver.clearInterfaceParams();
         mLinkObserver.shutdown();
     }
 
@@ -1969,7 +1970,6 @@ public class IpClient extends StateMachine {
             mHasDisabledIpv6OrAcceptRaOnProvLoss = false;
             mGratuitousNaTargetAddresses.clear();
 
-            mLinkObserver.clearInterfaceParams();
             resetLinkProperties();
             if (mStartTimeMillis > 0) {
                 // Completed a life-cycle; send a final empty LinkProperties
