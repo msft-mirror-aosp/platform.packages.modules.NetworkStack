@@ -18,12 +18,15 @@ package android.net.ip;
 
 import static android.system.OsConstants.RT_SCOPE_UNIVERSE;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
@@ -48,22 +51,32 @@ import android.net.LinkProperties;
 import android.net.MacAddress;
 import android.net.NetworkStackIpMemoryStore;
 import android.net.RouteInfo;
+import android.net.apf.ApfCapabilities;
+import android.net.apf.ApfFilter.ApfConfiguration;
 import android.net.ipmemorystore.NetworkAttributes;
 import android.net.metrics.IpConnectivityLog;
 import android.net.shared.InitialConfiguration;
+import android.net.shared.Layer2Information;
 import android.net.shared.ProvisioningConfiguration;
+import android.net.shared.ProvisioningConfiguration.ScanResultInfo;
 import android.net.util.InterfaceParams;
+import android.os.Build;
 
 import androidx.test.filters.SmallTest;
 import androidx.test.runner.AndroidJUnit4;
 
+import com.android.networkstack.R;
 import com.android.server.NetworkObserver;
 import com.android.server.NetworkObserverRegistry;
 import com.android.server.NetworkStackService;
 import com.android.server.connectivity.ipmemorystore.IpMemoryStoreService;
+import com.android.testutils.DevSdkIgnoreRule;
+import com.android.testutils.DevSdkIgnoreRule.IgnoreAfter;
+import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo;
 import com.android.testutils.HandlerUtils;
 
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
@@ -73,9 +86,12 @@ import org.mockito.MockitoAnnotations;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Random;
 import java.util.Set;
 
 
@@ -85,6 +101,9 @@ import java.util.Set;
 @RunWith(AndroidJUnit4.class)
 @SmallTest
 public class IpClientTest {
+    @Rule
+    public final DevSdkIgnoreRule mIgnoreRule = new DevSdkIgnoreRule();
+
     private static final String VALID = "VALID";
     private static final String INVALID = "INVALID";
     private static final String TEST_IFNAME = "test_wlan0";
@@ -94,6 +113,9 @@ public class IpClientTest {
     private static final int TEST_TIMEOUT_MS = 400;
     private static final String TEST_L2KEY = "some l2key";
     private static final String TEST_CLUSTER = "some cluster";
+    private static final String TEST_SSID = "test_ssid";
+    private static final String TEST_BSSID = "00:11:22:33:44:55";
+    private static final String TEST_BSSID2 = "00:1A:11:22:33:44";
 
     private static final String TEST_GLOBAL_ADDRESS = "1234:4321::548d:2db2:4fcf:ef75/64";
     private static final String[] TEST_LOCAL_ADDRESSES = {
@@ -409,6 +431,7 @@ public class IpClientTest {
 
     @Test
     public void testIsProvisioned() throws Exception {
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
         InitialConfiguration empty = conf(links(), prefixes());
         IsProvisionedTestCase[] testcases = {
             // nothing
@@ -440,7 +463,7 @@ public class IpClientTest {
         };
 
         for (IsProvisionedTestCase testcase : testcases) {
-            if (IpClient.isProvisioned(testcase.lp, testcase.config) != testcase.isProvisioned) {
+            if (ipc.isProvisioned(testcase.lp, testcase.config) != testcase.isProvisioned) {
                 fail(testcase.errorMessage());
             }
         }
@@ -629,6 +652,183 @@ public class IpClientTest {
             }
         }
         return out;
+    }
+
+    private ApfConfiguration verifyApfFilterCreatedOnStart(IpClient ipc) {
+        ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
+                .withoutIPv4()
+                .withoutIpReachabilityMonitor()
+                .withInitialConfiguration(
+                        conf(links(TEST_LOCAL_ADDRESSES), prefixes(TEST_PREFIXES), ips()))
+                .withApfCapabilities(new ApfCapabilities(
+                        4 /* version */, 4096 /* maxProgramSize */, 4 /* format */))
+                .build();
+
+        ipc.startProvisioning(config);
+        final ArgumentCaptor<ApfConfiguration> configCaptor = ArgumentCaptor.forClass(
+                ApfConfiguration.class);
+        verify(mDependencies, timeout(TEST_TIMEOUT_MS)).maybeCreateApfFilter(
+                any(), configCaptor.capture(), any(), any());
+
+        return configCaptor.getValue();
+    }
+
+    @Test @IgnoreAfter(Build.VERSION_CODES.R)
+    public void testApfConfiguration_R() throws Exception {
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
+        final ApfConfiguration config = verifyApfFilterCreatedOnStart(ipc);
+
+        assertEquals(ApfCapabilities.getApfDrop8023Frames(), config.ieee802_3Filter);
+        assertArrayEquals(ApfCapabilities.getApfEtherTypeBlackList(), config.ethTypeBlackList);
+
+        verify(mResources, never()).getBoolean(R.bool.config_apfDrop802_3Frames);
+        verify(mResources, never()).getIntArray(R.array.config_apfEthTypeDenyList);
+
+        verifyShutdown(ipc);
+    }
+
+    @Test @IgnoreUpTo(Build.VERSION_CODES.R)
+    public void testApfConfiguration() throws Exception {
+        doReturn(true).when(mResources).getBoolean(R.bool.config_apfDrop802_3Frames);
+        final int[] ethTypeDenyList = new int[] { 0x88A2, 0x88A4 };
+        doReturn(ethTypeDenyList).when(mResources).getIntArray(
+                R.array.config_apfEthTypeDenyList);
+
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
+        final ApfConfiguration config = verifyApfFilterCreatedOnStart(ipc);
+
+        assertTrue(config.ieee802_3Filter);
+        assertArrayEquals(ethTypeDenyList, config.ethTypeBlackList);
+
+        verifyShutdown(ipc);
+    }
+
+    @Test @IgnoreUpTo(Build.VERSION_CODES.R)
+    public void testApfConfiguration_NoApfDrop8023Frames() throws Exception {
+        doReturn(false).when(mResources).getBoolean(R.bool.config_apfDrop802_3Frames);
+        final int[] ethTypeDenyList = new int[] { 0x88A3, 0x88A5 };
+        doReturn(ethTypeDenyList).when(mResources).getIntArray(
+                R.array.config_apfEthTypeDenyList);
+
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
+        final ApfConfiguration config = verifyApfFilterCreatedOnStart(ipc);
+
+        assertFalse(config.ieee802_3Filter);
+        assertArrayEquals(ethTypeDenyList, config.ethTypeBlackList);
+
+        verifyShutdown(ipc);
+    }
+
+    private ScanResultInfo makeScanResultInfo(final String ssid, final String bssid) {
+        final ByteBuffer payload = ByteBuffer.allocate(14 /* oui + type + data */);
+        final byte[] data = new byte[10];
+        new Random().nextBytes(data);
+        payload.put(new byte[] { 0x00, 0x1A, 0x11 });
+        payload.put((byte) 0x06);
+        payload.put(data);
+
+        final ScanResultInfo.InformationElement ie =
+                new ScanResultInfo.InformationElement(0xdd /* IE id */, payload);
+        return new ScanResultInfo(ssid, bssid, Collections.singletonList(ie));
+    }
+
+    @Test
+    public void testGetInitialBssidOnSOrAbove() throws Exception {
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
+        final Layer2Information layer2Info = new Layer2Information(TEST_L2KEY, TEST_CLUSTER,
+                MacAddress.fromString(TEST_BSSID));
+        final ScanResultInfo scanResultInfo = makeScanResultInfo(TEST_SSID, TEST_BSSID2);
+        final MacAddress bssid = ipc.getInitialBssid(layer2Info, scanResultInfo,
+                true /* isAtLeastS */);
+        assertEquals(bssid, MacAddress.fromString(TEST_BSSID));
+    }
+
+    @Test
+    public void testGetInitialBssidOnSOrAbove_NullScanReqsultInfo() throws Exception {
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
+        final Layer2Information layer2Info = new Layer2Information(TEST_L2KEY, TEST_CLUSTER,
+                MacAddress.fromString(TEST_BSSID));
+        final MacAddress bssid = ipc.getInitialBssid(layer2Info, null /* ScanResultInfo */,
+                true /* isAtLeastS */);
+        assertEquals(bssid, MacAddress.fromString(TEST_BSSID));
+    }
+
+    @Test
+    public void testGetInitialBssidOnSOrAbove_NullBssid() throws Exception {
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
+        final Layer2Information layer2Info = new Layer2Information(TEST_L2KEY, TEST_CLUSTER,
+                null /* bssid */);
+        final ScanResultInfo scanResultInfo = makeScanResultInfo(TEST_SSID, TEST_BSSID);
+        final MacAddress bssid = ipc.getInitialBssid(layer2Info, scanResultInfo,
+                true /* isAtLeastS */);
+        assertNull(bssid);
+    }
+
+    @Test
+    public void testGetInitialBssidOnSOrAbove_NullLayer2Info() throws Exception {
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
+        final ScanResultInfo scanResultInfo = makeScanResultInfo(TEST_SSID, TEST_BSSID);
+        final MacAddress bssid = ipc.getInitialBssid(null /* layer2Info */, scanResultInfo,
+                true /* isAtLeastS */);
+        assertNull(bssid);
+    }
+
+    @Test
+    public void testGetInitialBssidBeforeS() throws Exception {
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
+        final Layer2Information layer2Info = new Layer2Information(TEST_L2KEY, TEST_CLUSTER,
+                MacAddress.fromString(TEST_BSSID2));
+        final ScanResultInfo scanResultInfo = makeScanResultInfo(TEST_SSID, TEST_BSSID);
+        final MacAddress bssid = ipc.getInitialBssid(layer2Info, scanResultInfo,
+                false /* isAtLeastS */);
+        assertEquals(bssid, MacAddress.fromString(TEST_BSSID));
+    }
+
+    @Test
+    public void testGetInitialBssidBeforeS_NullLayer2Info() throws Exception {
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
+        final ScanResultInfo scanResultInfo = makeScanResultInfo(TEST_SSID, TEST_BSSID);
+        final MacAddress bssid = ipc.getInitialBssid(null /* layer2Info */, scanResultInfo,
+                false /* isAtLeastS */);
+        assertEquals(bssid, MacAddress.fromString(TEST_BSSID));
+    }
+
+    @Test
+    public void testGetInitialBssidBeforeS_BrokenInitialBssid() throws Exception {
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
+        final ScanResultInfo scanResultInfo = makeScanResultInfo(TEST_SSID, "00:11:22:33:44:");
+        final MacAddress bssid = ipc.getInitialBssid(null /* layer2Info */, scanResultInfo,
+                false /* isAtLeastS */);
+        assertNull(bssid);
+    }
+
+    @Test
+    public void testGetInitialBssidBeforeS_BrokenInitialBssidFallback() throws Exception {
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
+        final Layer2Information layer2Info = new Layer2Information(TEST_L2KEY, TEST_CLUSTER,
+                MacAddress.fromString(TEST_BSSID));
+        final ScanResultInfo scanResultInfo = makeScanResultInfo(TEST_SSID, "00:11:22:33:44:");
+        final MacAddress bssid = ipc.getInitialBssid(layer2Info, scanResultInfo,
+                false /* isAtLeastS */);
+        assertEquals(bssid, MacAddress.fromString(TEST_BSSID));
+    }
+
+    @Test
+    public void testGetInitialBssidBeforeS_NullScanResultInfoFallback() throws Exception {
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
+        final Layer2Information layer2Info = new Layer2Information(TEST_L2KEY, TEST_CLUSTER,
+                MacAddress.fromString(TEST_BSSID));
+        final MacAddress bssid = ipc.getInitialBssid(layer2Info, null /* scanResultInfo */,
+                false /* isAtLeastS */);
+        assertEquals(bssid, MacAddress.fromString(TEST_BSSID));
+    }
+
+    @Test
+    public void testGetInitialBssidBeforeS_NullScanResultInfoAndLayer2Info() throws Exception {
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
+        final MacAddress bssid = ipc.getInitialBssid(null /* layer2Info */,
+                null /* scanResultInfo */, false /* isAtLeastS */);
+        assertNull(bssid);
     }
 
     interface Fn<A,B> {

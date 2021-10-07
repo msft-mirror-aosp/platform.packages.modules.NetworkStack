@@ -16,13 +16,12 @@
 
 package com.android.server.connectivity;
 
+import static android.content.Intent.ACTION_CONFIGURATION_CHANGED;
 import static android.net.CaptivePortal.APP_RETURN_DISMISSED;
 import static android.net.CaptivePortal.APP_RETURN_UNWANTED;
 import static android.net.CaptivePortal.APP_RETURN_WANTED_AS_IS;
 import static android.net.ConnectivityManager.EXTRA_CAPTIVE_PORTAL_PROBE_SPEC;
 import static android.net.ConnectivityManager.EXTRA_CAPTIVE_PORTAL_URL;
-import static android.net.ConnectivityManager.TYPE_MOBILE;
-import static android.net.ConnectivityManager.TYPE_WIFI;
 import static android.net.DnsResolver.FLAG_EMPTY;
 import static android.net.INetworkMonitor.NETWORK_TEST_RESULT_INVALID;
 import static android.net.INetworkMonitor.NETWORK_TEST_RESULT_PARTIAL_CONNECTIVITY;
@@ -33,10 +32,10 @@ import static android.net.INetworkMonitor.NETWORK_VALIDATION_PROBE_HTTP;
 import static android.net.INetworkMonitor.NETWORK_VALIDATION_PROBE_HTTPS;
 import static android.net.INetworkMonitor.NETWORK_VALIDATION_PROBE_PRIVDNS;
 import static android.net.INetworkMonitor.NETWORK_VALIDATION_RESULT_PARTIAL;
+import static android.net.INetworkMonitor.NETWORK_VALIDATION_RESULT_SKIPPED;
 import static android.net.INetworkMonitor.NETWORK_VALIDATION_RESULT_VALID;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED;
-import static android.net.NetworkCapabilities.TRANSPORT_CELLULAR;
-import static android.net.NetworkCapabilities.TRANSPORT_WIFI;
+import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED;
 import static android.net.captiveportal.CaptivePortalProbeSpec.parseCaptivePortalProbeSpecs;
 import static android.net.metrics.ValidationProbeEvent.DNS_FAILURE;
 import static android.net.metrics.ValidationProbeEvent.DNS_SUCCESS;
@@ -127,12 +126,11 @@ import android.os.Message;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.SystemClock;
-import android.os.UserHandle;
+import android.os.SystemProperties;
 import android.provider.DeviceConfig;
 import android.provider.Settings;
 import android.stats.connectivity.ProbeResult;
 import android.stats.connectivity.ProbeType;
-import android.telephony.AccessNetworkConstants;
 import android.telephony.CellIdentityNr;
 import android.telephony.CellInfo;
 import android.telephony.CellInfoGsm;
@@ -141,8 +139,6 @@ import android.telephony.CellInfoNr;
 import android.telephony.CellInfoTdscdma;
 import android.telephony.CellInfoWcdma;
 import android.telephony.CellSignalStrength;
-import android.telephony.NetworkRegistrationInfo;
-import android.telephony.ServiceState;
 import android.telephony.SignalStrength;
 import android.telephony.TelephonyManager;
 import android.text.TextUtils;
@@ -161,13 +157,15 @@ import com.android.internal.annotations.GuardedBy;
 import com.android.internal.util.RingBufferIndices;
 import com.android.internal.util.State;
 import com.android.internal.util.StateMachine;
-import com.android.internal.util.TrafficStatsConstants;
 import com.android.net.module.util.DeviceConfigUtils;
+import com.android.net.module.util.NetworkStackConstants;
 import com.android.networkstack.NetworkStackNotifier;
 import com.android.networkstack.R;
 import com.android.networkstack.apishim.CaptivePortalDataShimImpl;
 import com.android.networkstack.apishim.NetworkInformationShimImpl;
+import com.android.networkstack.apishim.api29.ConstantsShim;
 import com.android.networkstack.apishim.common.CaptivePortalDataShim;
+import com.android.networkstack.apishim.common.NetworkInformationShim;
 import com.android.networkstack.apishim.common.ShimUtils;
 import com.android.networkstack.apishim.common.UnsupportedApiLevelException;
 import com.android.networkstack.metrics.DataStallDetectionStats;
@@ -224,6 +222,9 @@ public class NetworkMonitor extends StateMachine {
     private static final String TAG = NetworkMonitor.class.getSimpleName();
     private static final boolean DBG  = true;
     private static final boolean VDBG = false;
+    // TODO(b/185082309): For flaky test debug only, remove it after fixing.
+    private static final boolean DDBG_STALL = "cf_x86_auto-userdebug".equals(
+            SystemProperties.get("ro.build.flavor", ""));
     private static final boolean VDBG_STALL = Log.isLoggable(TAG, Log.DEBUG);
     private static final String DEFAULT_USER_AGENT    = "Mozilla/5.0 (X11; Linux x86_64) "
                                                       + "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -388,9 +389,14 @@ public class NetworkMonitor extends StateMachine {
     private static final int CMD_BANDWIDTH_CHECK_COMPLETE = 23;
 
     /**
-     * Message to self to know the bandwidth check is timeouted.
+     * Message to self to know the bandwidth check has timed out.
      */
     private static final int CMD_BANDWIDTH_CHECK_TIMEOUT = 24;
+
+    /**
+     * Message to self to notify resource configuration is changed.
+     */
+    private static final int EVENT_RESOURCE_CONFIG_CHANGED = 25;
 
     // Start mReevaluateDelayMs at this value and double.
     @VisibleForTesting
@@ -416,7 +422,6 @@ public class NetworkMonitor extends StateMachine {
     private String mPrivateDnsProviderHostname = "";
 
     private final Context mContext;
-    private final Context mCustomizedContext;
     private final INetworkMonitorCallbacks mCallback;
     private final int mCallbackVersion;
     private final Network mCleartextDnsNetwork;
@@ -431,13 +436,21 @@ public class NetworkMonitor extends StateMachine {
     private final TcpSocketTracker mTcpTracker;
     // Configuration values for captive portal detection probes.
     private final String mCaptivePortalUserAgent;
-    private final URL[] mCaptivePortalFallbackUrls;
-    @NonNull
-    private final URL[] mCaptivePortalHttpUrls;
-    @NonNull
-    private final URL[] mCaptivePortalHttpsUrls;
+    // Configuration values in setting providers for captive portal detection probes
+    private final String mCaptivePortalHttpsUrlFromSetting;
+    private final String mCaptivePortalHttpUrlFromSetting;
     @Nullable
     private final CaptivePortalProbeSpec[] mCaptivePortalFallbackSpecs;
+
+    // The probing URLs may be updated after constructor if system notifies configuration changed.
+    // Thus, these probing URLs should only be accessed in the StateMachine thread.
+    @NonNull
+    private URL[] mCaptivePortalFallbackUrls;
+    @NonNull
+    private URL[] mCaptivePortalHttpUrls;
+    @NonNull
+    private URL[] mCaptivePortalHttpsUrls;
+
     // Configuration values for network bandwidth check.
     @Nullable
     private final String mEvaluatingBandwidthUrl;
@@ -511,10 +524,13 @@ public class NetworkMonitor extends StateMachine {
     private @EvaluationType int mDataStallTypeToCollect;
     private boolean mAcceptPartialConnectivity = false;
     private final EvaluationState mEvaluationState = new EvaluationState();
-
+    @NonNull
+    private final BroadcastReceiver mConfigurationReceiver;
     private final boolean mPrivateIpNoInternetEnabled;
 
     private final boolean mMetricsEnabled;
+    @NonNull
+    private final NetworkInformationShim mInfoShim = NetworkInformationShimImpl.newInstance();
 
     // The validation metrics are accessed by individual probe threads, and by the StateMachine
     // thread. All accesses must be synchronized to make sure the StateMachine thread can see
@@ -573,7 +589,6 @@ public class NetworkMonitor extends StateMachine {
         mWifiManager = (WifiManager) context.getSystemService(Context.WIFI_SERVICE);
         mCm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
         mNotifier = serviceManager.getNotifier();
-        mCustomizedContext = getCustomizedContextOrDefault();
 
         // CHECKSTYLE:OFF IndentationCheck
         addState(mDefaultState);
@@ -588,16 +603,18 @@ public class NetworkMonitor extends StateMachine {
         setInitialState(mDefaultState);
         // CHECKSTYLE:ON IndentationCheck
 
+        mCaptivePortalHttpsUrlFromSetting =
+                mDependencies.getSetting(context, CAPTIVE_PORTAL_HTTPS_URL, null);
+        mCaptivePortalHttpUrlFromSetting =
+                mDependencies.getSetting(context, CAPTIVE_PORTAL_HTTP_URL, null);
         mIsCaptivePortalCheckEnabled = getIsCaptivePortalCheckEnabled();
         mPrivateIpNoInternetEnabled = getIsPrivateIpNoInternetEnabled();
         mMetricsEnabled = deps.isFeatureEnabled(context, NAMESPACE_CONNECTIVITY,
                 NetworkStackUtils.VALIDATION_METRICS_VERSION, true /* defaultEnabled */);
         mUseHttps = getUseHttpsValidation();
         mCaptivePortalUserAgent = getCaptivePortalUserAgent();
-        mCaptivePortalHttpsUrls = makeCaptivePortalHttpsUrls();
-        mCaptivePortalHttpUrls = makeCaptivePortalHttpUrls();
-        mCaptivePortalFallbackUrls = makeCaptivePortalFallbackUrls();
-        mCaptivePortalFallbackSpecs = makeCaptivePortalFallbackProbeSpecs();
+        mCaptivePortalFallbackSpecs =
+                makeCaptivePortalFallbackProbeSpecs(getCustomizedContextOrDefault());
         mRandom = deps.getRandom();
         // TODO: Evaluate to move data stall configuration to a specific class.
         mConsecutiveDnsTimeoutThreshold = getConsecutiveDnsTimeoutThreshold();
@@ -616,7 +633,14 @@ public class NetworkMonitor extends StateMachine {
         mEvaluatingBandwidthTimeoutMs = getResIntConfig(mContext,
                 R.integer.config_evaluating_bandwidth_timeout_ms,
                 DEFAULT_EVALUATING_BANDWIDTH_TIMEOUT_MS);
-
+        mConfigurationReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (ACTION_CONFIGURATION_CHANGED.equals(intent.getAction())) {
+                    sendMessage(EVENT_RESOURCE_CONFIG_CHANGED);
+                }
+            }
+        };
         // Provide empty LinkProperties and NetworkCapabilities to make sure they are never null,
         // even before notifyNetworkConnected.
         mLinkProperties = new LinkProperties();
@@ -634,6 +658,13 @@ public class NetworkMonitor extends StateMachine {
 
     /**
      * Request the NetworkMonitor to reevaluate the network.
+     *
+     * TODO : refactor reevaluation to introduce rate limiting. If the system finds a network is
+     * validated but some app can't access their server, or the network is behind a captive portal
+     * that only lets the validation URL through, apps may be calling reportNetworkConnectivity
+     * often, causing many revalidation attempts. Meanwhile, reevaluation attempts that result
+     * from actions that may affect the validation status (e.g. the user just logged in through
+     * the captive portal app) should never be skipped because of the rate limitation.
      */
     public void forceReevaluation(int responsibleUid) {
         sendMessage(CMD_FORCE_REEVALUATION, responsibleUid, 0);
@@ -671,6 +702,7 @@ public class NetworkMonitor extends StateMachine {
                 (Pair<LinkProperties, NetworkCapabilities>) connectedMsg.obj;
         mLinkProperties = attrs.first;
         mNetworkCapabilities = attrs.second;
+        suppressNotificationIfNetworkRestricted();
     }
 
     /**
@@ -733,6 +765,12 @@ public class NetworkMonitor extends StateMachine {
 
     private boolean isPrivateDnsValidationRequired() {
         return NetworkMonitorUtils.isPrivateDnsValidationRequired(mNetworkCapabilities);
+    }
+
+    private void suppressNotificationIfNetworkRestricted() {
+        if (!mNetworkCapabilities.hasCapability(NET_CAPABILITY_NOT_RESTRICTED)) {
+            mDontDisplaySigninNotification = true;
+        }
     }
 
     private void notifyNetworkTested(NetworkTestResultParcelable result) {
@@ -853,6 +891,18 @@ public class NetworkMonitor extends StateMachine {
     // does not entail any real state (hence no enter() or exit() routines).
     private class DefaultState extends State {
         @Override
+        public void enter() {
+            // Register configuration broadcast here instead of constructor to prevent start() was
+            // not called yet when the broadcast is received and cause crash.
+            mContext.registerReceiver(mConfigurationReceiver,
+                    new IntentFilter(ACTION_CONFIGURATION_CHANGED));
+            checkAndRenewResourceConfig();
+            Log.d(TAG, "Starting on network " + mNetwork
+                    + " with capport HTTPS URL " + Arrays.toString(mCaptivePortalHttpsUrls)
+                    + " and HTTP URL " + Arrays.toString(mCaptivePortalHttpUrls));
+        }
+
+        @Override
         public boolean processMessage(Message message) {
             switch (message.what) {
                 case CMD_NETWORK_CONNECTED:
@@ -907,6 +957,18 @@ public class NetworkMonitor extends StateMachine {
                             // If the user wants to use this network anyway, there is no need to
                             // perform the bandwidth check even if configured.
                             mIsBandwidthCheckPassedOrIgnored = true;
+                            // If the user wants to use this network anyway, it should always
+                            // be reported as validated, but other checks still need to be
+                            // done. For example, it should still validate strict private DNS and
+                            // show a notification if not available, because the network will
+                            // be unusable for this additional reason.
+                            mEvaluationState.setCaptivePortalWantedAsIs();
+                            // A successful evaluation result should be reported immediately, so
+                            // that the network stack may immediately use the validation in ranking
+                            // without waiting for a possibly long private DNS or bandwidth eval
+                            // step.
+                            mEvaluationState.reportEvaluationResult(NETWORK_VALIDATION_RESULT_VALID,
+                                    null);
                             // TODO: Distinguish this from a network that actually validates.
                             // Displaying the "x" on the system UI icon may still be a good idea.
                             transitionTo(mEvaluatingPrivateDnsState);
@@ -984,11 +1046,28 @@ public class NetworkMonitor extends StateMachine {
                     break;
                 case EVENT_NETWORK_CAPABILITIES_CHANGED:
                     mNetworkCapabilities = (NetworkCapabilities) message.obj;
+                    suppressNotificationIfNetworkRestricted();
+                    break;
+                case EVENT_RESOURCE_CONFIG_CHANGED:
+                    // RRO generation does not happen during package installation and instead after
+                    // the OMS receives the PACKAGE_ADDED event, there is a delay where the old
+                    // idmap is used with the new target package resulting in the incorrect overlay
+                    // is used. Renew the resource if a configuration change is received.
+                    // TODO: Remove it once design to generate the idmaps during package
+                    //  installation in overlay manager and package manager is ready.
+                    if (checkAndRenewResourceConfig()) {
+                        sendMessage(CMD_FORCE_REEVALUATION, NO_UID, 1 /* forceAccept */);
+                    }
                     break;
                 default:
                     break;
             }
             return HANDLED;
+        }
+
+        @Override
+        public void exit() {
+            mContext.unregisterReceiver(mConfigurationReceiver);
         }
     }
 
@@ -1227,6 +1306,22 @@ public class NetworkMonitor extends StateMachine {
             if (!mEvaluationTimer.isStarted()) {
                 mEvaluationTimer.start();
             }
+
+            // Check if the network is captive with Terms & Conditions page. The first network
+            // evaluation for captive networks with T&Cs returns early but NetworkMonitor will then
+            // keep checking for connectivity to determine when the T&Cs are cleared.
+            if (isTermsAndConditionsCaptive(mInfoShim.getCaptivePortalData(mLinkProperties))
+                    && mValidations == 0) {
+                mLastPortalProbeResult = new CaptivePortalProbeResult(
+                        CaptivePortalProbeResult.PORTAL_CODE,
+                        mLinkProperties.getCaptivePortalData().getUserPortalUrl()
+                                .toString(), null,
+                        CaptivePortalProbeResult.PROBE_UNKNOWN);
+                mEvaluationState.reportEvaluationResult(NETWORK_VALIDATION_RESULT_INVALID,
+                        mLastPortalProbeResult.redirectUrl);
+                transitionTo(mCaptivePortalState);
+                return;
+            }
             sendMessage(CMD_REEVALUATE, ++mReevaluateToken, 0);
             if (mUidResponsibleForReeval != INVALID_UID) {
                 TrafficStats.setThreadStatsUid(mUidResponsibleForReeval);
@@ -1264,11 +1359,19 @@ public class NetworkMonitor extends StateMachine {
                     //    the network so don't bother validating here.  Furthermore sending HTTP
                     //    packets over the network may be undesirable, for example an extremely
                     //    expensive metered network, or unwanted leaking of the User Agent string.
+                    // Also don't bother validating networks that the user already said they
+                    // wanted as-is.
                     //
                     // On networks that need to support private DNS in strict mode (e.g., VPNs, but
                     // not networks that don't provide Internet access), we still need to perform
                     // private DNS server resolution.
-                    if (!isValidationRequired()) {
+                    if (mEvaluationState.isCaptivePortalWantedAsIs()
+                            && isPrivateDnsValidationRequired()) {
+                        // Captive portals can only be detected on networks that validate both
+                        // validation and private DNS validation.
+                        validationLog("Captive portal is used as is, resolving private DNS");
+                        transitionTo(mEvaluatingPrivateDnsState);
+                    } else if (!isValidationRequired()) {
                         if (isPrivateDnsValidationRequired()) {
                             validationLog("Network would not satisfy default request, "
                                     + "resolving private DNS");
@@ -1286,7 +1389,9 @@ public class NetworkMonitor extends StateMachine {
                     return HANDLED;
                 case CMD_FORCE_REEVALUATION:
                     // The evaluation process restarts via EvaluatingState#enter.
-                    return shouldAcceptForceRevalidation() ? NOT_HANDLED : HANDLED;
+                    final boolean forceAccept = (message.arg2 != 0);
+                    return forceAccept || shouldAcceptForceRevalidation()
+                            ? NOT_HANDLED : HANDLED;
                 // Disable HTTPS probe and transition to EvaluatingPrivateDnsState because:
                 // 1. Network is connected and finish the network validation.
                 // 2. NetworkMonitor detects network is partial connectivity and user accepts it.
@@ -1538,8 +1643,13 @@ public class NetworkMonitor extends StateMachine {
 
             final int token = ++mProbeToken;
             final ValidationProperties deps = new ValidationProperties(mNetworkCapabilities);
+            final URL fallbackUrl = nextFallbackUrl();
+            final URL[] httpsUrls = Arrays.copyOf(
+                    mCaptivePortalHttpsUrls, mCaptivePortalHttpsUrls.length);
+            final URL[] httpUrls = Arrays.copyOf(
+                    mCaptivePortalHttpUrls, mCaptivePortalHttpUrls.length);
             mThread = new Thread(() -> sendMessage(obtainMessage(CMD_PROBE_COMPLETE, token, 0,
-                    isCaptivePortal(deps))));
+                    isCaptivePortal(deps, httpsUrls, httpUrls, fallbackUrl))));
             mThread.start();
         }
 
@@ -1562,6 +1672,16 @@ public class NetworkMonitor extends StateMachine {
                         // Transit EvaluatingPrivateDnsState to get to Validated
                         // state (even if no Private DNS validation required).
                         transitionTo(mEvaluatingPrivateDnsState);
+                    } else if (isTermsAndConditionsCaptive(
+                            mInfoShim.getCaptivePortalData(mLinkProperties))) {
+                        mLastPortalProbeResult = new CaptivePortalProbeResult(
+                                CaptivePortalProbeResult.PORTAL_CODE,
+                                mLinkProperties.getCaptivePortalData().getUserPortalUrl()
+                                        .toString(), null,
+                                CaptivePortalProbeResult.PROBE_UNKNOWN);
+                        mEvaluationState.reportEvaluationResult(NETWORK_VALIDATION_RESULT_INVALID,
+                                mLastPortalProbeResult.redirectUrl);
+                        transitionTo(mCaptivePortalState);
                     } else if (probeResult.isPortal()) {
                         mEvaluationState.reportEvaluationResult(NETWORK_VALIDATION_RESULT_INVALID,
                                 probeResult.redirectUrl);
@@ -1919,18 +2039,24 @@ public class NetworkMonitor extends StateMachine {
         }
 
         final long now = System.currentTimeMillis();
-        if (expTime < now || (expTime - now) > TEST_URL_EXPIRATION_MS) return null;
+        if (expTime < now || (expTime - now) > TEST_URL_EXPIRATION_MS) {
+            logw("Skipping test URL with expiration " + expTime + ", now " + now);
+            return null;
+        }
 
         final String strUrl = mDependencies.getDeviceConfigProperty(NAMESPACE_CONNECTIVITY,
                 key, null /* defaultValue */);
-        if (!isValidTestUrl(strUrl)) return null;
+        if (!isValidTestUrl(strUrl)) {
+            logw("Skipping invalid test URL " + strUrl);
+            return null;
+        }
         return makeURL(strUrl);
     }
 
-    private String getCaptivePortalServerHttpsUrl() {
-        return getSettingFromResource(mCustomizedContext,
-                R.string.config_captive_portal_https_url, CAPTIVE_PORTAL_HTTPS_URL,
-                mCustomizedContext.getResources().getString(
+    private String getCaptivePortalServerHttpsUrl(@NonNull Context context) {
+        return getSettingFromResource(context,
+                R.string.config_captive_portal_https_url, mCaptivePortalHttpsUrlFromSetting,
+                context.getResources().getString(
                 R.string.default_captive_portal_https_url));
     }
 
@@ -2007,10 +2133,10 @@ public class NetworkMonitor extends StateMachine {
      * it has its own updatable strategies to detect captive portals. The framework only advises
      * on one URL that can be used, while NetworkMonitor may implement more complex logic.
      */
-    public String getCaptivePortalServerHttpUrl() {
-        return getSettingFromResource(mCustomizedContext,
-                R.string.config_captive_portal_http_url, CAPTIVE_PORTAL_HTTP_URL,
-                mCustomizedContext.getResources().getString(
+    public String getCaptivePortalServerHttpUrl(@NonNull Context context) {
+        return getSettingFromResource(context,
+                R.string.config_captive_portal_http_url, mCaptivePortalHttpUrlFromSetting,
+                context.getResources().getString(
                 R.string.default_captive_portal_http_url));
     }
 
@@ -2046,13 +2172,13 @@ public class NetworkMonitor extends StateMachine {
     }
 
     @VisibleForTesting
-    URL[] makeCaptivePortalFallbackUrls() {
+    URL[] makeCaptivePortalFallbackUrls(@NonNull Context context) {
         try {
             final String firstUrl = mDependencies.getSetting(mContext, CAPTIVE_PORTAL_FALLBACK_URL,
                     null);
             final URL[] settingProviderUrls =
                 combineCaptivePortalUrls(firstUrl, CAPTIVE_PORTAL_OTHER_FALLBACK_URLS);
-            return getProbeUrlArrayConfig(settingProviderUrls,
+            return getProbeUrlArrayConfig(context, settingProviderUrls,
                     R.array.config_captive_portal_fallback_urls,
                     R.array.default_captive_portal_fallback_urls,
                     this::makeURL);
@@ -2063,7 +2189,7 @@ public class NetworkMonitor extends StateMachine {
         }
     }
 
-    private CaptivePortalProbeSpec[] makeCaptivePortalFallbackProbeSpecs() {
+    private CaptivePortalProbeSpec[] makeCaptivePortalFallbackProbeSpecs(@NonNull Context context) {
         try {
             final String settingsValue = mDependencies.getDeviceConfigProperty(
                     NAMESPACE_CONNECTIVITY, CAPTIVE_PORTAL_FALLBACK_PROBE_SPECS, null);
@@ -2073,7 +2199,7 @@ public class NetworkMonitor extends StateMachine {
                     ? emptySpecs
                     : parseCaptivePortalProbeSpecs(settingsValue).toArray(emptySpecs);
 
-            return getProbeUrlArrayConfig(providerValue,
+            return getProbeUrlArrayConfig(context, providerValue,
                     R.array.config_captive_portal_fallback_probe_specs,
                     DEFAULT_CAPTIVE_PORTAL_FALLBACK_PROBE_SPECS,
                     CaptivePortalProbeSpec::parseSpecOrNull);
@@ -2084,17 +2210,17 @@ public class NetworkMonitor extends StateMachine {
         }
     }
 
-    private URL[] makeCaptivePortalHttpsUrls() {
+    private URL[] makeCaptivePortalHttpsUrls(@NonNull Context context) {
         final URL testUrl = getTestUrl(TEST_CAPTIVE_PORTAL_HTTPS_URL);
         if (testUrl != null) return new URL[] { testUrl };
 
-        final String firstUrl = getCaptivePortalServerHttpsUrl();
+        final String firstUrl = getCaptivePortalServerHttpsUrl(context);
         try {
             final URL[] settingProviderUrls =
                 combineCaptivePortalUrls(firstUrl, CAPTIVE_PORTAL_OTHER_HTTPS_URLS);
             // firstUrl will at least be default configuration, so default value in
             // getProbeUrlArrayConfig is actually never used.
-            return getProbeUrlArrayConfig(settingProviderUrls,
+            return getProbeUrlArrayConfig(context, settingProviderUrls,
                     R.array.config_captive_portal_https_urls,
                     DEFAULT_CAPTIVE_PORTAL_HTTPS_URLS, this::makeURL);
         } catch (Exception e) {
@@ -2105,17 +2231,17 @@ public class NetworkMonitor extends StateMachine {
         }
     }
 
-    private URL[] makeCaptivePortalHttpUrls() {
+    private URL[] makeCaptivePortalHttpUrls(@NonNull Context context) {
         final URL testUrl = getTestUrl(TEST_CAPTIVE_PORTAL_HTTP_URL);
         if (testUrl != null) return new URL[] { testUrl };
 
-        final String firstUrl = getCaptivePortalServerHttpUrl();
+        final String firstUrl = getCaptivePortalServerHttpUrl(context);
         try {
             final URL[] settingProviderUrls =
                     combineCaptivePortalUrls(firstUrl, CAPTIVE_PORTAL_OTHER_HTTP_URLS);
             // firstUrl will at least be default configuration, so default value in
             // getProbeUrlArrayConfig is actually never used.
-            return getProbeUrlArrayConfig(settingProviderUrls,
+            return getProbeUrlArrayConfig(context, settingProviderUrls,
                     R.array.config_captive_portal_http_urls,
                     DEFAULT_CAPTIVE_PORTAL_HTTP_URLS, this::makeURL);
         } catch (Exception e) {
@@ -2143,21 +2269,20 @@ public class NetworkMonitor extends StateMachine {
      * <p>The configuration resource is prioritized, then the provider value.
      * @param context The context
      * @param configResource The resource id for the configuration parameter
-     * @param symbol The symbol in the settings provider
+     * @param settingValue The value in the settings provider
      * @param defaultValue The default value
      * @return The best available value
      */
     @Nullable
     private String getSettingFromResource(@NonNull final Context context,
-            @StringRes int configResource, @NonNull String symbol, @NonNull String defaultValue) {
+            @StringRes int configResource, @NonNull String settingValue,
+            @NonNull String defaultValue) {
         final Resources res = context.getResources();
         String setting = res.getString(configResource);
 
         if (!TextUtils.isEmpty(setting)) return setting;
 
-        setting = mDependencies.getSetting(context, symbol, null);
-
-        if (!TextUtils.isEmpty(setting)) return setting;
+        if (!TextUtils.isEmpty(settingValue)) return settingValue;
 
         return defaultValue;
     }
@@ -2167,17 +2292,20 @@ public class NetworkMonitor extends StateMachine {
      *
      * <p>The configuration resource is prioritized, then the provider values, then the default
      * resource values.
+     *
+     * @param context The Context
      * @param providerValue Values obtained from the setting provider.
      * @param configResId ID of the configuration resource.
      * @param defaultResId ID of the default resource.
      * @param resourceConverter Converter from the resource strings to stored setting class. Null
      *                          return values are ignored.
      */
-    private <T> T[] getProbeUrlArrayConfig(@NonNull T[] providerValue, @ArrayRes int configResId,
-            @ArrayRes int defaultResId, @NonNull Function<String, T> resourceConverter) {
-        final Resources res = mCustomizedContext.getResources();
-        return getProbeUrlArrayConfig(providerValue, configResId, res.getStringArray(defaultResId),
-                resourceConverter);
+    private <T> T[] getProbeUrlArrayConfig(@NonNull Context context, @NonNull T[] providerValue,
+            @ArrayRes int configResId, @ArrayRes int defaultResId,
+            @NonNull Function<String, T> resourceConverter) {
+        final Resources res = context.getResources();
+        return getProbeUrlArrayConfig(context, providerValue, configResId,
+                res.getStringArray(defaultResId), resourceConverter);
     }
 
     /**
@@ -2185,15 +2313,18 @@ public class NetworkMonitor extends StateMachine {
      *
      * <p>The configuration resource is prioritized, then the provider values, then the default
      * resource values.
+     *
+     * @param context The Context
      * @param providerValue Values obtained from the setting provider.
      * @param configResId ID of the configuration resource.
      * @param defaultConfig Values of default configuration.
      * @param resourceConverter Converter from the resource strings to stored setting class. Null
      *                          return values are ignored.
      */
-    private <T> T[] getProbeUrlArrayConfig(@NonNull T[] providerValue, @ArrayRes int configResId,
-            String[] defaultConfig, @NonNull Function<String, T> resourceConverter) {
-        final Resources res = mCustomizedContext.getResources();
+    private <T> T[] getProbeUrlArrayConfig(@NonNull Context context, @NonNull T[] providerValue,
+            @ArrayRes int configResId, String[] defaultConfig,
+            @NonNull Function<String, T> resourceConverter) {
+        final Resources res = context.getResources();
         String[] configValue = res.getStringArray(configResId);
 
         if (configValue.length == 0) {
@@ -2272,15 +2403,14 @@ public class NetworkMonitor extends StateMachine {
         }
     }
 
-    private CaptivePortalProbeResult isCaptivePortal(ValidationProperties properties) {
+    private CaptivePortalProbeResult isCaptivePortal(ValidationProperties properties,
+            URL[] httpsUrls, URL[] httpUrls, URL fallbackUrl) {
         if (!mIsCaptivePortalCheckEnabled) {
             validationLog("Validation disabled.");
             return CaptivePortalProbeResult.success(CaptivePortalProbeResult.PROBE_UNKNOWN);
         }
 
         URL pacUrl = null;
-        final URL[] httpsUrls = mCaptivePortalHttpsUrls;
-        final URL[] httpUrls = mCaptivePortalHttpUrls;
 
         // On networks with a PAC instead of fetching a URL that should result in a 204
         // response, we instead simply fetch the PAC script.  This is done for a few reasons:
@@ -2321,7 +2451,7 @@ public class NetworkMonitor extends StateMachine {
         } else if (mUseHttps && httpsUrls.length == 1 && httpUrls.length == 1) {
             // Probe results are reported inside sendHttpAndHttpsParallelWithFallbackProbes.
             result = sendHttpAndHttpsParallelWithFallbackProbes(properties, proxyInfo,
-                    httpsUrls[0], httpUrls[0]);
+                    httpsUrls[0], httpUrls[0], fallbackUrl);
         } else if (mUseHttps) {
             // Support result aggregation from multiple Urls.
             result = sendMultiParallelHttpAndHttpsProbes(properties, proxyInfo, httpsUrls,
@@ -2332,10 +2462,6 @@ public class NetworkMonitor extends StateMachine {
         }
 
         long endTime = SystemClock.elapsedRealtime();
-
-        sendNetworkConditionsBroadcast(true /* response received */,
-                result.isPortal() /* isCaptivePortal */,
-                startTime, endTime);
 
         log("isCaptivePortal: isSuccessful()=" + result.isSuccessful()
                 + " isPortal()=" + result.isPortal()
@@ -2433,7 +2559,7 @@ public class NetworkMonitor extends StateMachine {
         String redirectUrl = null;
         final Stopwatch probeTimer = new Stopwatch().start();
         final int oldTag = TrafficStats.getAndSetThreadStatsTag(
-                TrafficStatsConstants.TAG_SYSTEM_PROBE);
+                NetworkStackConstants.TAG_SYSTEM_PROBE);
         try {
             // Follow redirects for PAC probes as such probes verify connectivity by fetching the
             // PAC proxy file, which may be configured behind a redirect.
@@ -2519,8 +2645,17 @@ public class NetworkMonitor extends StateMachine {
 
         final CaptivePortalProbeResult probeResult;
         if (probeSpec == null) {
+            if (CaptivePortalProbeResult.isPortalCode(httpResponseCode)
+                    && TextUtils.isEmpty(redirectUrl)
+                    && ShimUtils.isAtLeastS()) {
+                // If a portal is a non-redirect portal (often portals that return HTTP 200 with a
+                // login page for all HTTP requests), report the probe URL as the login URL starting
+                // from S (b/172048052). This avoids breaking assumptions that
+                // [is a portal] is equivalent to [there is a login URL].
+                redirectUrl = url.toString();
+            }
             probeResult = new CaptivePortalProbeResult(httpResponseCode, redirectUrl,
-                    url.toString(),   1 << probeType);
+                    url.toString(), 1 << probeType);
         } else {
             probeResult = probeSpec.getResult(httpResponseCode, redirectUrl);
         }
@@ -2918,7 +3053,8 @@ public class NetworkMonitor extends StateMachine {
     }
 
     private CaptivePortalProbeResult sendHttpAndHttpsParallelWithFallbackProbes(
-            ValidationProperties properties, ProxyInfo proxy, URL httpsUrl, URL httpUrl) {
+            ValidationProperties properties, ProxyInfo proxy, URL httpsUrl, URL httpUrl,
+            URL fallbackUrl) {
         // Number of probes to wait for. If a probe completes with a conclusive answer
         // it shortcuts the latch immediately by forcing the count to 0.
         final CountDownLatch latch = new CountDownLatch(2);
@@ -2964,10 +3100,10 @@ public class NetworkMonitor extends StateMachine {
         // If a fallback method exists, use it to retry portal detection.
         // If we have new-style probe specs, use those. Otherwise, use the fallback URLs.
         final CaptivePortalProbeSpec probeSpec = nextFallbackSpec();
-        final URL fallbackUrl = (probeSpec != null) ? probeSpec.getUrl() : nextFallbackUrl();
+        final URL fallback = (probeSpec != null) ? probeSpec.getUrl() : fallbackUrl;
         CaptivePortalProbeResult fallbackProbeResult = null;
-        if (fallbackUrl != null) {
-            fallbackProbeResult = sendHttpProbe(fallbackUrl, PROBE_FALLBACK, probeSpec);
+        if (fallback != null) {
+            fallbackProbeResult = sendHttpProbe(fallback, PROBE_FALLBACK, probeSpec);
             reportHttpProbeResult(NETWORK_VALIDATION_PROBE_FALLBACK, fallbackProbeResult);
             if (fallbackProbeResult.isPortal()) {
                 return fallbackProbeResult;
@@ -3004,74 +3140,6 @@ public class NetworkMonitor extends StateMachine {
             }
         }
         return null;
-    }
-
-    /**
-     * @param responseReceived - whether or not we received a valid HTTP response to our request.
-     * If false, isCaptivePortal and responseTimestampMs are ignored
-     * TODO: This should be moved to the transports.  The latency could be passed to the transports
-     * along with the captive portal result.  Currently the TYPE_MOBILE broadcasts appear unused so
-     * perhaps this could just be added to the WiFi transport only.
-     */
-    private void sendNetworkConditionsBroadcast(boolean responseReceived, boolean isCaptivePortal,
-            long requestTimestampMs, long responseTimestampMs) {
-        Intent latencyBroadcast =
-                new Intent(NetworkMonitorUtils.ACTION_NETWORK_CONDITIONS_MEASURED);
-        if (mNetworkCapabilities.hasTransport(TRANSPORT_WIFI)) {
-            if (!mWifiManager.isScanAlwaysAvailable()) {
-                return;
-            }
-
-            WifiInfo currentWifiInfo = mWifiManager.getConnectionInfo();
-            if (currentWifiInfo != null) {
-                // NOTE: getSSID()'s behavior changed in API 17; before that, SSIDs were not
-                // surrounded by double quotation marks (thus violating the Javadoc), but this
-                // was changed to match the Javadoc in API 17. Since clients may have started
-                // sanitizing the output of this method since API 17 was released, we should
-                // not change it here as it would become impossible to tell whether the SSID is
-                // simply being surrounded by quotes due to the API, or whether those quotes
-                // are actually part of the SSID.
-                latencyBroadcast.putExtra(NetworkMonitorUtils.EXTRA_SSID,
-                        currentWifiInfo.getSSID());
-                latencyBroadcast.putExtra(NetworkMonitorUtils.EXTRA_BSSID,
-                        currentWifiInfo.getBSSID());
-            } else {
-                if (VDBG) logw("network info is TYPE_WIFI but no ConnectionInfo found");
-                return;
-            }
-            latencyBroadcast.putExtra(NetworkMonitorUtils.EXTRA_CONNECTIVITY_TYPE, TYPE_WIFI);
-        } else if (mNetworkCapabilities.hasTransport(TRANSPORT_CELLULAR)) {
-            // TODO(b/123893112): Support multi-sim.
-            latencyBroadcast.putExtra(NetworkMonitorUtils.EXTRA_NETWORK_TYPE,
-                    mTelephonyManager.getNetworkType());
-            final ServiceState dataSs = mTelephonyManager.getServiceState();
-            if (dataSs == null) {
-                logw("failed to retrieve ServiceState");
-                return;
-            }
-            // See if the data sub is registered for PS services on cell.
-            final NetworkRegistrationInfo nri = dataSs.getNetworkRegistrationInfo(
-                    NetworkRegistrationInfo.DOMAIN_PS,
-                    AccessNetworkConstants.TRANSPORT_TYPE_WWAN);
-            latencyBroadcast.putExtra(
-                    NetworkMonitorUtils.EXTRA_CELL_ID,
-                    nri == null ? null : nri.getCellIdentity());
-            latencyBroadcast.putExtra(NetworkMonitorUtils.EXTRA_CONNECTIVITY_TYPE, TYPE_MOBILE);
-        } else {
-            return;
-        }
-        latencyBroadcast.putExtra(NetworkMonitorUtils.EXTRA_RESPONSE_RECEIVED,
-                responseReceived);
-        latencyBroadcast.putExtra(NetworkMonitorUtils.EXTRA_REQUEST_TIMESTAMP_MS,
-                requestTimestampMs);
-
-        if (responseReceived) {
-            latencyBroadcast.putExtra(NetworkMonitorUtils.EXTRA_IS_CAPTIVE_PORTAL,
-                    isCaptivePortal);
-            latencyBroadcast.putExtra(NetworkMonitorUtils.EXTRA_RESPONSE_TIMESTAMP_MS,
-                    responseTimestampMs);
-        }
-        mDependencies.sendNetworkConditionsBroadcast(mContext, latencyBroadcast);
     }
 
     private void logNetworkEvent(int evtype) {
@@ -3186,15 +3254,6 @@ public class NetworkMonitor extends StateMachine {
         }
 
         /**
-         * Send a broadcast indicating network conditions.
-         */
-        public void sendNetworkConditionsBroadcast(@NonNull Context context,
-                @NonNull Intent broadcast) {
-            context.sendBroadcastAsUser(broadcast, UserHandle.CURRENT,
-                    NetworkMonitorUtils.PERMISSION_ACCESS_NETWORK_CONDITIONS);
-        }
-
-        /**
          * Check whether or not one specific experimental feature for a particular namespace from
          * {@link DeviceConfig} is enabled by comparing NetworkStack module version
          * {@link NetworkStack} with current version of property. If this property version is valid,
@@ -3216,7 +3275,7 @@ public class NetworkMonitor extends StateMachine {
          * data to statsd pipeline.
          * @param stats a {@link DataStallDetectionStats} that contains the detection level
          *              information.
-         * @para result the network reevaluation result.
+         * @param result the network reevaluation result.
          */
         public void writeDataStallDetectionStats(@NonNull final DataStallDetectionStats stats,
                 @NonNull final CaptivePortalProbeResult result) {
@@ -3277,6 +3336,10 @@ public class NetworkMonitor extends StateMachine {
             // considered in the evaluation happened in defined threshold time.
             final long now = SystemClock.elapsedRealtime();
             final long firstTimeoutTime = now - mDnsEvents[firstConsecutiveTimeoutIndex].mTimeStamp;
+            if (DDBG_STALL) {
+                Log.d(TAG, "DSD.isDataStallSuspected, first="
+                        + firstTimeoutTime + ", valid=" + validTime);
+            }
             return (firstTimeoutTime < validTime);
         }
 
@@ -3331,12 +3394,17 @@ public class NetworkMonitor extends StateMachine {
 
         int typeToCollect = 0;
         final int notStall = -1;
-        final StringJoiner msg = (DBG || VDBG_STALL) ? new StringJoiner(", ") : null;
+        final StringJoiner msg = (DBG || VDBG_STALL || DDBG_STALL) ? new StringJoiner(", ") : null;
         // Reevaluation will generate traffic. Thus, set a minimal reevaluation timer to limit the
         // possible traffic cost in metered network.
+        final long currentTime = SystemClock.elapsedRealtime();
         if (!mNetworkCapabilities.hasCapability(NET_CAPABILITY_NOT_METERED)
-                && (SystemClock.elapsedRealtime() - getLastProbeTime()
-                < mDataStallMinEvaluateTime)) {
+                && (currentTime - getLastProbeTime() < mDataStallMinEvaluateTime)) {
+            if (DDBG_STALL) {
+                Log.d(TAG, "isDataStall: false, currentTime=" + currentTime
+                        + ", lastProbeTime=" + getLastProbeTime()
+                        + ", MinEvaluateTime=" + mDataStallMinEvaluateTime);
+            }
             return false;
         }
         // Check TCP signal. Suspect it may be a data stall if :
@@ -3349,7 +3417,7 @@ public class NetworkMonitor extends StateMachine {
             } else if (tst.isDataStallSuspected()) {
                 typeToCollect |= DATA_STALL_EVALUATION_TYPE_TCP;
             }
-            if (DBG || VDBG_STALL) {
+            if (DBG || VDBG_STALL || DDBG_STALL) {
                 msg.add("tcp packets received=" + tst.getLatestReceivedCount())
                     .add("latest tcp fail rate=" + tst.getLatestPacketFailPercentage());
             }
@@ -3366,7 +3434,7 @@ public class NetworkMonitor extends StateMachine {
                 typeToCollect |= DATA_STALL_EVALUATION_TYPE_DNS;
                 logNetworkEvent(NetworkEvent.NETWORK_CONSECUTIVE_DNS_TIMEOUT_FOUND);
             }
-            if (DBG || VDBG_STALL) {
+            if (DBG || VDBG_STALL || DDBG_STALL) {
                 msg.add("consecutive dns timeout count=" + dsd.getConsecutiveTimeoutCount());
             }
         }
@@ -3391,7 +3459,7 @@ public class NetworkMonitor extends StateMachine {
         }
 
         // log only data stall suspected.
-        if ((DBG && (typeToCollect > 0)) || VDBG_STALL) {
+        if ((DBG && (typeToCollect > 0)) || VDBG_STALL || DDBG_STALL) {
             log("isDataStall: result=" + typeToCollect + ", " + msg);
         }
 
@@ -3417,18 +3485,28 @@ public class NetworkMonitor extends StateMachine {
     // NETWORK_VALIDATION_RESULT_VALID. But with this scheme, the first two or three validation
     // reports are all failures, because they are "HTTP succeeded but validation not yet passed",
     // "HTTP and HTTPS succeeded but validation not yet passed", etc.
+    // TODO : rename EvaluationState to not contain "State" in the name, as it makes this class
+    // sound like one of the states of the state machine, which it's not.
     @VisibleForTesting
     protected class EvaluationState {
         // The latest validation result for this network. This is a bitmask of
         // INetworkMonitor.NETWORK_VALIDATION_RESULT_* constants.
         private int mEvaluationResult = NETWORK_VALIDATION_RESULT_INVALID;
+
+
+        // Set when the captive portal app said this network should be used as is as a result
+        // of user interaction. The valid bit represents the user's decision to override automatic
+        // determination of whether the network has access to Internet, so in this case the
+        // network is always reported as validated.
+        // TODO : Make ConnectivityService aware of this state, so that it can use the network as
+        // the default without setting the VALIDATED bit, as it's a bit of a lie. This can't be
+        // done on Android <= R where CS can't be updated, but it is doable on S+.
+        private boolean mCaptivePortalWantedAsIs = false;
         // Indicates which probes have succeeded since clearProbeResults was called.
         // This is a bitmask of INetworkMonitor.NETWORK_VALIDATION_PROBE_* constants.
         private int mProbeResults = 0;
         // A bitmask to record which probes are completed.
         private int mProbeCompleted = 0;
-        // The latest redirect URL.
-        private String mRedirectUrl;
 
         protected void clearProbeResults() {
             mProbeResults = 0;
@@ -3462,9 +3540,26 @@ public class NetworkMonitor extends StateMachine {
             });
         }
 
+        protected void setCaptivePortalWantedAsIs() {
+            mCaptivePortalWantedAsIs = true;
+        }
+
+        protected boolean isCaptivePortalWantedAsIs() {
+            return mCaptivePortalWantedAsIs;
+        }
+
         protected void reportEvaluationResult(int result, @Nullable String redirectUrl) {
+            if (mCaptivePortalWantedAsIs) {
+                result = NETWORK_VALIDATION_RESULT_VALID;
+            } else if (!isValidationRequired() && mProbeCompleted == 0 && mCallbackVersion >= 11) {
+                // If validation is not required AND no probes were attempted, the validation was
+                // skipped. Report this to ConnectivityService for ConnectivityDiagnostics, but only
+                // if the platform has callback version 11+, as ConnectivityService must also know
+                // how to understand this bit.
+                result |= NETWORK_VALIDATION_RESULT_SKIPPED;
+            }
+
             mEvaluationResult = result;
-            mRedirectUrl = redirectUrl;
             final NetworkTestResultParcelable p = new NetworkTestResultParcelable();
             p.result = result;
             p.probesSucceeded = mProbeResults;
@@ -3565,5 +3660,51 @@ public class NetworkMonitor extends StateMachine {
 
     private static Uri getCaptivePortalApiUrl(LinkProperties lp) {
         return NetworkInformationShimImpl.newInstance().getCaptivePortalApiUrl(lp);
+    }
+
+    /**
+     * Check if the network is captive with terms and conditions page
+     * @return true if network is captive with T&C page, false otherwise
+     */
+    private boolean isTermsAndConditionsCaptive(CaptivePortalDataShim captivePortalDataShim) {
+        return captivePortalDataShim != null
+                && captivePortalDataShim.getUserPortalUrl() != null
+                && !TextUtils.isEmpty(captivePortalDataShim.getUserPortalUrl().toString())
+                && captivePortalDataShim.isCaptive()
+                && captivePortalDataShim.getUserPortalUrlSource()
+                == ConstantsShim.CAPTIVE_PORTAL_DATA_SOURCE_PASSPOINT;
+    }
+
+    private boolean checkAndRenewResourceConfig() {
+        boolean reevaluationNeeded = false;
+
+        final Context customizedContext = getCustomizedContextOrDefault();
+        final URL[] captivePortalHttpsUrls = makeCaptivePortalHttpsUrls(customizedContext);
+        if (!Arrays.equals(mCaptivePortalHttpsUrls, captivePortalHttpsUrls)) {
+            mCaptivePortalHttpsUrls = captivePortalHttpsUrls;
+            reevaluationNeeded = true;
+            log("checkAndRenewResourceConfig: update captive portal https urls to "
+                    + Arrays.toString(mCaptivePortalHttpsUrls));
+        }
+
+        final URL[] captivePortalHttpUrls = makeCaptivePortalHttpUrls(customizedContext);
+        if (!Arrays.equals(mCaptivePortalHttpUrls, captivePortalHttpUrls)) {
+            mCaptivePortalHttpUrls = captivePortalHttpUrls;
+            reevaluationNeeded = true;
+            log("checkAndRenewResourceConfig: update captive portal http urls to "
+                    + Arrays.toString(mCaptivePortalHttpUrls));
+        }
+
+        final URL[] captivePortalFallbackUrls = makeCaptivePortalFallbackUrls(customizedContext);
+        if (!Arrays.equals(mCaptivePortalFallbackUrls, captivePortalFallbackUrls)) {
+            mCaptivePortalFallbackUrls = captivePortalFallbackUrls;
+            // Reset the index since the array is changed.
+            mNextFallbackUrlIndex = 0;
+            reevaluationNeeded = true;
+            log("checkAndRenewResourceConfig: update captive portal fallback urls to"
+                    + Arrays.toString(mCaptivePortalFallbackUrls));
+        }
+
+        return reevaluationNeeded;
     }
 }
