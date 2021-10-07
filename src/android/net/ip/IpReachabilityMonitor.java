@@ -20,6 +20,8 @@ import static android.net.metrics.IpReachabilityEvent.NUD_FAILED;
 import static android.net.metrics.IpReachabilityEvent.NUD_FAILED_ORGANIC;
 import static android.net.metrics.IpReachabilityEvent.PROVISIONING_LOST;
 import static android.net.metrics.IpReachabilityEvent.PROVISIONING_LOST_ORGANIC;
+import static android.net.util.NetworkStackUtils.IP_REACHABILITY_MCAST_RESOLICIT_VERSION;
+import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
 
 import android.content.Context;
 import android.net.ConnectivityManager;
@@ -30,7 +32,6 @@ import android.net.ip.IpNeighborMonitor.NeighborEvent;
 import android.net.ip.IpNeighborMonitor.NeighborEventConsumer;
 import android.net.metrics.IpConnectivityLog;
 import android.net.metrics.IpReachabilityEvent;
-import android.net.netlink.StructNdMsg;
 import android.net.util.InterfaceParams;
 import android.net.util.SharedLog;
 import android.os.ConditionVariable;
@@ -40,12 +41,21 @@ import android.os.PowerManager;
 import android.os.PowerManager.WakeLock;
 import android.os.RemoteException;
 import android.os.SystemClock;
+import android.stats.connectivity.IpType;
+import android.stats.connectivity.NudEventType;
+import android.stats.connectivity.NudNeighborType;
 import android.text.TextUtils;
 import android.util.Log;
 
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.Preconditions;
+import com.android.net.module.util.DeviceConfigUtils;
+import com.android.net.module.util.netlink.StructNdMsg;
 import com.android.networkstack.R;
+import com.android.networkstack.metrics.IpReachabilityMonitorMetrics;
 
 import java.io.PrintWriter;
 import java.net.Inet6Address;
@@ -143,6 +153,10 @@ public class IpReachabilityMonitor {
     protected static final int MIN_NUD_SOLICIT_NUM = 5;
     protected static final int MAX_NUD_SOLICIT_INTERVAL_MS = 1000;
     protected static final int MIN_NUD_SOLICIT_INTERVAL_MS = 750;
+    protected static final int NUD_MCAST_RESOLICIT_NUM = 3;
+    private static final int INVALID_NUD_MCAST_RESOLICIT_NUM = -1;
+
+    private static final int INVALID_LEGACY_NUD_FAILURE_TYPE = -1;
 
     public interface Callback {
         /**
@@ -161,6 +175,8 @@ public class IpReachabilityMonitor {
     interface Dependencies {
         void acquireWakeLock(long durationMs);
         IpNeighborMonitor makeIpNeighborMonitor(Handler h, SharedLog log, NeighborEventConsumer cb);
+        boolean isFeatureEnabled(Context context, String name, boolean defaultEnabled);
+        IpReachabilityMonitorMetrics getIpReachabilityMonitorMetrics();
 
         static Dependencies makeDefault(Context context, String iface) {
             final String lockName = TAG + "." + iface;
@@ -176,6 +192,16 @@ public class IpReachabilityMonitor {
                         NeighborEventConsumer cb) {
                     return new IpNeighborMonitor(h, log, cb);
                 }
+
+                public boolean isFeatureEnabled(final Context context, final String name,
+                        boolean defaultEnabled) {
+                    return DeviceConfigUtils.isFeatureEnabled(context, NAMESPACE_CONNECTIVITY, name,
+                            defaultEnabled);
+                }
+
+                public IpReachabilityMonitorMetrics getIpReachabilityMonitorMetrics() {
+                    return new IpReachabilityMonitorMetrics();
+                }
             };
         }
     }
@@ -183,25 +209,30 @@ public class IpReachabilityMonitor {
     private final InterfaceParams mInterfaceParams;
     private final IpNeighborMonitor mIpNeighborMonitor;
     private final SharedLog mLog;
-    private final Callback mCallback;
     private final Dependencies mDependencies;
     private final boolean mUsingMultinetworkPolicyTracker;
     private final ConnectivityManager mCm;
     private final IpConnectivityLog mMetricsLog;
     private final Context mContext;
     private final INetd mNetd;
+    private final IpReachabilityMonitorMetrics mIpReachabilityMetrics;
     private LinkProperties mLinkProperties = new LinkProperties();
     private Map<InetAddress, NeighborEvent> mNeighborWatchList = new HashMap<>();
     // Time in milliseconds of the last forced probe request.
     private volatile long mLastProbeTimeMs;
+    // Time in milliseconds of the last forced probe request due to roam or CMD_CONFIRM.
+    private long mLastProbeDueToRoamMs;
+    private long mLastProbeDueToConfirmMs;
     private int mNumSolicits;
     private int mInterSolicitIntervalMs;
+    @NonNull
+    private final Callback mCallback;
 
     public IpReachabilityMonitor(
             Context context, InterfaceParams ifParams, Handler h, SharedLog log, Callback callback,
-            boolean usingMultinetworkPolicyTracker, final INetd netd) {
-        this(context, ifParams, h, log, callback, usingMultinetworkPolicyTracker,
-                Dependencies.makeDefault(context, ifParams.name), new IpConnectivityLog(), netd);
+            boolean usingMultinetworkPolicyTracker, Dependencies dependencies, final INetd netd) {
+        this(context, ifParams, h, log, callback, usingMultinetworkPolicyTracker, dependencies,
+                new IpConnectivityLog(), netd);
     }
 
     @VisibleForTesting
@@ -225,7 +256,10 @@ public class IpReachabilityMonitor {
         // In case the overylaid parameters specify an invalid configuration, set the parameters
         // to the hardcoded defaults first, then set them to the values used in the steady state.
         try {
-            setNeighborParameters(MIN_NUD_SOLICIT_NUM, MIN_NUD_SOLICIT_INTERVAL_MS);
+            int numResolicits = isMulticastResolicitEnabled()
+                    ? NUD_MCAST_RESOLICIT_NUM
+                    : INVALID_NUD_MCAST_RESOLICIT_NUM;
+            setNeighborParameters(MIN_NUD_SOLICIT_NUM, MIN_NUD_SOLICIT_INTERVAL_MS, numResolicits);
         } catch (Exception e) {
             Log.e(TAG, "Failed to adjust neighbor parameters with hardcoded defaults");
         }
@@ -241,13 +275,16 @@ public class IpReachabilityMonitor {
                     // TODO: Consider what to do with other states that are not within
                     // NeighborEvent#isValid() (i.e. NUD_NONE, NUD_INCOMPLETE).
                     if (event.nudState == StructNdMsg.NUD_FAILED) {
+                        // After both unicast probe and multicast probe(if mcast_resolicit is not 0)
+                        // attempts fail, trigger the neighbor lost event and disconnect.
                         mLog.w("ALERT neighbor went from: " + prev + " to: " + event);
                         handleNeighborLost(event);
                     } else if (event.nudState == StructNdMsg.NUD_REACHABLE) {
-                        maybeRestoreNeighborParameters();
+                        handleNeighborReachable(prev, event);
                     }
                 });
         mIpNeighborMonitor.start();
+        mIpReachabilityMetrics = dependencies.getIpReachabilityMonitorMetrics();
     }
 
     public void stop() {
@@ -296,6 +333,33 @@ public class IpReachabilityMonitor {
         return false;
     }
 
+    private boolean hasDefaultRouterNeighborMacAddressChanged(
+            @Nullable final NeighborEvent prev, @NonNull final NeighborEvent event) {
+        if (prev == null || !isNeighborDefaultRouter(event)) return false;
+        return !event.macAddr.equals(prev.macAddr);
+    }
+
+    private boolean isNeighborDefaultRouter(@NonNull final NeighborEvent event) {
+        // For the IPv6 link-local scoped address, equals() works because the NeighborEvent.ip
+        // doesn't have a scope id and Inet6Address#equals doesn't consider scope id neither.
+        for (RouteInfo route : mLinkProperties.getRoutes()) {
+            if (route.isDefaultRoute() && event.ip.equals(route.getGateway())) return true;
+        }
+        return false;
+    }
+
+    private boolean isNeighborDnsServer(@NonNull final NeighborEvent event) {
+        for (InetAddress dns : mLinkProperties.getDnsServers()) {
+            if (event.ip.equals(dns)) return true;
+        }
+        return false;
+    }
+
+    private boolean isMulticastResolicitEnabled() {
+        return mDependencies.isFeatureEnabled(mContext, IP_REACHABILITY_MCAST_RESOLICIT_VERSION,
+                false /* defaultEnabled */);
+    }
+
     public void updateLinkProperties(LinkProperties lp) {
         if (!mInterfaceParams.name.equals(lp.getInterfaceName())) {
             // TODO: figure out whether / how to cope with interface changes.
@@ -333,6 +397,25 @@ public class IpReachabilityMonitor {
         if (DBG) { Log.d(TAG, "clear: " + describeWatchList()); }
     }
 
+    private void handleNeighborReachable(@Nullable final NeighborEvent prev,
+            @NonNull final NeighborEvent event) {
+        if (isMulticastResolicitEnabled()
+                && hasDefaultRouterNeighborMacAddressChanged(prev, event)) {
+            // This implies device has confirmed the neighbor's reachability from
+            // other states(e.g., NUD_PROBE or NUD_STALE), checking if the mac
+            // address hasn't changed is required. If Mac address does change, then
+            // trigger a new neighbor lost event and disconnect.
+            final String logMsg = "ALERT neighbor: " + event.ip
+                    + " MAC address changed from: " + prev.macAddr
+                    + " to: " + event.macAddr;
+            mLog.w(logMsg);
+            mCallback.notifyLost(event.ip, logMsg);
+            logNudFailed(event, NudEventType.NUD_MAC_ADDRESS_CHANGED);
+            return;
+        }
+        maybeRestoreNeighborParameters();
+    }
+
     private void handleNeighborLost(NeighborEvent event) {
         final LinkProperties whatIfLp = new LinkProperties(mLinkProperties);
 
@@ -366,17 +449,17 @@ public class IpReachabilityMonitor {
         final boolean lostProvisioning =
                 (mLinkProperties.isIpv4Provisioned() && !whatIfLp.isIpv4Provisioned())
                 || (mLinkProperties.isIpv6Provisioned() && !whatIfLp.isIpv6Provisioned());
+        final NudEventType type = getNudFailureEventType(isFromProbe(),
+                isNudFailureDueToRoam(), lostProvisioning);
 
         if (lostProvisioning) {
             final String logMsg = "FAILURE: LOST_PROVISIONING, " + event;
             Log.w(TAG, logMsg);
-            if (mCallback != null) {
-                // TODO: remove |ip| when the callback signature no longer has
-                // an InetAddress argument.
-                mCallback.notifyLost(ip, logMsg);
-            }
+            // TODO: remove |ip| when the callback signature no longer has
+            // an InetAddress argument.
+            mCallback.notifyLost(ip, logMsg);
         }
-        logNudFailed(lostProvisioning);
+        logNudFailed(event, type);
     }
 
     private void maybeRestoreNeighborParameters() {
@@ -400,7 +483,13 @@ public class IpReachabilityMonitor {
         return !mUsingMultinetworkPolicyTracker || mCm.shouldAvoidBadWifi();
     }
 
-    public void probeAll() {
+    /**
+     * Force probe to verify whether or not the critical on-link neighbours are still reachable.
+     *
+     * @param dueToRoam indicate on which situation forced probe has been sent, e.g., on post
+     *                  roaming or receiving CMD_CONFIRM from IpClient.
+     */
+    public void probeAll(boolean dueToRoam) {
         setNeighbourParametersPostRoaming();
 
         final List<InetAddress> ipProbeList = new ArrayList<>(mNeighborWatchList.keySet());
@@ -421,6 +510,11 @@ public class IpReachabilityMonitor {
             logEvent(IpReachabilityEvent.PROBE, rval);
         }
         mLastProbeTimeMs = SystemClock.elapsedRealtime();
+        if (dueToRoam) {
+            mLastProbeDueToRoamMs = mLastProbeTimeMs;
+        } else {
+            mLastProbeDueToConfirmMs = mLastProbeTimeMs;
+        }
     }
 
     private long getProbeWakeLockDuration() {
@@ -450,6 +544,12 @@ public class IpReachabilityMonitor {
 
     private void setNeighborParameters(int numSolicits, int interSolicitIntervalMs)
             throws RemoteException, IllegalArgumentException {
+        // Do not set mcast_resolicit param by default.
+        setNeighborParameters(numSolicits, interSolicitIntervalMs, INVALID_NUD_MCAST_RESOLICIT_NUM);
+    }
+
+    private void setNeighborParameters(int numSolicits, int interSolicitIntervalMs,
+            int numResolicits) throws RemoteException, IllegalArgumentException {
         Preconditions.checkArgument(numSolicits >= MIN_NUD_SOLICIT_NUM,
                 "numSolicits must be at least " + MIN_NUD_SOLICIT_NUM);
         Preconditions.checkArgument(numSolicits <= MAX_NUD_SOLICIT_NUM,
@@ -464,10 +564,37 @@ public class IpReachabilityMonitor {
                     Integer.toString(interSolicitIntervalMs));
             mNetd.setProcSysNet(family, INetd.NEIGH, mInterfaceParams.name, "ucast_solicit",
                     Integer.toString(numSolicits));
+            if (numResolicits != INVALID_NUD_MCAST_RESOLICIT_NUM) {
+                mNetd.setProcSysNet(family, INetd.NEIGH, mInterfaceParams.name, "mcast_resolicit",
+                        Integer.toString(numResolicits));
+            }
         }
 
         mNumSolicits = numSolicits;
         mInterSolicitIntervalMs = interSolicitIntervalMs;
+    }
+
+    private boolean isFromProbe() {
+        final long duration = SystemClock.elapsedRealtime() - mLastProbeTimeMs;
+        return duration < getProbeWakeLockDuration();
+    }
+
+    private boolean isNudFailureDueToRoam() {
+        if (!isFromProbe()) return false;
+
+        // Check to which probe expiry the curren timestamp gets close when NUD failure event
+        // happens, theoretically that indicates which probe event(due to roam or CMD_CONFIRM)
+        // was triggered eariler.
+        //
+        // Note that this would be incorrect if the probe or confirm was so long ago that the
+        // probe duration has already expired. That cannot happen because isFromProbe would return
+        // false.
+        final long probeExpiryAfterRoam = mLastProbeDueToRoamMs + getProbeWakeLockDuration();
+        final long probeExpiryAfterConfirm =
+                mLastProbeDueToConfirmMs + getProbeWakeLockDuration();
+        final long currentTime = SystemClock.elapsedRealtime();
+        return Math.abs(probeExpiryAfterRoam - currentTime)
+                < Math.abs(probeExpiryAfterConfirm - currentTime);
     }
 
     private void logEvent(int probeType, int errorCode) {
@@ -475,21 +602,79 @@ public class IpReachabilityMonitor {
         mMetricsLog.log(mInterfaceParams.name, new IpReachabilityEvent(eventType));
     }
 
-    private void logNudFailed(boolean lostProvisioning) {
-        long duration = SystemClock.elapsedRealtime() - mLastProbeTimeMs;
-        boolean isFromProbe = (duration < getProbeWakeLockDuration());
-        int eventType = nudFailureEventType(isFromProbe, lostProvisioning);
+    private void logNudFailed(final NeighborEvent event, final NudEventType type) {
+        logNeighborLostEvent(event, type);
+
+        // The legacy metrics only record whether the failure came from a probe and whether
+        // the network is still provisioned. They do not record provisioning failures due to
+        // multicast resolicits finding that the MAC address has changed.
+        final int eventType = legacyNudFailureType(type);
+        if (eventType == INVALID_LEGACY_NUD_FAILURE_TYPE) return;
         mMetricsLog.log(mInterfaceParams.name, new IpReachabilityEvent(eventType));
+    }
+
+    /**
+     * Returns the neighbor type code corresponding to the given conditions.
+     */
+    private NudNeighborType getNeighborType(final NeighborEvent event) {
+        final boolean isGateway = isNeighborDefaultRouter(event);
+        final boolean isDnsServer = isNeighborDnsServer(event);
+
+        if (isGateway && isDnsServer) return NudNeighborType.NUD_NEIGHBOR_BOTH;
+        if (isGateway && !isDnsServer) return NudNeighborType.NUD_NEIGHBOR_GATEWAY;
+        if (!isGateway && isDnsServer) return NudNeighborType.NUD_NEIGHBOR_DNS;
+        return NudNeighborType.NUD_NEIGHBOR_UNKNOWN;
     }
 
     /**
      * Returns the NUD failure event type code corresponding to the given conditions.
      */
-    private static int nudFailureEventType(boolean isFromProbe, boolean isProvisioningLost) {
-        if (isFromProbe) {
-            return isProvisioningLost ? PROVISIONING_LOST : NUD_FAILED;
-        } else {
-            return isProvisioningLost ? PROVISIONING_LOST_ORGANIC : NUD_FAILED_ORGANIC;
+    private static NudEventType getNudFailureEventType(boolean isFromProbe, boolean isDueToRoam,
+            boolean isProvisioningLost) {
+        if (!isFromProbe) {
+            return isProvisioningLost
+                    ? NudEventType.NUD_ORGANIC_FAILED_CRITICAL
+                    : NudEventType.NUD_ORGANIC_FAILED;
+        }
+        return isProvisioningLost
+                ? isDueToRoam
+                        ? NudEventType.NUD_POST_ROAMING_FAILED_CRITICAL
+                        : NudEventType.NUD_CONFIRM_FAILED_CRITICAL
+                : isDueToRoam
+                        ? NudEventType.NUD_POST_ROAMING_FAILED
+                        : NudEventType.NUD_CONFIRM_FAILED;
+    }
+
+    /**
+     * Log NUD failure metrics with new Westworld APIs while the function using mMetricsLog API
+     * still sends the legacy metrics, @see #logNudFailed.
+     */
+    private void logNeighborLostEvent(final NeighborEvent event, final NudEventType type) {
+        final IpType ipType = (event.ip instanceof Inet6Address) ? IpType.IPV6 : IpType.IPV4;
+        mIpReachabilityMetrics.setNudIpType(ipType);
+        mIpReachabilityMetrics.setNudNeighborType(getNeighborType(event));
+        mIpReachabilityMetrics.setNudEventType(type);
+        mIpReachabilityMetrics.statsWrite();
+    }
+
+    /**
+     * Returns the NUD failure event type code corresponding to the given conditions.
+     */
+    private static int legacyNudFailureType(final NudEventType type) {
+        switch (type) {
+            case NUD_POST_ROAMING_FAILED:
+            case NUD_CONFIRM_FAILED:
+                return NUD_FAILED;
+            case NUD_POST_ROAMING_FAILED_CRITICAL:
+            case NUD_CONFIRM_FAILED_CRITICAL:
+                return PROVISIONING_LOST;
+            case NUD_ORGANIC_FAILED:
+                return NUD_FAILED_ORGANIC;
+            case NUD_ORGANIC_FAILED_CRITICAL:
+                return PROVISIONING_LOST_ORGANIC;
+            default:
+                // Do not log legacy event
+                return INVALID_LEGACY_NUD_FAILURE_TYPE;
         }
     }
 }
