@@ -16,9 +16,18 @@
 
 package android.net.ip;
 
+import static android.net.util.NetworkStackUtils.IPCLIENT_PARSE_NETLINK_EVENTS_VERSION;
 import static android.system.OsConstants.AF_INET6;
+import static android.system.OsConstants.AF_UNSPEC;
+import static android.system.OsConstants.IFF_LOOPBACK;
 
 import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ROUTER_ADVERTISEMENT;
+import static com.android.net.module.util.netlink.NetlinkConstants.IFF_LOWER_UP;
+import static com.android.net.module.util.netlink.NetlinkConstants.RTM_F_CLONED;
+import static com.android.net.module.util.netlink.NetlinkConstants.RTN_UNICAST;
+import static com.android.net.module.util.netlink.NetlinkConstants.RTPROT_KERNEL;
+import static com.android.net.module.util.netlink.NetlinkConstants.RTPROT_RA;
+import static com.android.net.module.util.netlink.NetlinkConstants.RT_SCOPE_UNIVERSE;
 
 import android.app.AlarmManager;
 import android.content.Context;
@@ -27,16 +36,22 @@ import android.net.IpPrefix;
 import android.net.LinkAddress;
 import android.net.LinkProperties;
 import android.net.RouteInfo;
-import android.net.netlink.NduseroptMessage;
-import android.net.netlink.NetlinkConstants;
-import android.net.netlink.NetlinkMessage;
-import android.net.netlink.StructNdOptPref64;
 import android.net.util.InterfaceParams;
 import android.net.util.SharedLog;
 import android.os.Handler;
 import android.system.OsConstants;
 import android.util.Log;
 
+import com.android.net.module.util.netlink.NduseroptMessage;
+import com.android.net.module.util.netlink.NetlinkConstants;
+import com.android.net.module.util.netlink.NetlinkMessage;
+import com.android.net.module.util.netlink.RtNetlinkAddressMessage;
+import com.android.net.module.util.netlink.RtNetlinkLinkMessage;
+import com.android.net.module.util.netlink.RtNetlinkRouteMessage;
+import com.android.net.module.util.netlink.StructIfaddrMsg;
+import com.android.net.module.util.netlink.StructIfinfoMsg;
+import com.android.net.module.util.netlink.StructNdOptPref64;
+import com.android.net.module.util.netlink.StructNdOptRdnss;
 import com.android.networkstack.apishim.NetworkInformationShimImpl;
 import com.android.networkstack.apishim.common.NetworkInformationShim;
 import com.android.server.NetworkObserver;
@@ -107,6 +122,7 @@ public class IpClientLinkObserver implements NetworkObserver {
         }
     }
 
+    private final Context mContext;
     private final String mInterfaceName;
     private final Callback mCallback;
     private final LinkProperties mLinkProperties;
@@ -115,13 +131,15 @@ public class IpClientLinkObserver implements NetworkObserver {
     private final AlarmManager mAlarmManager;
     private final Configuration mConfig;
     private final Handler mHandler;
+    private final IpClient.Dependencies mDependencies;
 
     private final MyNetlinkMonitor mNetlinkMonitor;
 
     private static final boolean DBG = false;
 
     public IpClientLinkObserver(Context context, Handler h, String iface, Callback callback,
-            Configuration config, SharedLog log) {
+            Configuration config, SharedLog log, IpClient.Dependencies deps) {
+        mContext = context;
         mInterfaceName = iface;
         mTag = "NetlinkTracker/" + mInterfaceName;
         mCallback = callback;
@@ -132,6 +150,7 @@ public class IpClientLinkObserver implements NetworkObserver {
         mInterfaceLinkState = true; // Assume up by default
         mDnsServerRepository = new DnsServerRepository(config.minRdnssLifetime);
         mAlarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+        mDependencies = deps;
         mNetlinkMonitor = new MyNetlinkMonitor(h, log, mTag);
         mHandler.post(mNetlinkMonitor::start);
     }
@@ -147,10 +166,19 @@ public class IpClientLinkObserver implements NetworkObserver {
         }
     }
 
+    private void maybeLog(String operation, int ifindex, LinkAddress address) {
+        maybeLog(operation, "ifindex " + ifindex, address);
+    }
+
     private void maybeLog(String operation, Object o) {
         if (DBG) {
             Log.d(mTag, operation + ": " + o.toString());
         }
+    }
+
+    private boolean isNetlinkEventParsingEnabled() {
+        return mDependencies.isFeatureEnabled(mContext, IPCLIENT_PARSE_NETLINK_EVENTS_VERSION,
+                false /* default value */);
     }
 
     @Override
@@ -172,91 +200,97 @@ public class IpClientLinkObserver implements NetworkObserver {
 
     @Override
     public void onInterfaceLinkStateChanged(String iface, boolean state) {
-        if (mInterfaceName.equals(iface)) {
-            maybeLog("interfaceLinkStateChanged", iface + (state ? " up" : " down"));
-            synchronized (this) {
-                setInterfaceLinkStateLocked(state);
-            }
-        }
+        if (isNetlinkEventParsingEnabled()) return;
+        if (!mInterfaceName.equals(iface)) return;
+        maybeLog("interfaceLinkStateChanged", iface + (state ? " up" : " down"));
+        updateInterfaceLinkStateChanged(state);
     }
 
     @Override
     public void onInterfaceAddressUpdated(LinkAddress address, String iface) {
-        if (mInterfaceName.equals(iface)) {
-            maybeLog("addressUpdated", iface, address);
-            final boolean changed;
-            final boolean linkState;
-            synchronized (this) {
-                changed = mLinkProperties.addLinkAddress(address);
-                linkState = getInterfaceLinkStateLocked();
-            }
-            if (changed) {
-                mCallback.update(linkState);
-            }
-        }
+        if (isNetlinkEventParsingEnabled()) return;
+        if (!mInterfaceName.equals(iface)) return;
+        maybeLog("addressUpdated", iface, address);
+        updateInterfaceAddress(address, true /* add address */);
     }
 
     @Override
     public void onInterfaceAddressRemoved(LinkAddress address, String iface) {
-        if (mInterfaceName.equals(iface)) {
-            maybeLog("addressRemoved", iface, address);
-            final boolean changed;
-            final boolean linkState;
-            synchronized (this) {
-                changed = mLinkProperties.removeLinkAddress(address);
-                linkState = getInterfaceLinkStateLocked();
-            }
-            if (changed) {
-                mCallback.update(linkState);
-            }
-        }
+        if (isNetlinkEventParsingEnabled()) return;
+        if (!mInterfaceName.equals(iface)) return;
+        maybeLog("addressRemoved", iface, address);
+        updateInterfaceAddress(address, false /* remove address */);
     }
 
     @Override
     public void onRouteUpdated(RouteInfo route) {
-        if (mInterfaceName.equals(route.getInterface())) {
-            maybeLog("routeUpdated", route);
-            final boolean changed;
-            final boolean linkState;
-            synchronized (this) {
-                changed = mLinkProperties.addRoute(route);
-                linkState = getInterfaceLinkStateLocked();
-            }
-            if (changed) {
-                mCallback.update(linkState);
-            }
-        }
+        if (isNetlinkEventParsingEnabled()) return;
+        if (!mInterfaceName.equals(route.getInterface())) return;
+        maybeLog("routeUpdated", route);
+        updateInterfaceRoute(route, true /* add route */);
     }
 
     @Override
     public void onRouteRemoved(RouteInfo route) {
-        if (mInterfaceName.equals(route.getInterface())) {
-            maybeLog("routeRemoved", route);
-            final boolean changed;
-            final boolean linkState;
-            synchronized (this) {
-                changed = mLinkProperties.removeRoute(route);
-                linkState = getInterfaceLinkStateLocked();
-            }
-            if (changed) {
-                mCallback.update(linkState);
-            }
-        }
+        if (isNetlinkEventParsingEnabled()) return;
+        if (!mInterfaceName.equals(route.getInterface())) return;
+        maybeLog("routeRemoved", route);
+        updateInterfaceRoute(route, false /* remove route */);
     }
 
     @Override
     public void onInterfaceDnsServerInfo(String iface, long lifetime, String[] addresses) {
-        if (mInterfaceName.equals(iface)) {
-            maybeLog("interfaceDnsServerInfo", Arrays.toString(addresses));
-            final boolean changed = mDnsServerRepository.addServers(lifetime, addresses);
-            final boolean linkState;
-            if (changed) {
-                synchronized (this) {
-                    mDnsServerRepository.setDnsServersOn(mLinkProperties);
-                    linkState = getInterfaceLinkStateLocked();
-                }
-                mCallback.update(linkState);
+        if (isNetlinkEventParsingEnabled()) return;
+        if (!mInterfaceName.equals(iface)) return;
+        updateInterfaceDnsServerInfo(lifetime, addresses);
+    }
+
+    private synchronized void updateInterfaceLinkStateChanged(boolean state) {
+        setInterfaceLinkStateLocked(state);
+    }
+
+    private void updateInterfaceDnsServerInfo(long lifetime, final String[] addresses) {
+        maybeLog("interfaceDnsServerInfo", Arrays.toString(addresses));
+        final boolean changed = mDnsServerRepository.addServers(lifetime, addresses);
+        final boolean linkState;
+        if (changed) {
+            synchronized (this) {
+                mDnsServerRepository.setDnsServersOn(mLinkProperties);
+                linkState = getInterfaceLinkStateLocked();
             }
+            mCallback.update(linkState);
+        }
+    }
+
+    private void updateInterfaceAddress(final LinkAddress address, boolean add) {
+        final boolean changed;
+        final boolean linkState;
+        synchronized (this) {
+            if (add) {
+                changed = mLinkProperties.addLinkAddress(address);
+            } else {
+                changed = mLinkProperties.removeLinkAddress(address);
+            }
+            linkState = getInterfaceLinkStateLocked();
+        }
+        if (changed) {
+            mCallback.update(linkState);
+        }
+    }
+
+    private void updateInterfaceRoute(final RouteInfo route, boolean add) {
+        final boolean changed;
+        final boolean linkState;
+        synchronized (this) {
+            if (add) {
+                changed = mLinkProperties.addRoute(route);
+            } else {
+                changed = mLinkProperties.removeRoute(route);
+            }
+            linkState = getInterfaceLinkStateLocked();
+        }
+        if (changed) {
+            mCallback.update(linkState);
         }
     }
 
@@ -298,15 +332,34 @@ public class IpClientLinkObserver implements NetworkObserver {
         mNetlinkMonitor.setIfindex(0);  // 0 is never a valid ifindex.
     }
 
+    private static boolean isSupportedRouteProtocol(RtNetlinkRouteMessage msg) {
+        // Checks whether the protocol is supported. The behaviour is defined by the legacy
+        // implementation in NetlinkEvent.cpp.
+        return msg.getRtMsgHeader().protocol == RTPROT_KERNEL
+                || msg.getRtMsgHeader().protocol == RTPROT_RA;
+    }
+
+    private static boolean isGlobalUnicastRoute(RtNetlinkRouteMessage msg) {
+        return msg.getRtMsgHeader().scope == RT_SCOPE_UNIVERSE
+                && msg.getRtMsgHeader().type == RTN_UNICAST;
+    }
+
     /**
-     * Simple NetlinkMonitor. Currently only listens for PREF64 events.
+     * Simple NetlinkMonitor. Listen for netlink events from kernel.
      * All methods except the constructor must be called on the handler thread.
      */
     private class MyNetlinkMonitor extends NetlinkMonitor {
         private final Handler mHandler;
 
         MyNetlinkMonitor(Handler h, SharedLog log, String tag) {
-            super(h, log, tag, OsConstants.NETLINK_ROUTE, NetlinkConstants.RTMGRP_ND_USEROPT);
+            super(h, log, tag, OsConstants.NETLINK_ROUTE,
+                    !isNetlinkEventParsingEnabled()
+                    ? NetlinkConstants.RTMGRP_ND_USEROPT
+                    : (NetlinkConstants.RTMGRP_ND_USEROPT | NetlinkConstants.RTMGRP_LINK
+                            | NetlinkConstants.RTMGRP_IPV4_IFADDR
+                            | NetlinkConstants.RTMGRP_IPV6_IFADDR
+                            | NetlinkConstants.RTMGRP_IPV6_ROUTE));
+
             mHandler = h;
         }
 
@@ -408,6 +461,15 @@ public class IpClientLinkObserver implements NetworkObserver {
             updatePref64(opt.prefix, now, expiry);
         }
 
+        private void processRdnssOption(StructNdOptRdnss opt) {
+            if (!isNetlinkEventParsingEnabled()) return;
+            final String[] addresses = new String[opt.servers.length];
+            for (int i = 0; i < opt.servers.length; i++) {
+                addresses[i] = opt.servers[i].getHostAddress();
+            }
+            updateInterfaceDnsServerInfo(opt.header.lifetime, addresses);
+        }
+
         private void processNduseroptMessage(NduseroptMessage msg, final long whenMs) {
             if (msg.family != AF_INET6 || msg.option == null || msg.ifindex != mIfindex) return;
             if (msg.icmp_type != (byte) ICMPV6_ROUTER_ADVERTISEMENT) return;
@@ -417,16 +479,106 @@ public class IpClientLinkObserver implements NetworkObserver {
                     processPref64Option((StructNdOptPref64) msg.option, whenMs);
                     break;
 
+                case StructNdOptRdnss.TYPE:
+                    processRdnssOption((StructNdOptRdnss) msg.option);
+                    break;
+
                 default:
-                    // TODO: implement RDNSS and DNSSL.
+                    // TODO: implement DNSSL.
+                    break;
+            }
+        }
+
+        private void processRtNetlinkLinkMessage(RtNetlinkLinkMessage msg) {
+            if (!isNetlinkEventParsingEnabled()) return;
+
+            final StructIfinfoMsg ifinfoMsg = msg.getIfinfoHeader();
+            if (ifinfoMsg.family != AF_UNSPEC || ifinfoMsg.index != mIfindex) return;
+            if ((ifinfoMsg.flags & IFF_LOOPBACK) != 0) return;
+
+            switch (msg.getHeader().nlmsg_type) {
+                case NetlinkConstants.RTM_NEWLINK:
+                    final boolean state = (ifinfoMsg.flags & IFF_LOWER_UP) != 0;
+                    maybeLog("interfaceLinkStateChanged", "ifindex " + mIfindex
+                            + (state ? " up" : " down"));
+                    updateInterfaceLinkStateChanged(state);
+                    break;
+
+                case NetlinkConstants.RTM_DELLINK:
+                    break;
+
+                default:
+                    Log.e(mTag, "Unknown rtnetlink link msg type " + msg.getHeader().nlmsg_type);
+                    break;
+            }
+        }
+
+        private void processRtNetlinkAddressMessage(RtNetlinkAddressMessage msg) {
+            if (!isNetlinkEventParsingEnabled()) return;
+
+            final StructIfaddrMsg ifaddrMsg = msg.getIfaddrHeader();
+            if (ifaddrMsg.index != mIfindex) return;
+            final LinkAddress la = new LinkAddress(msg.getIpAddress(), ifaddrMsg.prefixLen,
+                    msg.getFlags(), ifaddrMsg.scope);
+
+            switch (msg.getHeader().nlmsg_type) {
+                case NetlinkConstants.RTM_NEWADDR:
+                    maybeLog("addressUpdated", mIfindex, la);
+                    updateInterfaceAddress(la, true /* add address */);
+                    break;
+                case NetlinkConstants.RTM_DELADDR:
+                    maybeLog("addressRemoved", mIfindex, la);
+                    updateInterfaceAddress(la, false /* remove address */);
+                    break;
+                default:
+                    Log.e(mTag, "Unknown rtnetlink address msg type " + msg.getHeader().nlmsg_type);
+                    return;
+            }
+        }
+
+        private void processRtNetlinkRouteMessage(RtNetlinkRouteMessage msg) {
+            if (!isNetlinkEventParsingEnabled()) return;
+            if (msg.getInterfaceIndex() != mIfindex) return;
+            // Ignore the unsupported route protocol and non-global unicast routes.
+            if (!isSupportedRouteProtocol(msg)
+                    || !isGlobalUnicastRoute(msg)
+                    // don't support source routing
+                    || (msg.getRtMsgHeader().srcLen != 0)
+                    // don't support cloned routes
+                    || ((msg.getRtMsgHeader().flags & RTM_F_CLONED) != 0)) {
+                return;
+            }
+
+            final RouteInfo route = new RouteInfo(msg.getDestination(), msg.getGateway(),
+                    mInterfaceName, msg.getRtMsgHeader().type);
+            switch (msg.getHeader().nlmsg_type) {
+                case NetlinkConstants.RTM_NEWROUTE:
+                    maybeLog("routeUpdated", route);
+                    updateInterfaceRoute(route, true /* add route */);
+                    break;
+                case NetlinkConstants.RTM_DELROUTE:
+                    maybeLog("routeRemoved", route);
+                    updateInterfaceRoute(route, false /* remove route */);
+                    break;
+                default:
+                    Log.e(mTag, "Unknown rtnetlink route msg type " + msg.getHeader().nlmsg_type);
                     break;
             }
         }
 
         @Override
         protected void processNetlinkMessage(NetlinkMessage nlMsg, long whenMs) {
-            if (!(nlMsg instanceof NduseroptMessage)) return;
-            processNduseroptMessage((NduseroptMessage) nlMsg, whenMs);
+            if (nlMsg instanceof NduseroptMessage) {
+                processNduseroptMessage((NduseroptMessage) nlMsg, whenMs);
+            } else if (nlMsg instanceof RtNetlinkLinkMessage) {
+                processRtNetlinkLinkMessage((RtNetlinkLinkMessage) nlMsg);
+            } else if (nlMsg instanceof RtNetlinkAddressMessage) {
+                processRtNetlinkAddressMessage((RtNetlinkAddressMessage) nlMsg);
+            } else if (nlMsg instanceof RtNetlinkRouteMessage) {
+                processRtNetlinkRouteMessage((RtNetlinkRouteMessage) nlMsg);
+            } else {
+                Log.e(mTag, "Unknown netlink message: " + nlMsg);
+            }
         }
     }
 
