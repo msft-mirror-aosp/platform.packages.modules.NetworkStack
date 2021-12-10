@@ -71,6 +71,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeFalse;
 import static org.junit.Assume.assumeTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.longThat;
 import static org.mockito.Mockito.any;
@@ -146,7 +147,6 @@ import android.system.Os;
 import androidx.annotation.NonNull;
 import androidx.test.InstrumentationRegistry;
 import androidx.test.filters.SmallTest;
-import androidx.test.runner.AndroidJUnit4;
 
 import com.android.internal.util.HexDump;
 import com.android.internal.util.StateMachine;
@@ -181,6 +181,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestName;
 import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
@@ -224,7 +225,7 @@ import kotlin.LazyKt;
  *
  * Tests in this class can either be run with signature permissions, or with root access.
  */
-@RunWith(AndroidJUnit4.class)
+@RunWith(Parameterized.class)
 @SmallTest
 public abstract class IpClientIntegrationTestCommon {
     private static final int DATA_BUFFER_LEN = 4096;
@@ -246,6 +247,17 @@ public abstract class IpClientIntegrationTestCommon {
     public final DevSdkIgnoreRule mIgnoreRule = new DevSdkIgnoreRule();
     @Rule
     public final TestName mTestNameRule = new TestName();
+
+    // Indicate whether the flag of parsing netlink event is enabled or not. If it's disabled,
+    // integration test still covers the old codepath(i.e. using NetworkObserver), otherwise,
+    // test goes through the new codepath(i.e. processRtNetlinkxxx).
+    @Parameterized.Parameter(0)
+    public boolean mIsNetlinkEventParseEnabled;
+
+    @Parameterized.Parameters
+    public static Iterable<? extends Object> data() {
+        return Arrays.asList(Boolean.FALSE, Boolean.TRUE);
+    }
 
     /**
      * Indicates that a test requires signature permissions to run.
@@ -553,10 +565,27 @@ public abstract class IpClientIntegrationTestCommon {
 
     @Before
     public void setUp() throws Exception {
-        final Method testMethod = IpClientIntegrationTestCommon.class.getMethod(
-                mTestNameRule.getMethodName());
+        // Suffix "[0]" or "[1]" is added to the end of test method name after running with
+        // Parameterized.class, that's intended behavior, to iterate each test method with the
+        // parameterize value. However, Class#getMethod() throws NoSuchMethodException when
+        // searching the target test method name due to this change. Just keep the original test
+        // method name to fix NoSuchMethodException, and find the correct annotation associated
+        // to test method.
+        final String testMethodName = mTestNameRule.getMethodName().split("\\[")[0];
+        final Method testMethod = IpClientIntegrationTestCommon.class.getMethod(testMethodName);
         mIsSignatureRequiredTest = testMethod.getAnnotation(SignatureRequiredTest.class) != null;
         assumeFalse(testSkipped());
+
+        // Depend on the parameterized value to enable/disable netlink message refactor flag.
+        // Make sure both of the old codepath(rely on the INetdUnsolicitedEventListener aidl)
+        // and new codepath(parse netlink event from kernel) will be executed.
+        //
+        // Note this must be called before making IpClient instance since MyNetlinkMontior ctor
+        // in IpClientLinkObserver will use mIsNetlinkEventParseEnabled to decide the proper
+        // bindGroups, otherwise, the parameterized value got from ArrayMap(integration test) is
+        // always false.
+        setFeatureEnabled(NetworkStackUtils.IPCLIENT_PARSE_NETLINK_EVENTS_VERSION,
+                mIsNetlinkEventParseEnabled /* default value */);
 
         setUpTapInterface();
         mCb = mock(IIpClientCallbacks.class);
@@ -564,6 +593,8 @@ public abstract class IpClientIntegrationTestCommon {
         if (useNetworkStackSignature()) {
             setUpMocks();
             setUpIpClient();
+            // Enable packet retransmit alarm in DhcpClient.
+            enableRealAlarm("DhcpClient." + mIfaceName + ".KICK");
         }
 
         mIIpClient = makeIIpClient(mIfaceName, mCb);
@@ -597,13 +628,7 @@ public abstract class IpClientIntegrationTestCommon {
     @After
     public void tearDown() throws Exception {
         if (testSkipped()) return;
-        if (mPacketReader != null) {
-            mHandler.post(() -> mPacketReader.stop()); // Also closes the socket
-            mTapFd = null;
-        }
-        if (mPacketReaderThread != null) {
-            mPacketReaderThread.quitSafely();
-        }
+        teardownTapInterface();
         mIIpClient.shutdown();
         awaitIpClientShutdown();
     }
@@ -641,6 +666,16 @@ public abstract class IpClientIntegrationTestCommon {
         mHandler.post(() -> mPacketReader.start());
     }
 
+    private void teardownTapInterface() {
+        if (mPacketReader != null) {
+            mHandler.post(() -> mPacketReader.stop());  // Also closes the socket
+            mTapFd = null;
+        }
+        if (mPacketReaderThread != null) {
+            mPacketReaderThread.quitSafely();
+        }
+    }
+
     private MacAddress getIfaceMacAddr(String ifaceName) throws IOException {
         // InterfaceParams.getByName requires CAP_NET_ADMIN: read the mac address with the shell
         final String strMacAddr = getOneLineCommandOutput(
@@ -654,6 +689,17 @@ public abstract class IpClientIntegrationTestCommon {
              BufferedReader reader = new BufferedReader(new FileReader(fd.getFileDescriptor()))) {
             return reader.readLine();
         }
+    }
+
+    private void enableRealAlarm(String cmdName) {
+        doAnswer((inv) -> {
+            final Context context = InstrumentationRegistry.getTargetContext();
+            final AlarmManager alarmManager = context.getSystemService(AlarmManager.class);
+            alarmManager.setExact(inv.getArgument(0), inv.getArgument(1), inv.getArgument(2),
+                    inv.getArgument(3), inv.getArgument(4));
+            return null;
+        }).when(mAlarm).setExact(anyInt(), anyLong(), eq(cmdName), any(OnAlarmListener.class),
+                any(Handler.class));
     }
 
     private IpClient makeIpClient() throws Exception {
@@ -823,10 +869,10 @@ public abstract class IpClientIntegrationTestCommon {
                 captivePortalApiUrl, null /* ipv6OnlyWaitTime */);
     }
 
-    private static ByteBuffer buildDhcpNakPacket(final DhcpPacket packet) {
+    private static ByteBuffer buildDhcpNakPacket(final DhcpPacket packet, final String message) {
         return DhcpPacket.buildNakPacket(DhcpPacket.ENCAP_L2, packet.getTransactionId(),
             SERVER_ADDR /* serverIp */, INADDR_ANY /* relayIp */, packet.getClientMac(),
-            false /* broadcast */, "duplicated request IP address");
+            false /* broadcast */, message);
     }
 
     private void sendArpReply(final byte[] clientMac) throws IOException {
@@ -964,7 +1010,7 @@ public abstract class IpClientIntegrationTestCommon {
                 final ByteBuffer byteBuffer = isSuccessLease
                         ? buildDhcpAckPacket(packet, CLIENT_ADDR, leaseTimeSec, (short) mtu,
                                 false /* rapidCommit */, captivePortalApiUrl)
-                        : buildDhcpNakPacket(packet);
+                        : buildDhcpNakPacket(packet, "duplicated request IP address");
                 mPacketReader.sendResponse(byteBuffer);
             } else {
                 fail("invalid DHCP packet");
@@ -1356,6 +1402,27 @@ public abstract class IpClientIntegrationTestCommon {
         assertIpMemoryStoreNetworkAttributes(TEST_LEASE_DURATION_S, currentTime, TEST_DEFAULT_MTU);
     }
 
+    @Test
+    public void testRollbackFromRapidCommitOption() throws Exception {
+        startIpClientProvisioning(false /* isDhcpLeaseCacheEnabled */,
+                true /* isDhcpRapidCommitEnabled */, false /* isPreConnectionEnabled */,
+                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+
+        final List<DhcpPacket> discoverList = new ArrayList<DhcpPacket>();
+        DhcpPacket packet;
+        do {
+            packet = getNextDhcpPacket();
+            assertTrue(packet instanceof DhcpDiscoverPacket);
+            discoverList.add(packet);
+        } while (discoverList.size() < 4);
+
+        // Check the only first 3 DHCPDISCOVERs take rapid commit option.
+        assertTrue(discoverList.get(0).mRapidCommit);
+        assertTrue(discoverList.get(1).mRapidCommit);
+        assertTrue(discoverList.get(2).mRapidCommit);
+        assertFalse(discoverList.get(3).mRapidCommit);
+    }
+
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
     public void testDhcpClientStartWithCachedInfiniteLease() throws Exception {
         final DhcpPacket packet = getReplyFromDhcpLease(
@@ -1649,8 +1716,10 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     private boolean isStablePrivacyAddress(LinkAddress addr) {
-        // TODO: move away from getting address updates from netd and make this work on Q as well.
-        final int flag = ShimUtils.isAtLeastR() ? IFA_F_STABLE_PRIVACY : 0;
+        // The Q netd does not understand the IFA_F_STABLE_PRIVACY flag.
+        // See r.android.com/1295670.
+        final int flag = (mIsNetlinkEventParseEnabled || ShimUtils.isAtLeastR())
+                ? IFA_F_STABLE_PRIVACY : 0;
         return addr.isGlobalPreferred() && hasFlag(addr, flag);
     }
 
@@ -1876,12 +1945,9 @@ public abstract class IpClientIntegrationTestCommon {
         HandlerUtils.waitForIdle(mIpc.getHandler(), TEST_TIMEOUT_MS);
     }
 
-    private void addIpAddressAndWaitForIt(final String iface) throws Exception {
+    private void waitForAddressViaNetworkObserver(final String iface, final String addr1,
+            final String addr2, int prefixLength) throws Exception {
         final CountDownLatch latch = new CountDownLatch(1);
-
-        final String addr1 = "192.0.2.99";
-        final String addr2 = "192.0.2.3";
-        final int prefixLength = 26;
 
         // Add two IPv4 addresses to the specified interface, and proceed when the NetworkObserver
         // has seen the second one. This ensures that every other NetworkObserver registered with
@@ -1905,6 +1971,22 @@ public abstract class IpClientIntegrationTestCommon {
                     latch.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
         } finally {
             mNetworkObserverRegistry.unregisterObserver(observer);
+        }
+    }
+
+    private void addIpAddressAndWaitForIt(final String iface) throws Exception {
+        final String addr1 = "192.0.2.99";
+        final String addr2 = "192.0.2.3";
+        final int prefixLength = 26;
+
+        if (!mIsNetlinkEventParseEnabled) {
+            waitForAddressViaNetworkObserver(iface, addr1, addr2, prefixLength);
+        } else {
+            // IpClient gets IP addresses directly from netlink instead of from netd, unnecessary
+            // to rely on the NetworkObserver callbacks to confirm new added address update. Just
+            // add the addresses directly and wait to see if IpClient has seen the address
+            mNetd.interfaceAddAddress(iface, addr1, prefixLength);
+            mNetd.interfaceAddAddress(iface, addr2, prefixLength);
         }
 
         // Wait for IpClient to process the addition of the address.
@@ -1932,9 +2014,6 @@ public abstract class IpClientIntegrationTestCommon {
         // The address must be noticed before startProvisioning is called, or IpClient will
         // immediately declare provisioning success due to the presence of an IPv4 address.
         // The address must be IPv4 because IpClient clears IPv6 addresses on startup.
-        //
-        // TODO: once IpClient gets IP addresses directly from netlink instead of from netd, it
-        // may be sufficient to call waitForIdle to see if IpClient has seen the address.
         addIpAddressAndWaitForIt(mIfaceName);
     }
 
@@ -2415,7 +2494,8 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     private void doDhcpRoamingTest(final boolean hasMismatchedIpAddress, final String displayName,
-            final MacAddress bssid, final boolean expectRoaming) throws Exception {
+            final MacAddress bssid, final boolean expectRoaming,
+            final boolean shouldReplyNakOnRoam) throws Exception {
         long currentTime = System.currentTimeMillis();
         final Layer2Information layer2Info = new Layer2Information(TEST_L2KEY, TEST_CLUSTER, bssid);
 
@@ -2457,11 +2537,16 @@ public abstract class IpClientIntegrationTestCommon {
         assertNull(packet.mRequestedIp);                // requested IP option
         assertNull(packet.mServerIdentifier);           // server ID
 
-        mPacketReader.sendResponse(buildDhcpAckPacket(packet,
-                hasMismatchedIpAddress ? CLIENT_ADDR_NEW : CLIENT_ADDR, TEST_LEASE_DURATION_S,
-                (short) TEST_DEFAULT_MTU, false /* rapidcommit */, null /* captivePortalUrl */));
+        final ByteBuffer packetBuffer = shouldReplyNakOnRoam
+                ? buildDhcpNakPacket(packet, "request IP on a wrong subnet")
+                : buildDhcpAckPacket(packet,
+                        hasMismatchedIpAddress ? CLIENT_ADDR_NEW : CLIENT_ADDR,
+                        TEST_LEASE_DURATION_S, (short) TEST_DEFAULT_MTU,
+                        false /* rapidCommit */, null /* captivePortalApiUrl */);
+        mPacketReader.sendResponse(packetBuffer);
         HandlerUtils.waitForIdle(mIpc.getHandler(), TEST_TIMEOUT_MS);
-        if (hasMismatchedIpAddress) {
+
+        if (shouldReplyNakOnRoam || hasMismatchedIpAddress) {
             // notifyFailure
             ArgumentCaptor<DhcpResultsParcelable> captor =
                     ArgumentCaptor.forClass(DhcpResultsParcelable.class);
@@ -2469,9 +2554,9 @@ public abstract class IpClientIntegrationTestCommon {
             DhcpResults lease = fromStableParcelable(captor.getValue());
             assertNull(lease);
 
-            // roll back to INIT state.
-            packet = getNextDhcpPacket();
-            assertTrue(packet instanceof DhcpDiscoverPacket);
+            // DhcpClient rolls back to StoppedState instead of INIT state after calling
+            // notifyFailure, DHCPDISCOVER should not be sent out.
+            assertNull(getNextDhcpPacket(TEST_TIMEOUT_MS));
         } else {
             assertIpMemoryStoreNetworkAttributes(TEST_LEASE_DURATION_S, currentTime,
                     TEST_DEFAULT_MTU);
@@ -2481,31 +2566,42 @@ public abstract class IpClientIntegrationTestCommon {
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
     public void testDhcpRoaming() throws Exception {
         doDhcpRoamingTest(false /* hasMismatchedIpAddress */, "\"0001docomo\"" /* display name */,
-                MacAddress.fromString(TEST_DEFAULT_BSSID), true /* expectRoaming */);
+                MacAddress.fromString(TEST_DEFAULT_BSSID), true /* expectRoaming */,
+                false /* shouldReplyNakOnRoam */);
     }
 
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
     public void testDhcpRoaming_invalidBssid() throws Exception {
         doDhcpRoamingTest(false /* hasMismatchedIpAddress */, "\"0001docomo\"" /* display name */,
-                MacAddress.fromString(TEST_DHCP_ROAM_BSSID), false /* expectRoaming */);
+                MacAddress.fromString(TEST_DHCP_ROAM_BSSID), false /* expectRoaming */,
+                false/* shouldReplyNakOnRoam */);
     }
 
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
     public void testDhcpRoaming_nullBssid() throws Exception {
         doDhcpRoamingTest(false /* hasMismatchedIpAddress */, "\"0001docomo\"" /* display name */,
-                null /* BSSID */, false /* expectRoaming */);
+                null /* BSSID */, false /* expectRoaming */, false /* shouldReplyNakOnRoam */);
     }
 
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
     public void testDhcpRoaming_invalidDisplayName() throws Exception {
         doDhcpRoamingTest(false /* hasMismatchedIpAddress */, "\"test-ssid\"" /* display name */,
-                MacAddress.fromString(TEST_DEFAULT_BSSID), false /* expectRoaming */);
+                MacAddress.fromString(TEST_DEFAULT_BSSID), false /* expectRoaming */,
+                false /* shouldReplyNakOnRoam */);
     }
 
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
     public void testDhcpRoaming_mismatchedLeasedIpAddress() throws Exception {
         doDhcpRoamingTest(true /* hasMismatchedIpAddress */, "\"0001docomo\"" /* display name */,
-                MacAddress.fromString(TEST_DEFAULT_BSSID), true /* expectRoaming */);
+                MacAddress.fromString(TEST_DEFAULT_BSSID), true /* expectRoaming */,
+                false /* shouldReplyNakOnRoam */);
+    }
+
+    @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
+    public void testDhcpRoaming_failureLeaseOnNak() throws Exception {
+        doDhcpRoamingTest(false /* hasMismatchedIpAddress */, "\"0001docomo\"" /* display name */,
+                MacAddress.fromString(TEST_DEFAULT_BSSID), true /* expectRoaming */,
+                true /* shouldReplyNakOnRoam */);
     }
 
     private void performDualStackProvisioning() throws Exception {
@@ -3491,6 +3587,43 @@ public abstract class IpClientIntegrationTestCommon {
         assertNotNull(route);
         assertTrue(route.getDestination().equals(new IpPrefix("fe80::/64")));
         assertTrue(route.getGateway().isAnyLocalAddress());
+
+        // Check that if an RA is received, no IP addresses, routes, or DNS servers are configured.
+        // Instead of waiting some period of time for the RA to be received and checking the
+        // LinkProperties after that, tear down the interface and wait for it to go down. Then check
+        // that no LinkProperties updates ever contained non-link-local information.
+        sendBasicRouterAdvertisement(false /* waitForRs */);
+        teardownTapInterface();
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningFailure(any());
+        verify(mCb, never()).onLinkPropertiesChange(argThat(newLp ->
+                newLp.getDnsServers().size() != 0
+                        || newLp.getRoutes().size() > 1
+                        || newLp.hasIpv6DefaultRoute()
+                        || newLp.hasGlobalIpv6Address()
+        ));
+    }
+
+    @Test
+    public void testIPv6LinkLocalOnlyAndThenGlobal() throws Exception {
+        ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
+                .withoutIPv4()
+                .withIpv6LinkLocalOnly()
+                .withRandomMacAddress()
+                .build();
+        startIpClientProvisioning(config);
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningSuccess(any());
+        mIIpClient.stop();
+        verifyAfterIpClientShutdown();
+        reset(mCb);
+
+        // Speed up provisioning by enabling rapid commit. TODO: why is this necessary?
+        setDhcpFeatures(false /* isDhcpLeaseCacheEnabled */, true /* isRapidCommitEnabled */,
+                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+        config = new ProvisioningConfiguration.Builder()
+                .build();
+        startIpClientProvisioning(config);
+        performDualStackProvisioning();
+        // No exceptions? Dual-stack provisioning worked.
     }
 
     @Test
