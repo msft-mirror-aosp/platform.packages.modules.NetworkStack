@@ -747,9 +747,14 @@ public class DhcpClient extends StateMachine {
     }
 
     private boolean sendDiscoverPacket() {
+        // When Rapid Commit option is enabled, limit only the first 3 DHCPDISCOVER packets
+        // taking Rapid Commit option, in order to prevent the potential interoperability issue
+        // and be able to rollback later. See {@link DHCP_TIMEOUT_MS} for the (re)transmission
+        // schedule with 10% jitter.
+        final boolean requestRapidCommit = isDhcpRapidCommitEnabled() && (getSecs() <= 4);
         final ByteBuffer packet = DhcpPacket.buildDiscoverPacket(
                 DhcpPacket.ENCAP_L2, mTransactionId, getSecs(), mHwAddr,
-                DO_UNICAST, getRequestedParams(), isDhcpRapidCommitEnabled(), mHostname,
+                DO_UNICAST, getRequestedParams(), requestRapidCommit, mHostname,
                 mConfiguration.options);
         mMetrics.incrementCountForDiscover();
         return transmitPacket(packet, "DHCPDISCOVER", DhcpPacket.ENCAP_L2, INADDR_BROADCAST);
@@ -1450,7 +1455,7 @@ public class DhcpClient extends StateMachine {
                 case CMD_EXPIRE_DHCP:
                     Log.d(TAG, "Lease expired!");
                     notifyFailure();
-                    transitionTo(mDhcpInitState);
+                    transitionTo(mStoppedState);
                     return HANDLED;
                 default:
                     return NOT_HANDLED;
@@ -1830,7 +1835,7 @@ public class DhcpClient extends StateMachine {
                     if (!mDhcpLease.ipAddress.equals(results.ipAddress)) {
                         Log.d(TAG, "Renewed lease not for our current IP address!");
                         notifyFailure();
-                        transitionTo(mDhcpInitState);
+                        transitionTo(mStoppedState);
                         return;
                     }
                     setDhcpLeaseExpiry(packet);
@@ -1844,9 +1849,9 @@ public class DhcpClient extends StateMachine {
                     transitionTo(mDhcpBoundState);
                 }
             } else if (packet instanceof DhcpNakPacket) {
-                Log.d(TAG, "Received NAK, returning to INIT");
+                Log.d(TAG, "Received NAK, returning to StoppedState");
                 notifyFailure();
-                transitionTo(mDhcpInitState);
+                transitionTo(mStoppedState);
             }
         }
     }
