@@ -29,8 +29,8 @@ import static android.net.dhcp.DhcpPacket.MIN_V6ONLY_WAIT_MS;
 import static android.net.dhcp.DhcpResultsParcelableUtil.fromStableParcelable;
 import static android.net.ip.IpReachabilityMonitor.MIN_NUD_SOLICIT_NUM;
 import static android.net.ip.IpReachabilityMonitor.NUD_MCAST_RESOLICIT_NUM;
+import static android.net.ip.IpReachabilityMonitor.nudEventTypeToInt;
 import static android.net.ipmemorystore.Status.SUCCESS;
-import static android.net.shared.ProvisioningConfiguration.VERSION_ADDED_PROVISIONING_ENUM;
 import static android.system.OsConstants.ETH_P_IPV6;
 import static android.system.OsConstants.IFA_F_TEMPORARY;
 import static android.system.OsConstants.IPPROTO_ICMPV6;
@@ -71,6 +71,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeFalse;
 import static org.junit.Assume.assumeTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.longThat;
 import static org.mockito.Mockito.any;
@@ -124,6 +125,8 @@ import android.net.ipmemorystore.OnNetworkAttributesRetrievedListener;
 import android.net.ipmemorystore.Status;
 import android.net.networkstack.TestNetworkStackServiceClient;
 import android.net.networkstack.aidl.dhcp.DhcpOption;
+import android.net.networkstack.aidl.ip.ReachabilityLossInfoParcelable;
+import android.net.networkstack.aidl.ip.ReachabilityLossReason;
 import android.net.shared.Layer2Information;
 import android.net.shared.ProvisioningConfiguration;
 import android.net.shared.ProvisioningConfiguration.ScanResultInfo;
@@ -140,6 +143,7 @@ import android.os.RemoteException;
 import android.os.SystemClock;
 import android.os.SystemProperties;
 import android.stats.connectivity.NetworkQuirkEvent;
+import android.stats.connectivity.NudEventType;
 import android.system.ErrnoException;
 import android.system.Os;
 
@@ -155,6 +159,7 @@ import com.android.net.module.util.netlink.StructNdOptPref64;
 import com.android.net.module.util.structs.LlaOption;
 import com.android.net.module.util.structs.PrefixInformationOption;
 import com.android.net.module.util.structs.RdnssOption;
+import com.android.networkstack.R;
 import com.android.networkstack.apishim.CaptivePortalDataShimImpl;
 import com.android.networkstack.apishim.ConstantsShim;
 import com.android.networkstack.apishim.common.ShimUtils;
@@ -290,7 +295,6 @@ public abstract class IpClientIntegrationTestCommon {
     @Mock protected NetworkStackIpMemoryStore mIpMemoryStore;
     @Mock private NetworkQuirkMetrics.Dependencies mNetworkQuirkMetricsDeps;
     @Mock private IpReachabilityMonitorMetrics mIpReachabilityMonitorMetrics;
-    @Mock protected IpReachabilityMonitor.Callback mCallback;
 
     @Spy private INetd mNetd;
     private NetworkObserverRegistry mNetworkObserverRegistry;
@@ -436,7 +440,7 @@ public abstract class IpClientIntegrationTestCommon {
                 InterfaceParams ifParams, Handler h, SharedLog log,
                 IpReachabilityMonitor.Callback callback, boolean usingMultinetworkPolicyTracker,
                 IpReachabilityMonitor.Dependencies deps, final INetd netd) {
-            return new IpReachabilityMonitor(context, ifParams, h, log, mCallback,
+            return new IpReachabilityMonitor(context, ifParams, h, log, callback,
                     usingMultinetworkPolicyTracker, deps, netd);
         }
 
@@ -540,10 +544,6 @@ public abstract class IpClientIntegrationTestCommon {
 
     protected abstract void assertIpMemoryNeverStoreNetworkAttributes(String l2Key, long timeout);
 
-    protected abstract void assertNotifyNeighborLost(Inet6Address targetIp);
-
-    protected abstract void assertNeverNotifyNeighborLost();
-
     protected final boolean testSkipped() {
         // TODO: split out a test suite for root tests, and fail hard instead of skipping the test
         // if it is run on devices where TestNetworkStackServiceClient is not supported
@@ -592,6 +592,8 @@ public abstract class IpClientIntegrationTestCommon {
         if (useNetworkStackSignature()) {
             setUpMocks();
             setUpIpClient();
+            // Enable packet retransmit alarm in DhcpClient.
+            enableRealAlarm("DhcpClient." + mIfaceName + ".KICK");
         }
 
         mIIpClient = makeIIpClient(mIfaceName, mCb);
@@ -604,10 +606,17 @@ public abstract class IpClientIntegrationTestCommon {
         when(mContext.getSystemService(eq(Context.ALARM_SERVICE))).thenReturn(mAlarm);
         when(mContext.getSystemService(eq(ConnectivityManager.class))).thenReturn(mCm);
         when(mContext.getResources()).thenReturn(mResources);
+        when(mResources.getInteger(eq(R.integer.config_nud_postroaming_solicit_num))).thenReturn(5);
+        when(mResources.getInteger(eq(R.integer.config_nud_postroaming_solicit_interval)))
+                 .thenReturn(750);
+        when(mResources.getInteger(eq(R.integer.config_nud_steadystate_solicit_num)))
+                 .thenReturn(10);
+        when(mResources.getInteger(eq(R.integer.config_nud_steadystate_solicit_interval)))
+                 .thenReturn(750);
         when(mContext.getContentResolver()).thenReturn(mContentResolver);
         when(mNetworkStackServiceManager.getIpMemoryStoreService())
                 .thenReturn(mIpMemoryStoreService);
-        when(mCb.getInterfaceVersion()).thenReturn(VERSION_ADDED_PROVISIONING_ENUM);
+        when(mCb.getInterfaceVersion()).thenReturn(IpClient.VERSION_ADDED_REACHABILITY_FAILURE);
 
         mDependencies.setDeviceConfigProperty(IpClient.CONFIG_MIN_RDNSS_LIFETIME, 67);
         mDependencies.setDeviceConfigProperty(DhcpClient.DHCP_RESTART_CONFIG_DELAY, 10);
@@ -686,6 +695,17 @@ public abstract class IpClientIntegrationTestCommon {
              BufferedReader reader = new BufferedReader(new FileReader(fd.getFileDescriptor()))) {
             return reader.readLine();
         }
+    }
+
+    private void enableRealAlarm(String cmdName) {
+        doAnswer((inv) -> {
+            final Context context = InstrumentationRegistry.getTargetContext();
+            final AlarmManager alarmManager = context.getSystemService(AlarmManager.class);
+            alarmManager.setExact(inv.getArgument(0), inv.getArgument(1), inv.getArgument(2),
+                    inv.getArgument(3), inv.getArgument(4));
+            return null;
+        }).when(mAlarm).setExact(anyInt(), anyLong(), eq(cmdName), any(OnAlarmListener.class),
+                any(Handler.class));
     }
 
     private IpClient makeIpClient() throws Exception {
@@ -1386,6 +1406,27 @@ public abstract class IpClientIntegrationTestCommon {
                 TEST_DEFAULT_MTU, false /* isDhcpIpConflictDetectEnabled */);
         verifyIPv4OnlyProvisioningSuccess(Collections.singletonList(CLIENT_ADDR));
         assertIpMemoryStoreNetworkAttributes(TEST_LEASE_DURATION_S, currentTime, TEST_DEFAULT_MTU);
+    }
+
+    @Test
+    public void testRollbackFromRapidCommitOption() throws Exception {
+        startIpClientProvisioning(false /* isDhcpLeaseCacheEnabled */,
+                true /* isDhcpRapidCommitEnabled */, false /* isPreConnectionEnabled */,
+                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+
+        final List<DhcpPacket> discoverList = new ArrayList<DhcpPacket>();
+        DhcpPacket packet;
+        do {
+            packet = getNextDhcpPacket();
+            assertTrue(packet instanceof DhcpDiscoverPacket);
+            discoverList.add(packet);
+        } while (discoverList.size() < 4);
+
+        // Check the only first 3 DHCPDISCOVERs take rapid commit option.
+        assertTrue(discoverList.get(0).mRapidCommit);
+        assertTrue(discoverList.get(1).mRapidCommit);
+        assertTrue(discoverList.get(2).mRapidCommit);
+        assertFalse(discoverList.get(3).mRapidCommit);
     }
 
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
@@ -2511,12 +2552,23 @@ public abstract class IpClientIntegrationTestCommon {
         mPacketReader.sendResponse(packetBuffer);
         HandlerUtils.waitForIdle(mIpc.getHandler(), TEST_TIMEOUT_MS);
 
-        if (shouldReplyNakOnRoam || hasMismatchedIpAddress) {
-            // notifyFailure
-            ArgumentCaptor<DhcpResultsParcelable> captor =
+        if (shouldReplyNakOnRoam) {
+            ArgumentCaptor<ReachabilityLossInfoParcelable> lossInfoCaptor =
+                    ArgumentCaptor.forClass(ReachabilityLossInfoParcelable.class);
+            verify(mCb, timeout(TEST_TIMEOUT_MS)).onReachabilityFailure(lossInfoCaptor.capture());
+            assertEquals(ReachabilityLossReason.ROAM, lossInfoCaptor.getValue().reason);
+
+            // IPv4 address will be still deleted when DhcpClient state machine exits from
+            // DhcpHaveLeaseState, a following onProvisioningFailure will be thrown then.
+            // Also check DhcpClient won't send any DHCPDISCOVER packet.
+            verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningFailure(any());
+            assertNull(getNextDhcpPacket(TEST_TIMEOUT_MS));
+            verify(mCb, never()).onNewDhcpResults(any());
+        } else if (hasMismatchedIpAddress) {
+            ArgumentCaptor<DhcpResultsParcelable> resultsCaptor =
                     ArgumentCaptor.forClass(DhcpResultsParcelable.class);
-            verify(mCb, timeout(TEST_TIMEOUT_MS)).onNewDhcpResults(captor.capture());
-            DhcpResults lease = fromStableParcelable(captor.getValue());
+            verify(mCb, timeout(TEST_TIMEOUT_MS)).onNewDhcpResults(resultsCaptor.capture());
+            DhcpResults lease = fromStableParcelable(resultsCaptor.getValue());
             assertNull(lease);
 
             // DhcpClient rolls back to StoppedState instead of INIT state after calling
@@ -3424,6 +3476,38 @@ public abstract class IpClientIntegrationTestCommon {
         prepareIpReachabilityMonitorTest(false /* isMulticastResolicitEnabled */);
     }
 
+    private void assertNotifyNeighborLost(Inet6Address targetIp, NudEventType eventType)
+            throws Exception {
+        // For root test suite, rely on the IIpClient aidl interface version constant defined in
+        // {@link IpClientRootTest.BinderCbWrapper}; for privileged integration test suite that
+        // requires signature permission, use the mocked aidl version defined in {@link setUpMocks},
+        // which results in only new callbacks are verified. And add separate test cases to test the
+        // legacy callbacks explicitly as well.
+        assertNeighborReachabilityLoss(targetIp, eventType,
+                useNetworkStackSignature()
+                        ? IpClient.VERSION_ADDED_REACHABILITY_FAILURE
+                        : mIIpClient.getInterfaceVersion());
+    }
+
+    private void assertNeighborReachabilityLoss(Inet6Address targetIp, NudEventType eventType,
+            int targetAidlVersion) throws Exception {
+        if (targetAidlVersion >= IpClient.VERSION_ADDED_REACHABILITY_FAILURE) {
+            final ArgumentCaptor<ReachabilityLossInfoParcelable> lossInfoCaptor =
+                    ArgumentCaptor.forClass(ReachabilityLossInfoParcelable.class);
+            verify(mCb, timeout(TEST_TIMEOUT_MS)).onReachabilityFailure(lossInfoCaptor.capture());
+            assertEquals(nudEventTypeToInt(eventType), lossInfoCaptor.getValue().reason);
+            verify(mCb, never()).onReachabilityLost(any());
+        } else {
+            verify(mCb, timeout(TEST_TIMEOUT_MS)).onReachabilityLost(any());
+            verify(mCb, never()).onReachabilityFailure(any());
+        }
+    }
+
+    private void assertNeverNotifyNeighborLost() throws Exception {
+        verify(mCb, never()).onReachabilityFailure(any());
+        verify(mCb, never()).onReachabilityLost(any());
+    }
+
     private void prepareIpReachabilityMonitorTest(boolean isMulticastResolicitEnabled)
             throws Exception {
         final ScanResultInfo info = makeScanResultInfo(TEST_DEFAULT_SSID, TEST_DEFAULT_BSSID);
@@ -3444,8 +3528,7 @@ public abstract class IpClientIntegrationTestCommon {
         forceLayer2Roaming();
     }
 
-    @Test
-    public void testIpReachabilityMonitor_probeFailed() throws Exception {
+    private void runIpReachabilityMonitorProbeFailedTest() throws Exception {
         prepareIpReachabilityMonitorTest();
 
         final List<NeighborSolicitation> nsList = waitForMultipleNeighborSolicitations();
@@ -3454,7 +3537,22 @@ public abstract class IpClientIntegrationTestCommon {
             assertUnicastNeighborSolicitation(ns, ROUTER_MAC /* dstMac */,
                     ROUTER_LINK_LOCAL /* dstIp */, ROUTER_LINK_LOCAL /* targetIp */);
         }
-        assertNotifyNeighborLost(ROUTER_LINK_LOCAL /* targetIp */);
+    }
+
+    @Test
+    public void testIpReachabilityMonitor_probeFailed() throws Exception {
+        runIpReachabilityMonitorProbeFailedTest();
+        assertNotifyNeighborLost(ROUTER_LINK_LOCAL /* targetIp */,
+                NudEventType.NUD_POST_ROAMING_FAILED_CRITICAL);
+    }
+
+    @Test @SignatureRequiredTest(reason = "requires mock callback object")
+    public void testIpReachabilityMonitor_probeFailed_legacyCallback() throws Exception {
+        when(mCb.getInterfaceVersion()).thenReturn(12 /* assign an older interface aidl version */);
+
+        runIpReachabilityMonitorProbeFailedTest();
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onReachabilityLost(any());
+        verify(mCb, never()).onReachabilityFailure(any());
     }
 
     @Test
@@ -3473,8 +3571,7 @@ public abstract class IpClientIntegrationTestCommon {
         assertNeverNotifyNeighborLost();
     }
 
-    @Test
-    public void testIpReachabilityMonitor_mcastResoclicitProbeFailed() throws Exception {
+    private void runIpReachabilityMonitorMcastResolicitProbeFailedTest() throws Exception {
         prepareIpReachabilityMonitorTest(true /* isMulticastResolicitEnabled */);
 
         final List<NeighborSolicitation> nsList = waitForMultipleNeighborSolicitations();
@@ -3487,11 +3584,27 @@ public abstract class IpClientIntegrationTestCommon {
         for (NeighborSolicitation ns : nsList.subList(MIN_NUD_SOLICIT_NUM, nsList.size())) {
             assertMulticastNeighborSolicitation(ns, ROUTER_LINK_LOCAL /* targetIp */);
         }
-        assertNotifyNeighborLost(ROUTER_LINK_LOCAL /* targetIp */);
     }
 
     @Test
-    public void testIpReachabilityMonitor_mcastResoclicitProbeReachableWithSameLinkLayerAddress()
+    public void testIpReachabilityMonitor_mcastResolicitProbeFailed() throws Exception {
+        runIpReachabilityMonitorMcastResolicitProbeFailedTest();
+        assertNotifyNeighborLost(ROUTER_LINK_LOCAL /* targetIp */,
+                NudEventType.NUD_POST_ROAMING_FAILED_CRITICAL);
+    }
+
+    @Test @SignatureRequiredTest(reason = "requires mock callback object")
+    public void testIpReachabilityMonitor_mcastResolicitProbeFailed_legacyCallback()
+            throws Exception {
+        when(mCb.getInterfaceVersion()).thenReturn(12 /* assign an older interface aidl version */);
+
+        runIpReachabilityMonitorMcastResolicitProbeFailedTest();
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onReachabilityLost(any());
+        verify(mCb, never()).onReachabilityFailure(any());
+    }
+
+    @Test
+    public void testIpReachabilityMonitor_mcastResolicitProbeReachableWithSameLinkLayerAddress()
             throws Exception {
         prepareIpReachabilityMonitorTest(true /* isMulticastResolicitEnabled */);
 
@@ -3508,7 +3621,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
-    public void testIpReachabilityMonitor_mcastResoclicitProbeReachableWithDiffLinkLayerAddress()
+    public void testIpReachabilityMonitor_mcastResolicitProbeReachableWithDiffLinkLayerAddress()
             throws Exception {
         prepareIpReachabilityMonitorTest(true /* isMulticastResolicitEnabled */);
 
@@ -3527,7 +3640,8 @@ public abstract class IpClientIntegrationTestCommon {
                 ns.ethHdr.srcMac /* dstMac */, ROUTER_LINK_LOCAL /* srcIp */,
                 ns.ipv6Hdr.srcIp /* dstIp */, flag, ROUTER_LINK_LOCAL /* target */);
         mPacketReader.sendResponse(na);
-        assertNotifyNeighborLost(ROUTER_LINK_LOCAL /* targetIp */);
+        assertNotifyNeighborLost(ROUTER_LINK_LOCAL /* targetIp */,
+                NudEventType.NUD_POST_ROAMING_MAC_ADDRESS_CHANGED);
     }
 
     @Test
