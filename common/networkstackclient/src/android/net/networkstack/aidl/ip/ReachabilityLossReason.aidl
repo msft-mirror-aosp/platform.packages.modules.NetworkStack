@@ -14,22 +14,11 @@
  * limitations under the License.
  */
 
-package com.android.networkstack.apishim;
+package android.net.networkstack.aidl.ip;
 
-import android.os.Build;
-
-import androidx.annotation.RequiresApi;
-
-import com.android.networkstack.apishim.common.NetworkRequestShim;
-
-/**
- * Implementation of {@link NetworkRequestShim} for API 31.
- */
-@RequiresApi(Build.VERSION_CODES.S) // Change to T when version code available, and adding T methods
-public class NetworkRequestShimImpl
-        extends com.android.networkstack.apishim.api31.NetworkRequestShimImpl {
-    // Currently identical to the API 31 shim, so inherit everything
-    protected NetworkRequestShimImpl() {
-        super();
-    }
+@Backing(type="int")
+enum ReachabilityLossReason {
+    ROAM,    // reachability loss due to L2 roaming.
+    CONFIRM, // reachability loss due to WiFi RSSI check.
+    ORGANIC, // reachability loss notification comes from kernel.
 }
