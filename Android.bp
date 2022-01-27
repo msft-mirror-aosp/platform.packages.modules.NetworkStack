@@ -168,7 +168,9 @@ java_library {
         "NetworkStackApi29Shims",
         "NetworkStackApi30Shims",
         "NetworkStackApi31Shims",
+        "framework-bluetooth",
         "framework-connectivity",
+        "framework-tethering",
     ],
     sdk_version: "module_current",
     visibility: ["//visibility:private"],
@@ -190,6 +192,8 @@ java_library {
     sdk_version: "module_current",
     visibility: [
         "//packages/modules/Connectivity/Tethering",
+        "//packages/modules/Connectivity/service",
+        "//packages/modules/Connectivity/service-t",
         "//packages/modules/Connectivity/tests/cts/net",
         "//packages/modules/Connectivity/tests/cts/hostside/app",
     ],
@@ -211,6 +215,8 @@ java_library {
     sdk_version: "module_31",
     visibility: [
         "//packages/modules/Connectivity/Tethering",
+        "//packages/modules/Connectivity/service",
+        "//packages/modules/Connectivity/service-t",
         "//packages/modules/Connectivity/tests/cts/net",
         "//packages/modules/Connectivity/tests/cts/hostside/app",
     ],
