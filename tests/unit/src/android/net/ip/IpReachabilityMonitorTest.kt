@@ -15,6 +15,7 @@
  */
 package android.net.ip
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.net.ip.IpNeighborMonitor.NeighborEventConsumer
 import android.net.INetd
@@ -37,11 +38,13 @@ import android.stats.connectivity.IpType.IPV6
 import android.stats.connectivity.NudEventType
 import android.stats.connectivity.NudEventType.NUD_CONFIRM_FAILED
 import android.stats.connectivity.NudEventType.NUD_CONFIRM_FAILED_CRITICAL
-import android.stats.connectivity.NudEventType.NUD_MAC_ADDRESS_CHANGED
+import android.stats.connectivity.NudEventType.NUD_CONFIRM_MAC_ADDRESS_CHANGED
 import android.stats.connectivity.NudEventType.NUD_POST_ROAMING_FAILED
 import android.stats.connectivity.NudEventType.NUD_POST_ROAMING_FAILED_CRITICAL
+import android.stats.connectivity.NudEventType.NUD_POST_ROAMING_MAC_ADDRESS_CHANGED
 import android.stats.connectivity.NudEventType.NUD_ORGANIC_FAILED
 import android.stats.connectivity.NudEventType.NUD_ORGANIC_FAILED_CRITICAL
+import android.stats.connectivity.NudEventType.NUD_ORGANIC_MAC_ADDRESS_CHANGED
 import android.stats.connectivity.NudNeighborType
 import android.stats.connectivity.NudNeighborType.NUD_NEIGHBOR_BOTH
 import android.stats.connectivity.NudNeighborType.NUD_NEIGHBOR_DNS
@@ -104,6 +107,8 @@ private val TEST_IPV6_DNS = parseNumericAddress("2001:db8::321") as Inet6Address
 private val TEST_IPV6_DNS2 = parseNumericAddress("2001:db8::456") as Inet6Address
 
 private val TEST_IFACE = InterfaceParams("fake0", 21, null)
+
+@SuppressLint("NewApi")
 private val TEST_LINK_PROPERTIES = LinkProperties().apply {
     interfaceName = TEST_IFACE.name
     addLinkAddress(TEST_IPV4_LINKADDR)
@@ -121,6 +126,7 @@ private val TEST_LINK_PROPERTIES = LinkProperties().apply {
     addDnsServer(TEST_IPV6_DNS)
 }
 
+@SuppressLint("NewApi")
 private val TEST_IPV4_ONLY_LINK_PROPERTIES = LinkProperties().apply {
     interfaceName = TEST_IFACE.name
     addLinkAddress(TEST_IPV4_LINKADDR)
@@ -134,6 +140,7 @@ private val TEST_IPV4_ONLY_LINK_PROPERTIES = LinkProperties().apply {
     addDnsServer(TEST_IPV4_GATEWAY_DNS)
 }
 
+@SuppressLint("NewApi")
 private val TEST_IPV6_LINKLOCAL_SCOPED_LINK_PROPERTIES = LinkProperties().apply {
     interfaceName = TEST_IFACE.name
     addLinkAddress(TEST_IPV6_LINKADDR)
@@ -149,6 +156,7 @@ private val TEST_IPV6_LINKLOCAL_SCOPED_LINK_PROPERTIES = LinkProperties().apply 
     addDnsServer(TEST_IPV6_DNS)
 }
 
+@SuppressLint("NewApi")
 private val TEST_DUAL_LINK_PROPERTIES = LinkProperties().apply {
     interfaceName = TEST_IFACE.name
     addLinkAddress(TEST_IPV4_LINKADDR)
@@ -285,10 +293,15 @@ class IpReachabilityMonitorTest {
         reachabilityMonitor.updateLinkProperties(TEST_LINK_PROPERTIES)
 
         neighborMonitor.enqueuePacket(makeNewNeighMessage(TEST_IPV4_DNS, NUD_FAILED))
-        verify(callback, timeout(TEST_TIMEOUT_MS)).notifyLost(eq(TEST_IPV4_DNS), anyString())
+        verify(callback, timeout(TEST_TIMEOUT_MS)).notifyLost(eq(TEST_IPV4_DNS), anyString(),
+                eq(NUD_ORGANIC_FAILED_CRITICAL))
     }
 
-    private fun runLoseProvisioningTest(newLp: LinkProperties, lostNeighbor: InetAddress) {
+    private fun runLoseProvisioningTest(
+        newLp: LinkProperties,
+        lostNeighbor: InetAddress,
+        eventType: NudEventType
+    ) {
         reachabilityMonitor.updateLinkProperties(newLp)
 
         neighborMonitor.enqueuePacket(makeNewNeighMessage(TEST_IPV4_GATEWAY, NUD_STALE))
@@ -297,7 +310,8 @@ class IpReachabilityMonitorTest {
         neighborMonitor.enqueuePacket(makeNewNeighMessage(TEST_IPV6_DNS, NUD_STALE))
 
         neighborMonitor.enqueuePacket(makeNewNeighMessage(lostNeighbor, NUD_FAILED))
-        verify(callback, timeout(TEST_TIMEOUT_MS)).notifyLost(eq(lostNeighbor), anyString())
+        verify(callback, timeout(TEST_TIMEOUT_MS)).notifyLost(eq(lostNeighbor), anyString(),
+                eq(eventType))
     }
 
     private fun verifyNudFailureMetrics(
@@ -325,14 +339,13 @@ class IpReachabilityMonitorTest {
 
         neighborMonitor.enqueuePacket(makeNewNeighMessage(lostNeighbor, NUD_FAILED))
         handlerThread.waitForIdle(TEST_TIMEOUT_MS)
-        verify(callback, never()).notifyLost(any(), anyString())
+        verify(callback, never()).notifyLost(any(), anyString(), any(NudEventType::class.java))
         verifyNudFailureMetrics(eventType, ipType, lostNeighborType)
     }
 
-    private fun runNeighborReachableButMacAddrChangedTest(
+    private fun prepareNeighborReachableButMacAddrChangedTest(
         newLp: LinkProperties,
-        neighbor: InetAddress,
-        ipType: IpType
+        neighbor: InetAddress
     ) {
         doReturn(true).`when`(dependencies).isFeatureEnabled(anyObject(),
                 eq(IP_REACHABILITY_MCAST_RESOLICIT_VERSION), anyBoolean())
@@ -342,34 +355,30 @@ class IpReachabilityMonitorTest {
         neighborMonitor.enqueuePacket(makeNewNeighMessage(neighbor, NUD_REACHABLE,
                 "001122334455" /* oldMac */))
         handlerThread.waitForIdle(TEST_TIMEOUT_MS)
-        verify(callback, never()).notifyLost(eq(neighbor), anyString())
-
-        reachabilityMonitor.probeAll(true /* dueToRoam */)
-
-        neighborMonitor.enqueuePacket(makeNewNeighMessage(neighbor, NUD_REACHABLE,
-                "1122334455aa" /* newMac */))
-        verify(callback, timeout(TEST_TIMEOUT_MS)).notifyLost(eq(neighbor), anyString())
-        verifyNudFailureMetrics(NUD_MAC_ADDRESS_CHANGED, ipType, NUD_NEIGHBOR_GATEWAY)
+        verify(callback, never()).notifyLost(eq(neighbor), anyString(),
+                any(NudEventType::class.java))
     }
 
     @Test
     fun testLoseProvisioning_Ipv4DnsLost() {
-        runLoseProvisioningTest(TEST_LINK_PROPERTIES, TEST_IPV4_DNS)
+        runLoseProvisioningTest(TEST_LINK_PROPERTIES, TEST_IPV4_DNS, NUD_ORGANIC_FAILED_CRITICAL)
     }
 
     @Test
     fun testLoseProvisioning_Ipv6DnsLost() {
-        runLoseProvisioningTest(TEST_LINK_PROPERTIES, TEST_IPV6_DNS)
+        runLoseProvisioningTest(TEST_LINK_PROPERTIES, TEST_IPV6_DNS, NUD_ORGANIC_FAILED_CRITICAL)
     }
 
     @Test
     fun testLoseProvisioning_Ipv4GatewayLost() {
-        runLoseProvisioningTest(TEST_LINK_PROPERTIES, TEST_IPV4_GATEWAY)
+        runLoseProvisioningTest(TEST_LINK_PROPERTIES, TEST_IPV4_GATEWAY,
+                NUD_ORGANIC_FAILED_CRITICAL)
     }
 
     @Test
     fun testLoseProvisioning_Ipv6GatewayLost() {
-        runLoseProvisioningTest(TEST_LINK_PROPERTIES, TEST_IPV6_GATEWAY)
+        runLoseProvisioningTest(TEST_LINK_PROPERTIES, TEST_IPV6_GATEWAY,
+                NUD_ORGANIC_FAILED_CRITICAL)
     }
 
     private fun runNudProbeFailureMetricsTest(
@@ -379,7 +388,7 @@ class IpReachabilityMonitorTest {
         ipType: IpType,
         lostNeighborType: NudNeighborType
     ) {
-        runLoseProvisioningTest(lp, lostNeighbor)
+        runLoseProvisioningTest(lp, lostNeighbor, eventType)
         verifyNudFailureMetrics(eventType, ipType, lostNeighborType)
     }
 
@@ -532,7 +541,8 @@ class IpReachabilityMonitorTest {
         handlerThread.waitForIdle(TEST_TIMEOUT_MS)
         Thread.sleep(2)
         reachabilityMonitor.probeAll(false /* dueToRoam */)
-        runLoseProvisioningTest(TEST_LINK_PROPERTIES, TEST_IPV6_GATEWAY)
+        runLoseProvisioningTest(TEST_LINK_PROPERTIES, TEST_IPV6_GATEWAY,
+                NUD_POST_ROAMING_FAILED_CRITICAL)
 
         verifyNudFailureMetrics(NUD_POST_ROAMING_FAILED_CRITICAL, IPV6, NUD_NEIGHBOR_GATEWAY)
     }
@@ -543,18 +553,52 @@ class IpReachabilityMonitorTest {
         handlerThread.waitForIdle(TEST_TIMEOUT_MS)
         Thread.sleep(2)
         reachabilityMonitor.probeAll(true /* dueToRoam */)
-        runLoseProvisioningTest(TEST_LINK_PROPERTIES, TEST_IPV6_GATEWAY)
+        runLoseProvisioningTest(TEST_LINK_PROPERTIES, TEST_IPV6_GATEWAY,
+                NUD_CONFIRM_FAILED_CRITICAL)
 
         verifyNudFailureMetrics(NUD_CONFIRM_FAILED_CRITICAL, IPV6, NUD_NEIGHBOR_GATEWAY)
     }
 
-    @Test
-    fun testNudProbeFailedMetrics_defaultIPv6GatewayMacAddrChanged() {
-        runNeighborReachableButMacAddrChangedTest(TEST_LINK_PROPERTIES, TEST_IPV6_GATEWAY, IPV6)
+    private fun verifyNudMacAddrChangedType(
+        neighbor: InetAddress,
+        eventType: NudEventType,
+        ipType: IpType
+    ) {
+        neighborMonitor.enqueuePacket(makeNewNeighMessage(neighbor, NUD_REACHABLE,
+                "1122334455aa" /* newMac */))
+        verify(callback, timeout(TEST_TIMEOUT_MS)).notifyLost(eq(neighbor), anyString(),
+                eq(eventType))
+        verifyNudFailureMetrics(eventType, ipType, NUD_NEIGHBOR_GATEWAY)
     }
 
     @Test
-    fun testNudProbeFailedMetrics_defaultIPv4GatewayMacAddrChanged() {
-        runNeighborReachableButMacAddrChangedTest(TEST_LINK_PROPERTIES, TEST_IPV4_GATEWAY, IPV4)
+    fun testNudProbeFailedMetrics_defaultIPv6GatewayMacAddrChangedAfterRoaming() {
+        prepareNeighborReachableButMacAddrChangedTest(TEST_LINK_PROPERTIES, TEST_IPV6_GATEWAY)
+
+        reachabilityMonitor.probeAll(true /* dueToRoam */)
+        verifyNudMacAddrChangedType(TEST_IPV6_GATEWAY, NUD_POST_ROAMING_MAC_ADDRESS_CHANGED, IPV6)
+    }
+
+    @Test
+    fun testNudProbeFailedMetrics_defaultIPv4GatewayMacAddrChangedAfterRoaming() {
+        prepareNeighborReachableButMacAddrChangedTest(TEST_LINK_PROPERTIES, TEST_IPV4_GATEWAY)
+
+        reachabilityMonitor.probeAll(true /* dueToRoam */)
+        verifyNudMacAddrChangedType(TEST_IPV4_GATEWAY, NUD_POST_ROAMING_MAC_ADDRESS_CHANGED, IPV4)
+    }
+
+    @Test
+    fun testNudProbeFailedMetrics_defaultIPv6GatewayMacAddrChangedAfterConfirm() {
+        prepareNeighborReachableButMacAddrChangedTest(TEST_LINK_PROPERTIES, TEST_IPV6_GATEWAY)
+
+        reachabilityMonitor.probeAll(false /* dueToRoam */)
+        verifyNudMacAddrChangedType(TEST_IPV6_GATEWAY, NUD_CONFIRM_MAC_ADDRESS_CHANGED, IPV6)
+    }
+
+    @Test
+    fun testNudProbeFailedMetrics_defaultIPv6GatewayMacAddrChangedAfterOrganic() {
+        prepareNeighborReachableButMacAddrChangedTest(TEST_LINK_PROPERTIES, TEST_IPV6_GATEWAY)
+
+        verifyNudMacAddrChangedType(TEST_IPV6_GATEWAY, NUD_ORGANIC_MAC_ADDRESS_CHANGED, IPV6)
     }
 }

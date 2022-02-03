@@ -14,24 +14,22 @@
  * limitations under the License.
  */
 
-package com.android.networkstack.apishim;
+package com.android.networkstack.apishim.api29;
 
-import android.net.CaptivePortalData;
 import android.os.Build;
+import android.telephony.TelephonyManager;
 
-import androidx.annotation.NonNull;
 import androidx.annotation.RequiresApi;
 
-import com.android.networkstack.apishim.common.CaptivePortalDataShim;
+import com.android.networkstack.apishim.common.TelephonyManagerShim;
 
 /**
- * Compatibility implementation of {@link CaptivePortalDataShim}.
+ * Implementation of {@link TelephonyManagerShim} for API 29.
  */
-@RequiresApi(Build.VERSION_CODES.S) // Change to T when version code available, and adding T methods
-public class CaptivePortalDataShimImpl
-        extends com.android.networkstack.apishim.api31.CaptivePortalDataShimImpl {
-    // Currently identical to the API 31 shim, so inherit everything
-    public CaptivePortalDataShimImpl(@NonNull CaptivePortalData data) {
-        super(data);
+@RequiresApi(Build.VERSION_CODES.Q)
+public class TelephonyManagerShimImpl implements TelephonyManagerShim {
+    protected final TelephonyManager mTm;
+    public TelephonyManagerShimImpl(TelephonyManager tm) {
+        mTm = tm;
     }
 }

@@ -26,7 +26,7 @@ import com.android.networkstack.apishim.common.ConnectivityManagerShim;
 /**
  * Compatibility implementation of {@link ConnectivityManagerShim}.
  */
-@RequiresApi(Build.VERSION_CODES.S) // Change to T when version code available, and adding T methods
+@RequiresApi(Build.VERSION_CODES.TIRAMISU)
 public class ConnectivityManagerShimImpl
         extends com.android.networkstack.apishim.api31.ConnectivityManagerShimImpl  {
     // Currently identical to the API 31 shim, so inherit everything

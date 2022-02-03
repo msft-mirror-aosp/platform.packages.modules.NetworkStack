@@ -45,6 +45,19 @@ package {
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
+// TODO: remove this default and replace with ConnectivityNextEnableDefaults. This will need to be
+// done separately in each branch due to merge conflicts.
+// Defaults to enable/disable java targets that depend on
+// NetworkStackNext, which uses development APIs. "enabled" may
+// have a different value depending on the branch.
+java_defaults {
+    name: "NetworkStackNextEnableDefaults",
+    enabled: false,
+}
+// This is a placeholder comment to avoid merge conflicts
+// as the above target may have different "enabled" values
+// depending on the branch
+
 java_defaults {
     name: "NetworkStackDevApiLevel",
     min_sdk_version: "29",
@@ -147,17 +160,20 @@ java_library {
 // stable and have no defined version number. These could be called 10000, but they use the next
 // integer so if the next SDK release happens to use that integer, we don't need to rename them.
 java_library {
-    name: "NetworkStackApi32Shims",
-    defaults: ["NetworkStackShimsDefaults"],
+    name: "NetworkStackApi33Shims",
+    defaults: ["NetworkStackShimsDefaults", "ConnectivityNextEnableDefaults"],
     srcs: [
-        "apishim/32/**/*.java",
+        "apishim/33/**/*.java",
     ],
     libs: [
         "NetworkStackShimsCommon",
         "NetworkStackApi29Shims",
         "NetworkStackApi30Shims",
         "NetworkStackApi31Shims",
+        "framework-bluetooth",
         "framework-connectivity",
+        "framework-connectivity-tiramisu.stubs.module_lib",
+        "framework-tethering",
     ],
     sdk_version: "module_current",
     visibility: ["//visibility:private"],
@@ -168,18 +184,21 @@ java_library {
 // called directly by the networkstack code.
 java_library {
     name: "NetworkStackApiCurrentShims",
-    defaults: ["NetworkStackShimsDefaults"],
+    defaults: ["NetworkStackShimsDefaults", "ConnectivityNextEnableDefaults"],
     static_libs: [
         "NetworkStackShimsCommon",
         "NetworkStackApi29Shims",
         "NetworkStackApi30Shims",
         "NetworkStackApi31Shims",
-        "NetworkStackApi32Shims",
+        "NetworkStackApi33Shims",
     ],
     sdk_version: "module_current",
     visibility: [
         "//packages/modules/Connectivity/Tethering",
+        "//packages/modules/Connectivity/service",
+        "//packages/modules/Connectivity/service-t",
         "//packages/modules/Connectivity/tests/cts/net",
+        "//packages/modules/Connectivity/tests/cts/hostside/app",
     ],
 }
 
@@ -199,7 +218,10 @@ java_library {
     sdk_version: "module_31",
     visibility: [
         "//packages/modules/Connectivity/Tethering",
+        "//packages/modules/Connectivity/service",
+        "//packages/modules/Connectivity/service-t",
         "//packages/modules/Connectivity/tests/cts/net",
+        "//packages/modules/Connectivity/tests/cts/hostside/app",
     ],
 }
 
@@ -233,7 +255,11 @@ java_defaults {
 // The versions of the android library containing network stack code compiled for each SDK variant.
 android_library {
     name: "NetworkStackApiCurrentLib",
-    defaults: ["NetworkStackDevApiLevel", "NetworkStackAndroidLibraryDefaults"],
+    defaults: [
+        "NetworkStackDevApiLevel",
+        "NetworkStackAndroidLibraryDefaults",
+        "ConnectivityNextEnableDefaults",
+    ],
     srcs: [
         "src/**/*.java",
         ":statslog-networkstack-java-gen-current"
@@ -302,7 +328,11 @@ java_defaults {
 // Non-updatable network stack running in the system server process for devices not using the module
 android_app {
     name: "InProcessNetworkStack",
-    defaults: [ "NetworkStackAppDefaults", "NetworkStackDevApiLevel"],
+    defaults: [
+        "NetworkStackAppDefaults",
+        "NetworkStackDevApiLevel",
+        "ConnectivityNextEnableDefaults",
+    ],
     static_libs: ["NetworkStackApiCurrentLib"],
     certificate: "platform",
     manifest: "AndroidManifest_InProcess.xml",
@@ -320,7 +350,11 @@ android_app {
 // Pre-merge the AndroidManifest for NetworkStackNext, so that its manifest can be merged on top
 android_library {
     name: "NetworkStackNextManifestBase",
-    defaults: ["NetworkStackAppDefaults", "NetworkStackDevApiLevel"],
+    defaults: [
+        "NetworkStackAppDefaults",
+        "NetworkStackDevApiLevel",
+        "ConnectivityNextEnableDefaults",
+    ],
     static_libs: ["NetworkStackApiCurrentLib"],
     manifest: "AndroidManifest.xml"
 }
@@ -328,7 +362,11 @@ android_library {
 // NetworkStack build targeting the current API release, for testing on in-development SDK
 android_app {
     name: "NetworkStackNext",
-    defaults: ["NetworkStackAppDefaults", "NetworkStackDevApiLevel"],
+    defaults: [
+        "NetworkStackAppDefaults",
+        "NetworkStackDevApiLevel",
+        "ConnectivityNextEnableDefaults",
+    ],
     static_libs: ["NetworkStackNextManifestBase"],
     certificate: "networkstack",
     manifest: "AndroidManifest_Next.xml",

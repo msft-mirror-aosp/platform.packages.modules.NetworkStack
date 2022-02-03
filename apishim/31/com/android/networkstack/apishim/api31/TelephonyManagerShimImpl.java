@@ -14,22 +14,22 @@
  * limitations under the License.
  */
 
-package com.android.networkstack.apishim;
+package com.android.networkstack.apishim.api31;
 
 import android.os.Build;
+import android.telephony.TelephonyManager;
 
 import androidx.annotation.RequiresApi;
 
-import com.android.networkstack.apishim.common.NetworkRequestShim;
+import com.android.networkstack.apishim.common.TelephonyManagerShim;
 
 /**
- * Implementation of {@link NetworkRequestShim} for API 31.
+ * Implementation of {@link TelephonyManagerShim} for API 31.
  */
-@RequiresApi(Build.VERSION_CODES.S) // Change to T when version code available, and adding T methods
-public class NetworkRequestShimImpl
-        extends com.android.networkstack.apishim.api31.NetworkRequestShimImpl {
-    // Currently identical to the API 31 shim, so inherit everything
-    protected NetworkRequestShimImpl() {
-        super();
+@RequiresApi(Build.VERSION_CODES.S)
+public class TelephonyManagerShimImpl
+        extends com.android.networkstack.apishim.api30.TelephonyManagerShimImpl {
+    public TelephonyManagerShimImpl(TelephonyManager telephonyManager) {
+        super(telephonyManager);
     }
 }
