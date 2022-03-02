@@ -172,7 +172,7 @@ java_library {
         "NetworkStackApi31Shims",
         "framework-bluetooth",
         "framework-connectivity",
-        "framework-connectivity-tiramisu.stubs.module_lib",
+        "framework-connectivity-t.stubs.module_lib",
         "framework-tethering",
     ],
     sdk_version: "module_current",
@@ -220,8 +220,7 @@ java_library {
         "//packages/modules/Connectivity/Tethering",
         "//packages/modules/Connectivity/service",
         "//packages/modules/Connectivity/service-t",
-        "//packages/modules/Connectivity/tests/cts/net",
-        "//packages/modules/Connectivity/tests/cts/hostside/app",
+        "//packages/modules/Connectivity/tests/cts:__subpackages__",
     ],
 }
 
