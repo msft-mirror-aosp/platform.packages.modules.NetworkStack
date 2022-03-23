@@ -29,6 +29,7 @@ java_defaults {
         "kotlin-reflect",
         "mockito-target-extended-minus-junit4",
         "net-tests-utils",
+        //"net-utils-framework-common",
         "testables",
     ],
     libs: [
@@ -59,7 +60,7 @@ android_test {
     test_suites: ["general-tests"],
     defaults: [
         "NetworkStackTestsDefaults",
-        "NetworkStackNextEnableDefaults",
+        "ConnectivityNextEnableDefaults",
         "connectivity-mainline-presubmit-java-defaults",
     ],
     static_libs: ["NetworkStackApiCurrentLib"],
