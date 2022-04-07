@@ -16,6 +16,7 @@
 
 package android.net.ip;
 
+import static android.Manifest.permission.MANAGE_TEST_NETWORKS;
 import static android.net.dhcp.DhcpClient.EXPIRED_LEASE;
 import static android.net.dhcp.DhcpPacket.DHCP_BOOTREQUEST;
 import static android.net.dhcp.DhcpPacket.DHCP_CLIENT;
@@ -58,6 +59,7 @@ import static com.android.net.module.util.NetworkStackConstants.NEIGHBOR_ADVERTI
 import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_AUTONOMOUS;
 import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_ON_LINK;
 import static com.android.testutils.MiscAsserts.assertThrows;
+import static com.android.testutils.TestPermissionUtil.runAsShell;
 
 import static junit.framework.Assert.fail;
 
@@ -130,7 +132,6 @@ import android.net.networkstack.aidl.ip.ReachabilityLossReason;
 import android.net.shared.Layer2Information;
 import android.net.shared.ProvisioningConfiguration;
 import android.net.shared.ProvisioningConfiguration.ScanResultInfo;
-import android.net.util.InterfaceParams;
 import android.net.util.NetworkStackUtils;
 import android.net.util.SharedLog;
 import android.os.Build;
@@ -154,6 +155,7 @@ import androidx.test.filters.SmallTest;
 import com.android.internal.util.HexDump;
 import com.android.internal.util.StateMachine;
 import com.android.net.module.util.ArrayTrackRecord;
+import com.android.net.module.util.InterfaceParams;
 import com.android.net.module.util.Ipv6Utils;
 import com.android.net.module.util.netlink.StructNdOptPref64;
 import com.android.net.module.util.structs.LlaOption;
@@ -356,6 +358,9 @@ public abstract class IpClientIntegrationTestCommon {
     private static final Inet4Address NETMASK = getPrefixMaskAsInet4Address(PREFIX_LENGTH);
     private static final Inet4Address BROADCAST_ADDR = getBroadcastAddress(
             SERVER_ADDR, PREFIX_LENGTH);
+    private static final String IPV6_LINK_LOCAL_PREFIX = "fe80::/64";
+    private static final String IPV4_TEST_SUBNET_PREFIX = "192.168.1.0/24";
+    private static final String IPV4_ANY_ADDRESS_PREFIX = "0.0.0.0/0";
     private static final String HOSTNAME = "testhostname";
     private static final int TEST_DEFAULT_MTU = 1500;
     private static final int TEST_MIN_MTU = 1280;
@@ -641,19 +646,11 @@ public abstract class IpClientIntegrationTestCommon {
 
     private void setUpTapInterface() throws Exception {
         final Instrumentation inst = InstrumentationRegistry.getInstrumentation();
-        // Adopt the shell permission identity to create a test TAP interface.
-        inst.getUiAutomation().adoptShellPermissionIdentity();
-
-        final TestNetworkInterface iface;
-        try {
-            final TestNetworkManager tnm = (TestNetworkManager)
-                    inst.getContext().getSystemService(Context.TEST_NETWORK_SERVICE);
-            iface = tnm.createTapInterface();
-        } finally {
-            // Drop the identity in order to regain the network stack permissions, which the shell
-            // does not have.
-            inst.getUiAutomation().dropShellPermissionIdentity();
-        }
+        final TestNetworkInterface iface = runAsShell(MANAGE_TEST_NETWORKS, () -> {
+            final TestNetworkManager tnm =
+                    inst.getContext().getSystemService(TestNetworkManager.class);
+            return tnm.createTapInterface();
+        });
         mIfaceName = iface.getInterfaceName();
         mClientMac = getIfaceMacAddr(mIfaceName).toByteArray();
         mPacketReaderThread = new HandlerThread(
@@ -1408,7 +1405,7 @@ public abstract class IpClientIntegrationTestCommon {
         assertIpMemoryStoreNetworkAttributes(TEST_LEASE_DURATION_S, currentTime, TEST_DEFAULT_MTU);
     }
 
-    @Test
+    @Test @IgnoreUpTo(Build.VERSION_CODES.Q)
     public void testRollbackFromRapidCommitOption() throws Exception {
         startIpClientProvisioning(false /* isDhcpLeaseCacheEnabled */,
                 true /* isDhcpRapidCommitEnabled */, false /* isPreConnectionEnabled */,
@@ -2698,6 +2695,13 @@ public abstract class IpClientIntegrationTestCommon {
                 (long) NetworkQuirkEvent.QE_IPV6_PROVISIONING_ROUTER_LOST.ordinal());
     }
 
+    private boolean hasRouteTo(@NonNull final LinkProperties lp, @NonNull final String prefix) {
+        for (RouteInfo r : lp.getRoutes()) {
+            if (r.getDestination().equals(new IpPrefix(prefix))) return true;
+        }
+        return false;
+    }
+
     @Test @SignatureRequiredTest(reason = "signature perms are required due to mocked callabck")
     public void testIgnoreIpv6ProvisioningLoss_disableAcceptRa() throws Exception {
         doDualStackProvisioning(true /* shouldDisableAcceptRa */);
@@ -2713,6 +2717,8 @@ public abstract class IpClientIntegrationTestCommon {
                     // Only IPv4 provisioned and IPv6 link-local address
                     final boolean isIPv6LinkLocalAndIPv4OnlyProvisioned =
                             (x.getLinkAddresses().size() == 2
+                                    // fe80::/64, IPv4 default route, IPv4 subnet route
+                                    && x.getRoutes().size() == 3
                                     && x.getDnsServers().size() == 1
                                     && x.getAddresses().get(0) instanceof Inet4Address
                                     && x.getDnsServers().get(0) instanceof Inet4Address);
@@ -2725,6 +2731,10 @@ public abstract class IpClientIntegrationTestCommon {
         assertNotNull(lp);
         assertEquals(lp.getAddresses().get(0), CLIENT_ADDR);
         assertEquals(lp.getDnsServers().get(0), SERVER_ADDR);
+        assertEquals(3, lp.getRoutes().size());
+        assertTrue(hasRouteTo(lp, IPV6_LINK_LOCAL_PREFIX)); // fe80::/64
+        assertTrue(hasRouteTo(lp, IPV4_TEST_SUBNET_PREFIX)); // IPv4 directly-connected route
+        assertTrue(hasRouteTo(lp, IPV4_ANY_ADDRESS_PREFIX)); // IPv4 default route
         assertTrue(lp.getAddresses().get(1).isLinkLocalAddress());
 
         reset(mCb);
