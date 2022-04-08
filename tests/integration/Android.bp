@@ -50,6 +50,7 @@ java_defaults {
         "android.test.base",
         "android.test.mock",
     ],
+    jarjar_rules: ":NetworkStackJarJarRules",
     visibility: ["//visibility:private"],
 }
 
@@ -71,8 +72,6 @@ android_test {
     platform_apis: true,
     test_suites: ["device-tests"],
     min_sdk_version: "29",
-    target_sdk_version: "30",
-    jarjar_rules: ":NetworkStackJarJarRules",
 }
 
 // Network stack next integration tests.
@@ -88,7 +87,22 @@ android_test {
     certificate: "networkstack",
     platform_apis: true,
     test_suites: ["device-tests"],
+    enabled: false, // Disabled in mainline-prod
+}
+
+// The static lib needs to be jarjared by each module so they do not conflict with each other
+// (e.g. wifi, system server, network stack need to use different package names when including it).
+// Apply NetworkStack jarjar rules to the tests as well so classes in NetworkStaticLibTests have the
+// same package names as in module code.
+android_library {
+    name: "NetworkStackStaticLibTestsLib",
+    platform_apis: true,
+    min_sdk_version: "29",
     jarjar_rules: ":NetworkStackJarJarRules",
+    static_libs: [
+        "NetworkStaticLibTestsLib",
+        "NetdStaticLibTestsLib",
+    ],
 }
 
 // Special version of the network stack tests that includes all tests necessary for code coverage
@@ -98,7 +112,6 @@ android_test {
     certificate: "networkstack",
     platform_apis: true,
     min_sdk_version: "29",
-    target_sdk_version: "30",
     test_suites: ["device-tests", "mts"],
     test_config: "AndroidTest_Coverage.xml",
     defaults: ["NetworkStackIntegrationTestsJniDefaults"],
@@ -106,10 +119,8 @@ android_test {
         "modules-utils-native-coverage-listener",
         "NetworkStackTestsLib",
         "NetworkStackIntegrationTestsLib",
-        "NetworkStaticLibTestsLib",
-        "NetdStaticLibTestsLib",
+        "NetworkStackStaticLibTestsLib",
     ],
     compile_multilib: "both",
     manifest: "AndroidManifest_coverage.xml",
-    jarjar_rules: ":NetworkStackJarJarRules",
 }

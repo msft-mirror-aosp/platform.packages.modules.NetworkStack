@@ -103,22 +103,11 @@ public class CaptivePortalProbeResult {
     }
 
     public boolean isSuccessful() {
-        return isSuccessCode(mHttpResponseCode);
+        return mHttpResponseCode == SUCCESS_CODE;
     }
 
     public boolean isPortal() {
-        return isPortalCode(mHttpResponseCode);
-    }
-
-    private static boolean isSuccessCode(int responseCode) {
-        return responseCode == SUCCESS_CODE;
-    }
-
-    /**
-     * @return Whether the specified HTTP return code indicates a captive portal.
-     */
-    public static boolean isPortalCode(int responseCode) {
-        return !isSuccessCode(responseCode) && (responseCode >= 200) && (responseCode <= 399);
+        return !isSuccessful() && (mHttpResponseCode >= 200) && (mHttpResponseCode <= 399);
     }
 
     public boolean isFailed() {

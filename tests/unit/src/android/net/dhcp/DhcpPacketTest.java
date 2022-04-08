@@ -96,12 +96,12 @@ public class DhcpPacketTest {
 
     @Before
     public void setUp() {
-        DhcpPacket.sTestOverrideVendorId = "android-dhcp-???";
+        DhcpPacket.testOverrideVendorId = "android-dhcp-???";
     }
 
     @After
     public void tearDown() {
-        DhcpPacket.sTestOverrideVendorId = null;
+        DhcpPacket.testOverrideVendorId = null;
     }
 
     class TestDhcpPacket extends DhcpPacket {

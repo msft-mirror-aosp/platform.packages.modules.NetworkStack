@@ -36,10 +36,7 @@ java_defaults {
         "android.test.base",
         "android.test.mock",
     ],
-    defaults: [
-        "framework-connectivity-test-defaults",
-        "libnetworkstackutilsjni_deps"
-    ],
+    defaults: ["libnetworkstackutilsjni_deps"],
     jni_libs: [
         // For mockito extended
         "libdexmakerjvmtiagent",
@@ -47,6 +44,7 @@ java_defaults {
         "libnetworkstackutilsjni",
     ],
     jni_uses_sdk_apis: true,
+    jarjar_rules: ":NetworkStackJarJarRules",
 }
 
 // Tests for NetworkStackNext.
@@ -60,7 +58,7 @@ android_test {
     defaults: ["NetworkStackTestsDefaults"],
     static_libs: ["NetworkStackApiCurrentLib"],
     compile_multilib: "both", // Workaround for b/147785146 for mainline-presubmit
-    jarjar_rules: ":NetworkStackJarJarRules",
+    enabled: false, // Disabled in mainline-prod
 }
 
 // Library containing the unit tests. This is used by the coverage test target to pull in the
@@ -73,8 +71,8 @@ android_library {
     static_libs: ["NetworkStackApiStableLib"],
     visibility: [
         "//packages/modules/NetworkStack/tests/integration",
-        "//packages/modules/Connectivity/tests:__subpackages__",
-        "//packages/modules/Connectivity/Tethering/tests:__subpackages__",
+        "//frameworks/base/packages/Tethering/tests/integration",
+        "//packages/modules/Connectivity/Tethering/tests/integration",
     ]
 }
 
@@ -87,7 +85,6 @@ android_test {
     defaults: ["NetworkStackTestsDefaults"],
     static_libs: ["NetworkStackApiStableLib"],
     compile_multilib: "both",
-    jarjar_rules: ":NetworkStackJarJarRules",
 }
 
 // Additional dependencies of libnetworkstackutilsjni that are not provided by the system when

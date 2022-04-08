@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.android.net.module.util.netlink;
+package android.net.netlink;
 
 import static android.system.OsConstants.AF_INET;
 import static android.system.OsConstants.AF_INET6;

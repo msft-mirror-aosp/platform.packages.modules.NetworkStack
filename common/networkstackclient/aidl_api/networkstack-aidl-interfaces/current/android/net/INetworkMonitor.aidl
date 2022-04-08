@@ -1,18 +1,3 @@
-/**
- * Copyright (c) 2018, The Android Open Source Project
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing perNmissions and
- * limitations under the License.
- */
 ///////////////////////////////////////////////////////////////////////////////
 // THIS FILE IS IMMUTABLE. DO NOT EDIT IN ANY CASE.                          //
 ///////////////////////////////////////////////////////////////////////////////
@@ -50,7 +35,6 @@ interface INetworkMonitor {
   const int NETWORK_TEST_RESULT_PARTIAL_CONNECTIVITY = 2;
   const int NETWORK_VALIDATION_RESULT_VALID = 1;
   const int NETWORK_VALIDATION_RESULT_PARTIAL = 2;
-  const int NETWORK_VALIDATION_RESULT_SKIPPED = 4;
   const int NETWORK_VALIDATION_PROBE_DNS = 4;
   const int NETWORK_VALIDATION_PROBE_HTTP = 8;
   const int NETWORK_VALIDATION_PROBE_HTTPS = 16;

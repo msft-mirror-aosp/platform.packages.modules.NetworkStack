@@ -42,7 +42,8 @@ public interface ConnectivityManagerShim {
 
     /** See android.net.ConnectivityManager#registerSystemDefaultNetworkCallback */
     void registerSystemDefaultNetworkCallback(
-            @NonNull NetworkCallback networkCallback, @NonNull Handler handler);
+            @NonNull NetworkCallback networkCallback, @NonNull Handler handler)
+            throws UnsupportedApiLevelException;
 
     /** See android.net.ConnectivityManager#registerDefaultNetworkCallbackForUid */
     default void registerDefaultNetworkCallbackForUid(

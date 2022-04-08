@@ -16,7 +16,6 @@
 
 package android.net.ip;
 
-import static android.net.util.NetworkStackUtils.IPCLIENT_PARSE_NETLINK_EVENTS_VERSION;
 import static android.system.OsConstants.AF_INET6;
 
 import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ROUTER_ADVERTISEMENT;
@@ -28,17 +27,16 @@ import android.net.IpPrefix;
 import android.net.LinkAddress;
 import android.net.LinkProperties;
 import android.net.RouteInfo;
+import android.net.netlink.NduseroptMessage;
+import android.net.netlink.NetlinkConstants;
+import android.net.netlink.NetlinkMessage;
+import android.net.netlink.StructNdOptPref64;
 import android.net.util.InterfaceParams;
 import android.net.util.SharedLog;
 import android.os.Handler;
 import android.system.OsConstants;
 import android.util.Log;
 
-import com.android.net.module.util.netlink.NduseroptMessage;
-import com.android.net.module.util.netlink.NetlinkConstants;
-import com.android.net.module.util.netlink.NetlinkMessage;
-import com.android.net.module.util.netlink.StructNdOptPref64;
-import com.android.net.module.util.netlink.StructNdOptRdnss;
 import com.android.networkstack.apishim.NetworkInformationShimImpl;
 import com.android.networkstack.apishim.common.NetworkInformationShim;
 import com.android.server.NetworkObserver;
@@ -109,7 +107,6 @@ public class IpClientLinkObserver implements NetworkObserver {
         }
     }
 
-    private final Context mContext;
     private final String mInterfaceName;
     private final Callback mCallback;
     private final LinkProperties mLinkProperties;
@@ -118,15 +115,13 @@ public class IpClientLinkObserver implements NetworkObserver {
     private final AlarmManager mAlarmManager;
     private final Configuration mConfig;
     private final Handler mHandler;
-    private final IpClient.Dependencies mDependencies;
 
     private final MyNetlinkMonitor mNetlinkMonitor;
 
     private static final boolean DBG = false;
 
     public IpClientLinkObserver(Context context, Handler h, String iface, Callback callback,
-            Configuration config, SharedLog log, IpClient.Dependencies deps) {
-        mContext = context;
+            Configuration config, SharedLog log) {
         mInterfaceName = iface;
         mTag = "NetlinkTracker/" + mInterfaceName;
         mCallback = callback;
@@ -139,7 +134,6 @@ public class IpClientLinkObserver implements NetworkObserver {
         mAlarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
         mNetlinkMonitor = new MyNetlinkMonitor(h, log, mTag);
         mHandler.post(mNetlinkMonitor::start);
-        mDependencies = deps;
     }
 
     public void shutdown() {
@@ -157,11 +151,6 @@ public class IpClientLinkObserver implements NetworkObserver {
         if (DBG) {
             Log.d(mTag, operation + ": " + o.toString());
         }
-    }
-
-    private boolean isNetlinkEventParsingEnabled() {
-        return mDependencies.isFeatureEnabled(mContext, IPCLIENT_PARSE_NETLINK_EVENTS_VERSION,
-                false /* default value */);
     }
 
     @Override
@@ -257,21 +246,17 @@ public class IpClientLinkObserver implements NetworkObserver {
 
     @Override
     public void onInterfaceDnsServerInfo(String iface, long lifetime, String[] addresses) {
-        if (isNetlinkEventParsingEnabled()) return;
-        if (!mInterfaceName.equals(iface)) return;
-        maybeLog("interfaceDnsServerInfo", Arrays.toString(addresses));
-        updateInterfaceDnsServerInfo(lifetime, addresses);
-    }
-
-    private void updateInterfaceDnsServerInfo(long lifetime, final String[] addresses) {
-        final boolean changed = mDnsServerRepository.addServers(lifetime, addresses);
-        final boolean linkState;
-        if (changed) {
-            synchronized (this) {
-                mDnsServerRepository.setDnsServersOn(mLinkProperties);
-                linkState = getInterfaceLinkStateLocked();
+        if (mInterfaceName.equals(iface)) {
+            maybeLog("interfaceDnsServerInfo", Arrays.toString(addresses));
+            final boolean changed = mDnsServerRepository.addServers(lifetime, addresses);
+            final boolean linkState;
+            if (changed) {
+                synchronized (this) {
+                    mDnsServerRepository.setDnsServersOn(mLinkProperties);
+                    linkState = getInterfaceLinkStateLocked();
+                }
+                mCallback.update(linkState);
             }
-            mCallback.update(linkState);
         }
     }
 
@@ -423,15 +408,6 @@ public class IpClientLinkObserver implements NetworkObserver {
             updatePref64(opt.prefix, now, expiry);
         }
 
-        private void processRdnssOption(StructNdOptRdnss opt) {
-            if (!isNetlinkEventParsingEnabled()) return;
-            final String[] addresses = new String[opt.servers.length];
-            for (int i = 0; i < opt.servers.length; i++) {
-                addresses[i] = opt.servers[i].getHostAddress();
-            }
-            updateInterfaceDnsServerInfo(opt.header.lifetime, addresses);
-        }
-
         private void processNduseroptMessage(NduseroptMessage msg, final long whenMs) {
             if (msg.family != AF_INET6 || msg.option == null || msg.ifindex != mIfindex) return;
             if (msg.icmp_type != (byte) ICMPV6_ROUTER_ADVERTISEMENT) return;
@@ -441,12 +417,8 @@ public class IpClientLinkObserver implements NetworkObserver {
                     processPref64Option((StructNdOptPref64) msg.option, whenMs);
                     break;
 
-                case StructNdOptRdnss.TYPE:
-                    processRdnssOption((StructNdOptRdnss) msg.option);
-                    break;
-
                 default:
-                    // TODO: implement DNSSL.
+                    // TODO: implement RDNSS and DNSSL.
                     break;
             }
         }

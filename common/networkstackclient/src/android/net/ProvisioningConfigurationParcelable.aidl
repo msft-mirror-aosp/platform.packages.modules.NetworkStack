@@ -29,9 +29,7 @@ import java.util.List;
 
 @JavaDerive(toString=true)
 parcelable ProvisioningConfigurationParcelable {
-    /** @deprecated use ipv4ProvisioningMode instead. */
     boolean enableIPv4;
-    /** @deprecated use ipv6ProvisioningMode instead. */
     boolean enableIPv6;
     boolean usingMultinetworkPolicyTracker;
     boolean usingIpReachabilityMonitor;
@@ -47,6 +45,4 @@ parcelable ProvisioningConfigurationParcelable {
     @nullable ScanResultInfoParcelable scanResultInfo;
     @nullable Layer2InformationParcelable layer2Info;
     @nullable List<DhcpOption> options;
-    int ipv4ProvisioningMode;
-    int ipv6ProvisioningMode;
 }
