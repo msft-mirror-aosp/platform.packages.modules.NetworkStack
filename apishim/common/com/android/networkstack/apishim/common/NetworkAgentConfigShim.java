@@ -16,7 +16,9 @@
 
 package com.android.networkstack.apishim.common;
 
-import android.net.NetworkAgentConfig;
+import android.net.networkstack.aidl.NetworkMonitorParameters;
+
+import androidx.annotation.NonNull;
 
 /**
  * A shim for NetworkAgentConfig
@@ -26,4 +28,12 @@ public interface NetworkAgentConfigShim {
      * @see NetworkAgentConfig#isVpnValidationRequired()
      */
     boolean isVpnValidationRequired();
+
+    /**
+     * Set the NetworkAgentConfig into the given {@link NetworkMonitorParameters}
+     */
+    default void writeToNetworkMonitorParams(@NonNull NetworkMonitorParameters params)
+            throws UnsupportedApiLevelException {
+        throw new UnsupportedApiLevelException("Only supported from API 31");
+    }
 }
