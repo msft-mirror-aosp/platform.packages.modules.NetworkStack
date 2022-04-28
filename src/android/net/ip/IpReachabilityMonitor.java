@@ -33,7 +33,6 @@ import android.net.ip.IpNeighborMonitor.NeighborEventConsumer;
 import android.net.metrics.IpConnectivityLog;
 import android.net.metrics.IpReachabilityEvent;
 import android.net.networkstack.aidl.ip.ReachabilityLossReason;
-import android.net.util.InterfaceParams;
 import android.net.util.SharedLog;
 import android.os.ConditionVariable;
 import android.os.Handler;
@@ -54,6 +53,7 @@ import androidx.annotation.Nullable;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.Preconditions;
 import com.android.net.module.util.DeviceConfigUtils;
+import com.android.net.module.util.InterfaceParams;
 import com.android.net.module.util.netlink.StructNdMsg;
 import com.android.networkstack.R;
 import com.android.networkstack.metrics.IpReachabilityMonitorMetrics;
@@ -326,9 +326,11 @@ public class IpReachabilityMonitor {
         return sb.toString();
     }
 
-    private static boolean isOnLink(List<RouteInfo> routes, InetAddress ip) {
+    @VisibleForTesting
+    static boolean isOnLink(List<RouteInfo> routes, InetAddress ip) {
         for (RouteInfo route : routes) {
-            if (!route.hasGateway() && route.matches(ip)) {
+            if (!route.hasGateway() && route.matches(ip)
+                    && route.getType() == RouteInfo.RTN_UNICAST) {
                 return true;
             }
         }
