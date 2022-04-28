@@ -17,9 +17,12 @@
 package com.android.networkstack.apishim.api31;
 
 import android.net.NetworkAgentConfig;
+import android.net.networkstack.aidl.NetworkMonitorParameters;
 
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import com.android.modules.utils.build.SdkLevel;
 import com.android.networkstack.apishim.common.NetworkAgentConfigShim;
 
 /**
@@ -42,6 +45,17 @@ public class NetworkAgentConfigShimImpl
      * Returns a new instance of this shim impl.
      */
     public static NetworkAgentConfigShim newInstance(@Nullable final NetworkAgentConfig config) {
-        return new NetworkAgentConfigShimImpl(config);
+        if (!SdkLevel.isAtLeastS()) {
+            return new com.android.networkstack.apishim.api29.NetworkAgentConfigShimImpl();
+        }
+        return new NetworkAgentConfigShimImpl(
+                (config != null) ? config : new NetworkAgentConfig.Builder().build());
+    }
+
+    /**
+     * Set the NetworkAgentConfig into the given {@link NetworkMonitorParameters}
+     */
+    public void writeToNetworkMonitorParams(@NonNull NetworkMonitorParameters params) {
+        params.networkAgentConfig = mNetworkAgentConfig;
     }
 }
