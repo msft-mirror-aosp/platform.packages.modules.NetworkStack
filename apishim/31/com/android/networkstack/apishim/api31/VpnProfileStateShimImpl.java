@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 The Android Open Source Project
+ * Copyright (C) 2022 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,23 +13,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
-package com.android.networkstack.apishim.api30;
+package com.android.networkstack.apishim.api31;
 
 import android.os.Build;
-import android.telephony.TelephonyManager;
 
 import androidx.annotation.RequiresApi;
 
-import com.android.networkstack.apishim.common.TelephonyManagerShim;
+import com.android.networkstack.apishim.common.VpnProfileStateShim;
 
-/**
- * Implementation of {@link TelephonyManagerShim} for API 30.
- */
-@RequiresApi(Build.VERSION_CODES.R)
-public class TelephonyManagerShimImpl
-        extends com.android.networkstack.apishim.api29.TelephonyManagerShimImpl {
-    public TelephonyManagerShimImpl(TelephonyManager telephonyManager) {
-        super(telephonyManager);
-    }
+/** Implementation of {@link VpnProfileStateShim} for API 31. */
+@RequiresApi(Build.VERSION_CODES.S)
+public class VpnProfileStateShimImpl
+        extends com.android.networkstack.apishim.api29.VpnProfileStateShimImpl {
 }
