@@ -40,6 +40,7 @@ import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ALL_RO
 import static com.android.net.module.util.NetworkStackConstants.VENDOR_SPECIFIC_IE_ID;
 import static com.android.server.util.PermissionUtil.enforceNetworkStackCallingPermission;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.res.Resources;
 import android.net.ConnectivityManager;
@@ -72,7 +73,6 @@ import android.net.shared.Layer2Information;
 import android.net.shared.ProvisioningConfiguration;
 import android.net.shared.ProvisioningConfiguration.ScanResultInfo;
 import android.net.shared.ProvisioningConfiguration.ScanResultInfo.InformationElement;
-import android.net.util.InterfaceParams;
 import android.net.util.NetworkStackUtils;
 import android.net.util.SharedLog;
 import android.os.Build;
@@ -106,6 +106,7 @@ import com.android.internal.util.State;
 import com.android.internal.util.StateMachine;
 import com.android.internal.util.WakeupMessage;
 import com.android.net.module.util.DeviceConfigUtils;
+import com.android.net.module.util.InterfaceParams;
 import com.android.networkstack.R;
 import com.android.networkstack.apishim.NetworkInformationShimImpl;
 import com.android.networkstack.apishim.SocketUtilsShimImpl;
@@ -492,10 +493,6 @@ public class IpClient extends StateMachine {
     private static final boolean NO_CALLBACKS = false;
     private static final boolean SEND_CALLBACKS = true;
 
-    // This must match the interface prefix in clatd.c.
-    // TODO: Revert this hack once IpClient and Nat464Xlat work in concert.
-    private static final String CLAT_PREFIX = "v4-";
-
     private static final int IMMEDIATE_FAILURE_DURATION = 0;
 
     private static final int PROV_CHANGE_STILL_NOT_PROVISIONED = 1;
@@ -543,7 +540,6 @@ public class IpClient extends StateMachine {
     private final String mTag;
     private final Context mContext;
     private final String mInterfaceName;
-    private final String mClatInterfaceName;
     @VisibleForTesting
     protected final IpClientCallbacksWrapper mCallback;
     private final Dependencies mDependencies;
@@ -711,7 +707,6 @@ public class IpClient extends StateMachine {
 
         mContext = context;
         mInterfaceName = ifName;
-        mClatInterfaceName = CLAT_PREFIX + ifName;
         mDependencies = deps;
         mMetricsLog = deps.getIpConnectivityLog();
         mNetworkQuirkMetrics = deps.getNetworkQuirkMetrics();
@@ -761,44 +756,19 @@ public class IpClient extends StateMachine {
                             updateGratuitousNaTargetSet(targetIp, false /* remove address */);
                         });
                     }
+
+                    @Override
+                    public void onClatInterfaceStateUpdate(boolean add) {
+                        // TODO: when clat interface was removed, consider sending a message to
+                        // the IpClient main StateMachine thread, in case "NDO enabled" state
+                        // becomes tied to more things that 464xlat operation.
+                        getHandler().post(() -> {
+                            mCallback.setNeighborDiscoveryOffload(add ? false : true);
+                        });
+                    }
                 },
-                config, mLog, mDependencies) {
-            @Override
-            public void onInterfaceAdded(String iface) {
-                super.onInterfaceAdded(iface);
-                if (mClatInterfaceName.equals(iface)) {
-                    mCallback.setNeighborDiscoveryOffload(false);
-                } else if (!mInterfaceName.equals(iface)) {
-                    return;
-                }
-
-                final String msg = "interfaceAdded(" + iface + ")";
-                logMsg(msg);
-            }
-
-            @Override
-            public void onInterfaceRemoved(String iface) {
-                super.onInterfaceRemoved(iface);
-                // TODO: Also observe mInterfaceName going down and take some
-                // kind of appropriate action.
-                if (mClatInterfaceName.equals(iface)) {
-                    // TODO: consider sending a message to the IpClient main
-                    // StateMachine thread, in case "NDO enabled" state becomes
-                    // tied to more things that 464xlat operation.
-                    mCallback.setNeighborDiscoveryOffload(true);
-                } else if (!mInterfaceName.equals(iface)) {
-                    return;
-                }
-
-                final String msg = "interfaceRemoved(" + iface + ")";
-                logMsg(msg);
-            }
-
-            private void logMsg(String msg) {
-                Log.d(mTag, msg);
-                getHandler().post(() -> mLog.log("OBSERVED " + msg));
-            }
-        };
+                config, mLog, mDependencies
+        );
 
         mLinkProperties = new LinkProperties();
         mLinkProperties.setInterfaceName(mInterfaceName);
@@ -1353,8 +1323,7 @@ public class IpClient extends StateMachine {
 
     private void restartIpv6WithAcceptRaDisabled() {
         mInterfaceCtrl.disableIPv6();
-        setIpv6AcceptRa(0 /* accept_ra */);
-        startIPv6();
+        startIPv6(0 /* acceptRa */);
     }
 
     // TODO: Investigate folding all this into the existing static function
@@ -1872,6 +1841,7 @@ public class IpClient extends StateMachine {
         mCallback.onProvisioningFailure(mLinkProperties);
     }
 
+    @SuppressLint("NewApi") // TODO: b/193460475 remove once fixed
     private boolean startIPv4() {
         // If we have a StaticIpConfiguration attempt to apply it and
         // handle the result accordingly.
@@ -1891,8 +1861,8 @@ public class IpClient extends StateMachine {
         return true;
     }
 
-    private boolean startIPv6() {
-        setIpv6AcceptRa(mConfiguration.mIPv6ProvisioningMode == PROV_IPV6_LINKLOCAL ? 0 : 2);
+    private boolean startIPv6(int acceptRa) {
+        setIpv6AcceptRa(acceptRa);
         return mInterfaceCtrl.setIPv6PrivacyExtensions(true)
                 && mInterfaceCtrl.setIPv6AddrGenModeIfSupported(mConfiguration.mIPv6AddrGenMode)
                 && mInterfaceCtrl.enableIPv6();
@@ -2388,7 +2358,9 @@ public class IpClient extends StateMachine {
             mPacketTracker = createPacketTracker();
             if (mPacketTracker != null) mPacketTracker.start(mConfiguration.mDisplayName);
 
-            if (isIpv6Enabled() && !startIPv6()) {
+            final int acceptRa =
+                    mConfiguration.mIPv6ProvisioningMode == PROV_IPV6_LINKLOCAL ? 0 : 2;
+            if (isIpv6Enabled() && !startIPv6(acceptRa)) {
                 doImmediateProvisioningFailure(IpManagerEvent.ERROR_STARTING_IPV6);
                 enqueueJumpToStoppingState(DisconnectCode.DC_ERROR_STARTING_IPV6);
                 return;
