@@ -33,7 +33,6 @@ import android.util.Log
 import androidx.test.platform.app.InstrumentationRegistry
 import com.android.net.module.util.DeviceConfigUtils
 import java.lang.System.currentTimeMillis
-import java.net.Inet6Address
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -46,8 +45,6 @@ import org.junit.After
 import org.junit.AfterClass
 import org.junit.BeforeClass
 import org.mockito.ArgumentCaptor
-import org.mockito.Mockito.anyString
-import org.mockito.Mockito.never
 import org.mockito.Mockito.timeout
 import org.mockito.Mockito.verify
 
@@ -153,6 +150,7 @@ class IpClientRootTest : IpClientIntegrationTestCommon() {
             IIpClientCallbacks.Stub(), IIpClientCallbacks by base {
         // asBinder is implemented by both base class and delegate: specify explicitly
         override fun asBinder() = super.asBinder()
+        override fun getInterfaceVersion() = IIpClientCallbacks.VERSION
     }
 
     @After
@@ -264,11 +262,7 @@ class IpClientRootTest : IpClientIntegrationTestCommon() {
         assertNull(listener.getBlockingNetworkAttributes(timeout))
     }
 
-    override fun assertNotifyNeighborLost(targetIp: Inet6Address) {
-        verify(mCb, timeout(TEST_TIMEOUT_MS)).onReachabilityLost(anyString())
-    }
-
-    override fun assertNeverNotifyNeighborLost() {
-        verify(mCb, never()).onReachabilityLost(anyString())
+    override fun storeNetworkAttributes(l2Key: String, na: NetworkAttributes) {
+        mStore.storeNetworkAttributes(l2Key, na, null /* listener */)
     }
 }
