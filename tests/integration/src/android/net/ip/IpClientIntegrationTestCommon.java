@@ -28,6 +28,7 @@ import static android.net.dhcp.DhcpPacket.INADDR_BROADCAST;
 import static android.net.dhcp.DhcpPacket.INFINITE_LEASE;
 import static android.net.dhcp.DhcpPacket.MIN_V6ONLY_WAIT_MS;
 import static android.net.dhcp.DhcpResultsParcelableUtil.fromStableParcelable;
+import static android.net.ip.IpClientLinkObserver.CLAT_PREFIX;
 import static android.net.ip.IpReachabilityMonitor.MIN_NUD_SOLICIT_NUM;
 import static android.net.ip.IpReachabilityMonitor.NUD_MCAST_RESOLICIT_NUM;
 import static android.net.ip.IpReachabilityMonitor.nudEventTypeToInt;
@@ -59,6 +60,7 @@ import static com.android.net.module.util.NetworkStackConstants.NEIGHBOR_ADVERTI
 import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_AUTONOMOUS;
 import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_ON_LINK;
 import static com.android.testutils.MiscAsserts.assertThrows;
+import static com.android.testutils.ParcelUtils.parcelingRoundTrip;
 import static com.android.testutils.TestPermissionUtil.runAsShell;
 
 import static junit.framework.Assert.fail;
@@ -358,6 +360,9 @@ public abstract class IpClientIntegrationTestCommon {
     private static final Inet4Address NETMASK = getPrefixMaskAsInet4Address(PREFIX_LENGTH);
     private static final Inet4Address BROADCAST_ADDR = getBroadcastAddress(
             SERVER_ADDR, PREFIX_LENGTH);
+    private static final String IPV6_LINK_LOCAL_PREFIX = "fe80::/64";
+    private static final String IPV4_TEST_SUBNET_PREFIX = "192.168.1.0/24";
+    private static final String IPV4_ANY_ADDRESS_PREFIX = "0.0.0.0/0";
     private static final String HOSTNAME = "testhostname";
     private static final int TEST_DEFAULT_MTU = 1500;
     private static final int TEST_MIN_MTU = 1280;
@@ -664,6 +669,16 @@ public abstract class IpClientIntegrationTestCommon {
         mTapFd.setInt$(iface.getFileDescriptor().detachFd());
         mPacketReader = new TapPacketReader(mHandler, mTapFd, DATA_BUFFER_LEN);
         mHandler.post(() -> mPacketReader.start());
+    }
+
+    private TestNetworkInterface setUpClatInterface(@NonNull String baseIface) throws Exception {
+        final Instrumentation inst = InstrumentationRegistry.getInstrumentation();
+        final TestNetworkInterface iface = runAsShell(MANAGE_TEST_NETWORKS, () -> {
+            final TestNetworkManager tnm =
+                    inst.getContext().getSystemService(TestNetworkManager.class);
+            return tnm.createTapInterface(false /* bringUp */, CLAT_PREFIX + baseIface);
+        });
+        return iface;
     }
 
     private void teardownTapInterface() {
@@ -1073,7 +1088,7 @@ public abstract class IpClientIntegrationTestCommon {
         return getNextDhcpPacket();
     }
 
-    private void removeTapInterface(final FileDescriptor fd) {
+    private void removeTestInterface(final FileDescriptor fd) {
         try {
             Os.close(fd);
         } catch (ErrnoException e) {
@@ -1105,7 +1120,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     private void doRestoreInitialMtuTest(final boolean shouldChangeMtu,
-            final boolean shouldRemoveTapInterface) throws Exception {
+            final boolean shouldRemoveTestInterface) throws Exception {
         final long currentTime = System.currentTimeMillis();
         int mtu = TEST_DEFAULT_MTU;
 
@@ -1128,11 +1143,11 @@ public abstract class IpClientIntegrationTestCommon {
         // empty LinkProperties changes instead of one.
         reset(mCb);
 
-        if (shouldRemoveTapInterface) removeTapInterface(mTapFd);
+        if (shouldRemoveTestInterface) removeTestInterface(mTapFd);
         try {
             mIpc.shutdown();
             awaitIpClientShutdown();
-            if (shouldRemoveTapInterface) {
+            if (shouldRemoveTestInterface) {
                 verify(mNetd, never()).interfaceSetMtu(mIfaceName, TEST_DEFAULT_MTU);
             } else {
                 // Verify that MTU indeed has been restored or not.
@@ -1402,7 +1417,7 @@ public abstract class IpClientIntegrationTestCommon {
         assertIpMemoryStoreNetworkAttributes(TEST_LEASE_DURATION_S, currentTime, TEST_DEFAULT_MTU);
     }
 
-    @Test
+    @Test @IgnoreUpTo(Build.VERSION_CODES.Q)
     public void testRollbackFromRapidCommitOption() throws Exception {
         startIpClientProvisioning(false /* isDhcpLeaseCacheEnabled */,
                 true /* isDhcpRapidCommitEnabled */, false /* isPreConnectionEnabled */,
@@ -1500,12 +1515,12 @@ public abstract class IpClientIntegrationTestCommon {
 
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
     public void testRestoreInitialInterfaceMtu() throws Exception {
-        doRestoreInitialMtuTest(true /* shouldChangeMtu */, false /* shouldRemoveTapInterface */);
+        doRestoreInitialMtuTest(true /* shouldChangeMtu */, false /* shouldRemoveTestInterface */);
     }
 
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
     public void testRestoreInitialInterfaceMtu_WithoutMtuChange() throws Exception {
-        doRestoreInitialMtuTest(false /* shouldChangeMtu */, false /* shouldRemoveTapInterface */);
+        doRestoreInitialMtuTest(false /* shouldChangeMtu */, false /* shouldRemoveTestInterface */);
     }
 
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
@@ -1513,19 +1528,19 @@ public abstract class IpClientIntegrationTestCommon {
         doThrow(new RemoteException("NetdNativeService::interfaceSetMtu")).when(mNetd)
                 .interfaceSetMtu(mIfaceName, TEST_DEFAULT_MTU);
 
-        doRestoreInitialMtuTest(true /* shouldChangeMtu */, false /* shouldRemoveTapInterface */);
+        doRestoreInitialMtuTest(true /* shouldChangeMtu */, false /* shouldRemoveTestInterface */);
         assertEquals(NetworkInterface.getByName(mIfaceName).getMTU(), TEST_MIN_MTU);
     }
 
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
     public void testRestoreInitialInterfaceMtu_NotFoundInterfaceWhenStopping() throws Exception {
-        doRestoreInitialMtuTest(true /* shouldChangeMtu */, true /* shouldRemoveTapInterface */);
+        doRestoreInitialMtuTest(true /* shouldChangeMtu */, true /* shouldRemoveTestInterface */);
     }
 
     @Test
     public void testRestoreInitialInterfaceMtu_NotFoundInterfaceWhenStartingProvisioning()
             throws Exception {
-        removeTapInterface(mTapFd);
+        removeTestInterface(mTapFd);
         ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
                 .withoutIpReachabilityMonitor()
                 .withoutIPv6()
@@ -1584,7 +1599,7 @@ public abstract class IpClientIntegrationTestCommon {
 
         // Intend to remove the tap interface and force IpClient throw provisioning failure
         // due to that interface is not found.
-        removeTapInterface(mTapFd);
+        removeTestInterface(mTapFd);
         assertNull(InterfaceParams.getByName(mIfaceName));
 
         startIpClientProvisioning(config);
@@ -2317,7 +2332,7 @@ public abstract class IpClientIntegrationTestCommon {
         assertIpMemoryStoreNetworkAttributes(TEST_LEASE_DURATION_S, currentTime, TEST_DEFAULT_MTU);
     }
 
-    private void runDhcpClientCaptivePortalApiTest(boolean featureEnabled,
+    private LinkProperties runDhcpClientCaptivePortalApiTest(boolean featureEnabled,
             boolean serverSendsOption) throws Exception {
         startIpClientProvisioning(false /* isDhcpLeaseCacheEnabled */,
                 false /* shouldReplyRapidCommitAck */, false /* isPreConnectionEnabled */,
@@ -2344,10 +2359,12 @@ public abstract class IpClientIntegrationTestCommon {
 
         // Ensure that the URL was set as expected in the callbacks.
         // Can't verify the URL up to Q as there is no such attribute in LinkProperties.
-        if (!ShimUtils.isAtLeastR()) return;
+        if (!ShimUtils.isAtLeastR()) return null;
         verify(mCb, atLeastOnce()).onLinkPropertiesChange(captor.capture());
-        assertTrue(captor.getAllValues().stream().anyMatch(
-                lp -> Objects.equals(expectedUrl, lp.getCaptivePortalApiUrl())));
+        final LinkProperties expectedLp = captor.getAllValues().stream().findFirst().get();
+        assertNotNull(expectedLp);
+        assertEquals(expectedUrl, expectedLp.getCaptivePortalApiUrl());
+        return expectedLp;
     }
 
     @Test
@@ -2362,6 +2379,30 @@ public abstract class IpClientIntegrationTestCommon {
         // Only run the test on platforms / builds where the API is enabled
         assumeTrue(CaptivePortalDataShimImpl.isSupported());
         runDhcpClientCaptivePortalApiTest(true /* featureEnabled */, false /* serverSendsOption */);
+    }
+
+    @Test
+    public void testDhcpClientCaptivePortalApiEnabled_ParcelSensitiveFields() throws Exception {
+        // Only run the test on platforms / builds where the API is enabled
+        assumeTrue(CaptivePortalDataShimImpl.isSupported());
+        LinkProperties lp = runDhcpClientCaptivePortalApiTest(true /* featureEnabled */,
+                true /* serverSendsOption */);
+
+        // Integration test process runs in the same process with network stack module, there
+        // won't be any IPC call happened on IpClientCallbacks, manually run parcelingRoundTrip
+        // to parcel and unparcel the LinkProperties to simulate what happens during the binder
+        // call. In this case lp should contain the senstive data but mParcelSensitiveFields is
+        // false after round trip.
+        if (useNetworkStackSignature()) {
+            lp = parcelingRoundTrip(lp);
+        }
+        final Uri expectedUrl = Uri.parse(TEST_CAPTIVE_PORTAL_URL);
+        assertEquals(expectedUrl, lp.getCaptivePortalApiUrl());
+
+        // Parcel and unparcel the captured LinkProperties, mParcelSensitiveFields is false,
+        // CaptivePortalApiUrl should be null after parceling round trip.
+        final LinkProperties unparceled = parcelingRoundTrip(lp);
+        assertNull(unparceled.getCaptivePortalApiUrl());
     }
 
     @Test
@@ -2692,6 +2733,13 @@ public abstract class IpClientIntegrationTestCommon {
                 (long) NetworkQuirkEvent.QE_IPV6_PROVISIONING_ROUTER_LOST.ordinal());
     }
 
+    private boolean hasRouteTo(@NonNull final LinkProperties lp, @NonNull final String prefix) {
+        for (RouteInfo r : lp.getRoutes()) {
+            if (r.getDestination().equals(new IpPrefix(prefix))) return true;
+        }
+        return false;
+    }
+
     @Test @SignatureRequiredTest(reason = "signature perms are required due to mocked callabck")
     public void testIgnoreIpv6ProvisioningLoss_disableAcceptRa() throws Exception {
         doDualStackProvisioning(true /* shouldDisableAcceptRa */);
@@ -2707,6 +2755,8 @@ public abstract class IpClientIntegrationTestCommon {
                     // Only IPv4 provisioned and IPv6 link-local address
                     final boolean isIPv6LinkLocalAndIPv4OnlyProvisioned =
                             (x.getLinkAddresses().size() == 2
+                                    // fe80::/64, IPv4 default route, IPv4 subnet route
+                                    && x.getRoutes().size() == 3
                                     && x.getDnsServers().size() == 1
                                     && x.getAddresses().get(0) instanceof Inet4Address
                                     && x.getDnsServers().get(0) instanceof Inet4Address);
@@ -2719,6 +2769,10 @@ public abstract class IpClientIntegrationTestCommon {
         assertNotNull(lp);
         assertEquals(lp.getAddresses().get(0), CLIENT_ADDR);
         assertEquals(lp.getDnsServers().get(0), SERVER_ADDR);
+        assertEquals(3, lp.getRoutes().size());
+        assertTrue(hasRouteTo(lp, IPV6_LINK_LOCAL_PREFIX)); // fe80::/64
+        assertTrue(hasRouteTo(lp, IPV4_TEST_SUBNET_PREFIX)); // IPv4 directly-connected route
+        assertTrue(hasRouteTo(lp, IPV4_ANY_ADDRESS_PREFIX)); // IPv4 default route
         assertTrue(lp.getAddresses().get(1).isLinkLocalAddress());
 
         reset(mCb);
@@ -3708,5 +3762,26 @@ public abstract class IpClientIntegrationTestCommon {
                         .withRandomMacAddress()
                         .build()
         );
+    }
+
+    @Test
+    public void testIpClientLinkObserver_onClatInterfaceStateUpdate() throws Exception {
+        ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
+                .withoutIPv4()
+                .build();
+        startIpClientProvisioning(config);
+        doIpv6OnlyProvisioning();
+
+        reset(mCb);
+
+        // Add the clat interface and check the callback.
+        final TestNetworkInterface clatIface = setUpClatInterface(mIfaceName);
+        assertNotNull(clatIface);
+        assertTrue(clatIface.getInterfaceName().equals(CLAT_PREFIX + mIfaceName));
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).setNeighborDiscoveryOffload(false);
+
+        // Remove the clat interface and check the callback.
+        removeTestInterface(clatIface.getFileDescriptor().getFileDescriptor());
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).setNeighborDiscoveryOffload(true);
     }
 }
