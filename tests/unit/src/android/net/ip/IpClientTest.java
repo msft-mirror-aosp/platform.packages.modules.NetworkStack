@@ -40,6 +40,7 @@ import static org.mockito.Mockito.when;
 
 import static java.util.Collections.emptySet;
 
+import android.annotation.SuppressLint;
 import android.app.AlarmManager;
 import android.content.ContentResolver;
 import android.content.Context;
@@ -61,12 +62,12 @@ import android.net.shared.InitialConfiguration;
 import android.net.shared.Layer2Information;
 import android.net.shared.ProvisioningConfiguration;
 import android.net.shared.ProvisioningConfiguration.ScanResultInfo;
-import android.net.util.InterfaceParams;
 import android.os.Build;
 
 import androidx.test.filters.SmallTest;
 import androidx.test.runner.AndroidJUnit4;
 
+import com.android.net.module.util.InterfaceParams;
 import com.android.networkstack.R;
 import com.android.server.NetworkObserver;
 import com.android.server.NetworkObserverRegistry;
@@ -296,6 +297,7 @@ public class IpClientTest {
         return ipc;
     }
 
+    @SuppressLint("NewApi")
     private void addIPv4Provisioning(LinkProperties lp) {
         final LinkAddress la = new LinkAddress(TEST_IPV4_LINKADDRESS);
         final RouteInfo defaultRoute = new RouteInfo(new IpPrefix(Inet4Address.ANY, 0),
@@ -463,7 +465,17 @@ public class IpClientTest {
                     routes("fe80::/64", "fd2c:4e57:8e3c::/64"),
                     dns(),
                     conf(links("fe80::e1f7:22d1/64", "fd2c:4e57:8e3c:0:548d:2db2:4fcf:ef75/64"),
-                        prefixes( "fe80::/64", "fd2c:4e57:8e3c::/64"), ips()))
+                        prefixes("fe80::/64", "fd2c:4e57:8e3c::/64"), ips())),
+
+            // Test case with excluded route
+            notProvisionedCase(
+                    links("fe80::e1f7:22d1/64", "fd2c:4e57:8e3c:0:548d:2db2:4fcf:ef75/64"),
+                    routes(
+                            routes("fe80::/64"),
+                            excludedRoutes("fd2c:4e57:8e3c::/64")),
+                    dns(),
+                    conf(links("fe80::e1f7:22d1/64", "fd2c:4e57:8e3c:0:548d:2db2:4fcf:ef75/64"),
+                            prefixes("fe80::/64", "fd2c:4e57:8e3c::/64"), ips()))
         };
 
         for (IsProvisionedTestCase testcase : testcases) {
@@ -625,6 +637,21 @@ public class IpClientTest {
                 TEST_IFNAME));
     }
 
+    static Set<RouteInfo> excludedRoutes(String... excludedRoutes) {
+        return mapIntoSet(excludedRoutes, (r) -> new RouteInfo(new IpPrefix(r), null /* gateway */,
+                TEST_IFNAME, RouteInfo.RTN_THROW));
+    }
+
+    static Set<RouteInfo> routes(Set<RouteInfo> includedRoutes, Set<RouteInfo> excludedRoutes) {
+        Set<RouteInfo> result = new HashSet<>(includedRoutes.size() + excludedRoutes.size());
+
+        result.addAll(includedRoutes);
+        result.addAll(excludedRoutes);
+
+        return result;
+    }
+
+    @SuppressLint("NewApi")
     static RouteInfo defaultIPV6Route(String gateway) {
         return new RouteInfo(new IpPrefix(Inet6Address.ANY, 0),
                 InetAddresses.parseNumericAddress(gateway), TEST_IFNAME);

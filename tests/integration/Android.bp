@@ -34,6 +34,7 @@ java_defaults {
 
 java_defaults {
     name: "NetworkStackIntegrationTestsDefaults",
+    defaults: ["framework-connectivity-test-defaults"],
     srcs: [
         "src/**/*.java",
         "src/**/*.kt",
@@ -81,7 +82,7 @@ android_test {
     defaults: [
         "NetworkStackIntegrationTestsDefaults",
         "NetworkStackIntegrationTestsJniDefaults",
-        "NetworkStackNextEnableDefaults",
+        "ConnectivityNextEnableDefaults",
     ],
     static_libs: [
         "NetworkStackApiCurrentLib",

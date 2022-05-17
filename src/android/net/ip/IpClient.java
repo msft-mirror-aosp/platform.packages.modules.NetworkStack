@@ -21,6 +21,8 @@ import static android.net.dhcp.DhcpResultsParcelableUtil.toStableParcelable;
 import static android.net.ip.IIpClient.PROV_IPV4_DISABLED;
 import static android.net.ip.IIpClient.PROV_IPV6_DISABLED;
 import static android.net.ip.IIpClient.PROV_IPV6_LINKLOCAL;
+import static android.net.ip.IpReachabilityMonitor.INVALID_REACHABILITY_LOSS_TYPE;
+import static android.net.ip.IpReachabilityMonitor.nudEventTypeToInt;
 import static android.net.util.NetworkStackUtils.IPCLIENT_DISABLE_ACCEPT_RA_VERSION;
 import static android.net.util.NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION;
 import static android.net.util.NetworkStackUtils.IPCLIENT_GRATUITOUS_NA_VERSION;
@@ -38,6 +40,7 @@ import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ALL_RO
 import static com.android.net.module.util.NetworkStackConstants.VENDOR_SPECIFIC_IE_ID;
 import static com.android.server.util.PermissionUtil.enforceNetworkStackCallingPermission;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.res.Resources;
 import android.net.ConnectivityManager;
@@ -63,12 +66,13 @@ import android.net.dhcp.DhcpPacket;
 import android.net.metrics.IpConnectivityLog;
 import android.net.metrics.IpManagerEvent;
 import android.net.networkstack.aidl.dhcp.DhcpOption;
+import android.net.networkstack.aidl.ip.ReachabilityLossInfoParcelable;
+import android.net.networkstack.aidl.ip.ReachabilityLossReason;
 import android.net.shared.InitialConfiguration;
 import android.net.shared.Layer2Information;
 import android.net.shared.ProvisioningConfiguration;
 import android.net.shared.ProvisioningConfiguration.ScanResultInfo;
 import android.net.shared.ProvisioningConfiguration.ScanResultInfo.InformationElement;
-import android.net.util.InterfaceParams;
 import android.net.util.NetworkStackUtils;
 import android.net.util.SharedLog;
 import android.os.Build;
@@ -81,6 +85,7 @@ import android.os.ServiceSpecificException;
 import android.os.SystemClock;
 import android.stats.connectivity.DisconnectCode;
 import android.stats.connectivity.NetworkQuirkEvent;
+import android.stats.connectivity.NudEventType;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.text.TextUtils;
@@ -90,6 +95,7 @@ import android.util.Pair;
 import android.util.SparseArray;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.HexDump;
@@ -100,6 +106,7 @@ import com.android.internal.util.State;
 import com.android.internal.util.StateMachine;
 import com.android.internal.util.WakeupMessage;
 import com.android.net.module.util.DeviceConfigUtils;
+import com.android.net.module.util.InterfaceParams;
 import com.android.networkstack.R;
 import com.android.networkstack.apishim.NetworkInformationShimImpl;
 import com.android.networkstack.apishim.SocketUtilsShimImpl;
@@ -316,6 +323,11 @@ public class IpClient extends StateMachine {
         /**
          * Called when the internal IpReachabilityMonitor (if enabled) has detected the loss of
          * required neighbors (e.g. on-link default gw or dns servers) due to NUD_FAILED.
+         *
+         * Note this method is only supported on networkstack-aidl-interfaces-v12 or below.
+         * For above aidl versions, the caller should call {@link onReachabilityFailure} instead.
+         * For callbacks extending IpClientCallbacks, this method will be called iff the callback
+         * does not implement onReachabilityFailure.
          */
         public void onReachabilityLost(String logMsg) {
             log("onReachabilityLost(" + logMsg + ")");
@@ -402,6 +414,20 @@ public class IpClient extends StateMachine {
         }
 
         /**
+         * Called when Neighbor Unreachability Detection fails, that might be caused by the organic
+         * probe or probeAll from IpReachabilityMonitor (if enabled).
+         */
+        public void onReachabilityFailure(ReachabilityLossInfoParcelable lossInfo) {
+            log("onReachabilityFailure(" + lossInfo.message + ", loss reason: "
+                    + reachabilityLossReasonToString(lossInfo.reason) + ")");
+            try {
+                mCallback.onReachabilityFailure(lossInfo);
+            } catch (RemoteException e) {
+                log("Failed to call onReachabilityFailure", e);
+            }
+        }
+
+        /**
          * Get the version of the IIpClientCallbacks AIDL interface.
          */
         public int getInterfaceVersion() {
@@ -467,16 +493,16 @@ public class IpClient extends StateMachine {
     private static final boolean NO_CALLBACKS = false;
     private static final boolean SEND_CALLBACKS = true;
 
-    // This must match the interface prefix in clatd.c.
-    // TODO: Revert this hack once IpClient and Nat464Xlat work in concert.
-    private static final String CLAT_PREFIX = "v4-";
-
     private static final int IMMEDIATE_FAILURE_DURATION = 0;
 
     private static final int PROV_CHANGE_STILL_NOT_PROVISIONED = 1;
     private static final int PROV_CHANGE_LOST_PROVISIONING = 2;
     private static final int PROV_CHANGE_GAINED_PROVISIONING = 3;
     private static final int PROV_CHANGE_STILL_PROVISIONED = 4;
+
+    // onReachabilityFailure callback is added since networkstack-aidl-interfaces-v13.
+    @VisibleForTesting
+    static final int VERSION_ADDED_REACHABILITY_FAILURE = 13;
 
     // Specific vendor OUI(3 bytes)/vendor specific type(1 byte) pattern for upstream hotspot
     // device detection. Add new byte array pattern below in turn.
@@ -514,7 +540,6 @@ public class IpClient extends StateMachine {
     private final String mTag;
     private final Context mContext;
     private final String mInterfaceName;
-    private final String mClatInterfaceName;
     @VisibleForTesting
     protected final IpClientCallbacksWrapper mCallback;
     private final Dependencies mDependencies;
@@ -682,7 +707,6 @@ public class IpClient extends StateMachine {
 
         mContext = context;
         mInterfaceName = ifName;
-        mClatInterfaceName = CLAT_PREFIX + ifName;
         mDependencies = deps;
         mMetricsLog = deps.getIpConnectivityLog();
         mNetworkQuirkMetrics = deps.getNetworkQuirkMetrics();
@@ -712,61 +736,39 @@ public class IpClient extends StateMachine {
         mLinkObserver = new IpClientLinkObserver(
                 mContext, getHandler(),
                 mInterfaceName,
-                (ifaceUp) -> sendMessage(EVENT_NETLINK_LINKPROPERTIES_CHANGED, ifaceUp
-                        ? ARG_LINKPROP_CHANGED_LINKSTATE_UP
-                        : ARG_LINKPROP_CHANGED_LINKSTATE_DOWN),
-                config, mLog, mDependencies) {
-            @Override
-            public void onInterfaceAdded(String iface) {
-                super.onInterfaceAdded(iface);
-                if (mClatInterfaceName.equals(iface)) {
-                    mCallback.setNeighborDiscoveryOffload(false);
-                } else if (!mInterfaceName.equals(iface)) {
-                    return;
-                }
+                new IpClientLinkObserver.Callback() {
+                    @Override
+                    public void update(boolean linkState) {
+                        sendMessage(EVENT_NETLINK_LINKPROPERTIES_CHANGED, linkState
+                                ? ARG_LINKPROP_CHANGED_LINKSTATE_UP
+                                : ARG_LINKPROP_CHANGED_LINKSTATE_DOWN);
+                    }
 
-                final String msg = "interfaceAdded(" + iface + ")";
-                logMsg(msg);
-            }
+                    @Override
+                    public void onIpv6AddressRemoved(final Inet6Address targetIp) {
+                        // The update of Gratuitous NA target addresses set should be only accessed
+                        // from the handler thread of IpClient StateMachine, keeping the behaviour
+                        // consistent with relying on the non-blocking NetworkObserver callbacks,
+                        // see {@link registerObserverForNonblockingCallback}. This can be done
+                        // by either sending a message to StateMachine or posting a handler.
+                        getHandler().post(() -> {
+                            if (!mGratuitousNaTargetAddresses.contains(targetIp)) return;
+                            updateGratuitousNaTargetSet(targetIp, false /* remove address */);
+                        });
+                    }
 
-            @Override
-            public void onInterfaceRemoved(String iface) {
-                super.onInterfaceRemoved(iface);
-                // TODO: Also observe mInterfaceName going down and take some
-                // kind of appropriate action.
-                if (mClatInterfaceName.equals(iface)) {
-                    // TODO: consider sending a message to the IpClient main
-                    // StateMachine thread, in case "NDO enabled" state becomes
-                    // tied to more things that 464xlat operation.
-                    mCallback.setNeighborDiscoveryOffload(true);
-                } else if (!mInterfaceName.equals(iface)) {
-                    return;
-                }
-
-                final String msg = "interfaceRemoved(" + iface + ")";
-                logMsg(msg);
-            }
-
-            @Override
-            public void onInterfaceAddressRemoved(LinkAddress address, String iface) {
-                super.onInterfaceAddressRemoved(address, iface);
-                if (!mInterfaceName.equals(iface)) return;
-                if (!address.isIpv6()) return;
-                final Inet6Address targetIp = (Inet6Address) address.getAddress();
-                if (mGratuitousNaTargetAddresses.contains(targetIp)) {
-                    mGratuitousNaTargetAddresses.remove(targetIp);
-
-                    final String msg = "Global IPv6 address: " + targetIp
-                            + " has removed from the set of gratuitous NA target address.";
-                    logMsg(msg);
-                }
-            }
-
-            private void logMsg(String msg) {
-                Log.d(mTag, msg);
-                getHandler().post(() -> mLog.log("OBSERVED " + msg));
-            }
-        };
+                    @Override
+                    public void onClatInterfaceStateUpdate(boolean add) {
+                        // TODO: when clat interface was removed, consider sending a message to
+                        // the IpClient main StateMachine thread, in case "NDO enabled" state
+                        // becomes tied to more things that 464xlat operation.
+                        getHandler().post(() -> {
+                            mCallback.setNeighborDiscoveryOffload(add ? false : true);
+                        });
+                    }
+                },
+                config, mLog, mDependencies
+        );
 
         mLinkProperties = new LinkProperties();
         mLinkProperties.setInterfaceName(mInterfaceName);
@@ -1250,6 +1252,20 @@ public class IpClient extends StateMachine {
         transitionTo(mStoppingState);
     }
 
+    // Convert reachability loss reason enum to a string.
+    private static String reachabilityLossReasonToString(int reason) {
+        switch (reason) {
+            case ReachabilityLossReason.ROAM:
+                return "reachability_loss_after_roam";
+            case ReachabilityLossReason.CONFIRM:
+                return "reachability_loss_after_confirm";
+            case ReachabilityLossReason.ORGANIC:
+                return "reachability_loss_organic";
+            default:
+                return "unknown";
+        }
+    }
+
     private static boolean hasIpv6LinkLocalInterfaceRoute(final LinkProperties lp) {
         for (RouteInfo r : lp.getRoutes()) {
             if (r.getDestination().equals(new IpPrefix("fe80::/64"))
@@ -1307,8 +1323,7 @@ public class IpClient extends StateMachine {
 
     private void restartIpv6WithAcceptRaDisabled() {
         mInterfaceCtrl.disableIPv6();
-        setIpv6AcceptRa(0 /* accept_ra */);
-        startIPv6();
+        startIPv6(0 /* acceptRa */);
     }
 
     // TODO: Investigate folding all this into the existing static function
@@ -1621,6 +1636,7 @@ public class IpClient extends StateMachine {
         transmitPacket(packet, sockAddress, "Failed to send GARP");
     }
 
+    @Nullable
     private static Inet6Address getIpv6LinkLocalAddress(final LinkProperties newLp) {
         for (LinkAddress la : newLp.getLinkAddresses()) {
             if (!la.isIpv6()) continue;
@@ -1628,6 +1644,16 @@ public class IpClient extends StateMachine {
             if (ip.isLinkLocalAddress()) return ip;
         }
         return null;
+    }
+
+    private void updateGratuitousNaTargetSet(@NonNull final Inet6Address targetIp, boolean add) {
+        if (add) {
+            mGratuitousNaTargetAddresses.add(targetIp);
+        } else {
+            mGratuitousNaTargetAddresses.remove(targetIp);
+        }
+        mLog.log((add ? "Add" : "Remove") + " global IPv6 address " + targetIp
+                + (add ? " to" : " from") + " the set of gratuitous NA target address.");
     }
 
     private void maybeSendGratuitousNAs(final LinkProperties lp, boolean afterRoaming) {
@@ -1650,7 +1676,7 @@ public class IpClient extends StateMachine {
                         + targetIp.getHostAddress() + (afterRoaming ? " after roaming" : ""));
             }
             sendGratuitousNA(srcIp, targetIp);
-            if (!afterRoaming) mGratuitousNaTargetAddresses.add(targetIp);
+            if (!afterRoaming) updateGratuitousNaTargetSet(targetIp, true /* add address */);
         }
     }
 
@@ -1815,6 +1841,7 @@ public class IpClient extends StateMachine {
         mCallback.onProvisioningFailure(mLinkProperties);
     }
 
+    @SuppressLint("NewApi") // TODO: b/193460475 remove once fixed
     private boolean startIPv4() {
         // If we have a StaticIpConfiguration attempt to apply it and
         // handle the result accordingly.
@@ -1834,8 +1861,8 @@ public class IpClient extends StateMachine {
         return true;
     }
 
-    private boolean startIPv6() {
-        setIpv6AcceptRa(mConfiguration.mIPv6ProvisioningMode == PROV_IPV6_LINKLOCAL ? 0 : 2);
+    private boolean startIPv6(int acceptRa) {
+        setIpv6AcceptRa(acceptRa);
         return mInterfaceCtrl.setIPv6PrivacyExtensions(true)
                 && mInterfaceCtrl.setIPv6AddrGenModeIfSupported(mConfiguration.mIPv6AddrGenMode)
                 && mInterfaceCtrl.enableIPv6();
@@ -1859,8 +1886,17 @@ public class IpClient extends StateMachine {
                     mLog,
                     new IpReachabilityMonitor.Callback() {
                         @Override
-                        public void notifyLost(InetAddress ip, String logMsg) {
-                            mCallback.onReachabilityLost(logMsg);
+                        public void notifyLost(InetAddress ip, String logMsg, NudEventType type) {
+                            final int version = mCallback.getInterfaceVersion();
+                            if (version >= VERSION_ADDED_REACHABILITY_FAILURE) {
+                                final int reason = nudEventTypeToInt(type);
+                                if (reason == INVALID_REACHABILITY_LOSS_TYPE) return;
+                                final ReachabilityLossInfoParcelable lossInfo =
+                                        new ReachabilityLossInfoParcelable(logMsg, reason);
+                                mCallback.onReachabilityFailure(lossInfo);
+                            } else {
+                                mCallback.onReachabilityLost(logMsg);
+                            }
                         }
                     },
                     mConfiguration.mUsingMultinetworkPolicyTracker,
@@ -1938,18 +1974,18 @@ public class IpClient extends StateMachine {
         // If the BSSID has not changed, there is nothing to do.
         if (info.bssid.equals(mCurrentBssid)) return;
 
-        // Before trigger probing to the interesting neighbors, send Gratuitous ARP
+        // Before trigger probing to the critical neighbors, send Gratuitous ARP
         // and Neighbor Advertisment in advance to propgate host's IPv4/v6 addresses.
         if (isGratuitousArpNaRoamingEnabled()) {
             maybeSendGratuitousARP(mLinkProperties);
             maybeSendGratuitousNAs(mLinkProperties, true /* isGratuitousNaAfterRoaming */);
         }
 
-        if (mIpReachabilityMonitor != null) {
-            mIpReachabilityMonitor.probeAll(true /* dueToRoam */);
-        }
-
-        // Check whether to refresh previous IP lease on L2 roaming happened.
+        // Check whether attempting to refresh previous IP lease on specific networks or need to
+        // probe the critical neighbors proactively on L2 roaming happened. The NUD probe on the
+        // specific networks is cancelled because otherwise the probe will happen in parallel with
+        // DHCP refresh, it will be difficult to understand what happened exactly and error-prone
+        // to introduce race condition.
         final String ssid = removeDoubleQuotes(mConfiguration.mDisplayName);
         if (DHCP_ROAMING_SSID_SET.contains(ssid) && mDhcpClient != null) {
             if (DBG) {
@@ -1959,6 +1995,8 @@ public class IpClient extends StateMachine {
                         + " , starting refresh leased IP address");
             }
             mDhcpClient.sendMessage(DhcpClient.CMD_REFRESH_LINKADDRESS);
+        } else if (mIpReachabilityMonitor != null) {
+            mIpReachabilityMonitor.probeAll(true /* dueToRoam */);
         }
         mCurrentBssid = info.bssid;
     }
@@ -2320,7 +2358,9 @@ public class IpClient extends StateMachine {
             mPacketTracker = createPacketTracker();
             if (mPacketTracker != null) mPacketTracker.start(mConfiguration.mDisplayName);
 
-            if (isIpv6Enabled() && !startIPv6()) {
+            final int acceptRa =
+                    mConfiguration.mIPv6ProvisioningMode == PROV_IPV6_LINKLOCAL ? 0 : 2;
+            if (isIpv6Enabled() && !startIPv6(acceptRa)) {
                 doImmediateProvisioningFailure(IpManagerEvent.ERROR_STARTING_IPV6);
                 enqueueJumpToStoppingState(DisconnectCode.DC_ERROR_STARTING_IPV6);
                 return;
@@ -2548,6 +2588,20 @@ public class IpClient extends StateMachine {
                             handleIPv4Failure();
                             break;
                         case DhcpClient.DHCP_IPV6_ONLY:
+                            break;
+                        case DhcpClient.DHCP_REFRESH_FAILURE:
+                            // This case should only happen on the receipt of DHCPNAK when
+                            // refreshing IP address post L2 roaming on some specific networks.
+                            // WiFi should try to restart a new provisioning immediately without
+                            // disconnecting L2 when it receives DHCP roaming failure event. IPv4
+                            // link address still will be cleared when DhcpClient transits to
+                            // StoppedState from RefreshingAddress State, although it will result
+                            // in a following onProvisioningFailure then, WiFi should ignore this
+                            // failure and start a new DHCP reconfiguration from INIT state.
+                            final ReachabilityLossInfoParcelable lossInfo =
+                                    new ReachabilityLossInfoParcelable("DHCP refresh failure",
+                                            ReachabilityLossReason.ROAM);
+                            mCallback.onReachabilityFailure(lossInfo);
                             break;
                         default:
                             logError("Unknown CMD_POST_DHCP_ACTION status: %s", msg.arg1);
