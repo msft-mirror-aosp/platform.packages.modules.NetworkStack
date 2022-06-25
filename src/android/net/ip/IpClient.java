@@ -516,10 +516,10 @@ public class IpClient extends StateMachine {
     private static final Map<Byte, List<byte[]>> DHCP_OPTIONS_ALLOWED = Map.of(
             (byte) 60, Arrays.asList(
                     // KT OUI: 00:17:C3, type: 17. See b/170928882.
-                    new byte[]{ (byte) 0x00, (byte) 0x17, (byte) 0xc3, (byte) 0x17 }),
+                    new byte[]{ (byte) 0x00, (byte) 0x17, (byte) 0xc3, (byte) 0x11 }),
             (byte) 77, Arrays.asList(
                     // KT OUI: 00:17:C3, type: 17. See b/170928882.
-                    new byte[]{ (byte) 0x00, (byte) 0x17, (byte) 0xc3, (byte) 0x17 })
+                    new byte[]{ (byte) 0x00, (byte) 0x17, (byte) 0xc3, (byte) 0x11 })
     );
 
     // Initialize configurable particular SSID set supporting DHCP Roaming feature. See
@@ -2558,6 +2558,15 @@ public class IpClient extends StateMachine {
                 case DhcpClient.CMD_CONFIGURE_LINKADDRESS: {
                     final LinkAddress ipAddress = (LinkAddress) msg.obj;
                     if (mInterfaceCtrl.setIPv4Address(ipAddress)) {
+                        // Although it's impossible to happen that DHCP client becomes null in
+                        // RunningState and then NPE is thrown when it attempts to send a message
+                        // on an null object, sometimes it's found during stress tests. If this
+                        // issue does happen, log the terrible failure, that would be helpful to
+                        // see how often this case occurs on fields and the log trace would be
+                        // also useful for debugging(see b/203174383).
+                        if (mDhcpClient == null) {
+                            Log.wtf(mTag, "DhcpClient should never be null in RunningState.");
+                        }
                         mDhcpClient.sendMessage(DhcpClient.EVENT_LINKADDRESS_CONFIGURED);
                     } else {
                         logError("Failed to set IPv4 address.");
