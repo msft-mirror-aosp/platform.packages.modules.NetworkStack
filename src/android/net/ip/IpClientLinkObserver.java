@@ -21,6 +21,7 @@ import static android.system.OsConstants.AF_INET6;
 import static android.system.OsConstants.AF_UNSPEC;
 import static android.system.OsConstants.IFF_LOOPBACK;
 
+import static com.android.modules.utils.build.SdkLevel.isAtLeastT;
 import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ROUTER_ADVERTISEMENT;
 import static com.android.net.module.util.netlink.NetlinkConstants.IFF_LOWER_UP;
 import static com.android.net.module.util.netlink.NetlinkConstants.RTM_F_CLONED;
@@ -36,14 +37,16 @@ import android.net.IpPrefix;
 import android.net.LinkAddress;
 import android.net.LinkProperties;
 import android.net.RouteInfo;
-import android.net.util.InterfaceParams;
 import android.net.util.SharedLog;
 import android.os.Handler;
 import android.system.OsConstants;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 
+import com.android.internal.annotations.VisibleForTesting;
+import com.android.net.module.util.InterfaceParams;
 import com.android.net.module.util.netlink.NduseroptMessage;
 import com.android.net.module.util.netlink.NetlinkConstants;
 import com.android.net.module.util.netlink.NetlinkMessage;
@@ -121,6 +124,14 @@ public class IpClientLinkObserver implements NetworkObserver {
          * @param addr The removed IPv6 address.
          */
         void onIpv6AddressRemoved(Inet6Address addr);
+
+        /**
+         * Called when the clat interface was added/removed.
+         *
+         * @param add True: clat interface was added.
+         *            False: clat interface was removed.
+         */
+        void onClatInterfaceStateUpdate(boolean add);
     }
 
     /** Configuration parameters for IpClientLinkObserver. */
@@ -142,15 +153,28 @@ public class IpClientLinkObserver implements NetworkObserver {
     private final Configuration mConfig;
     private final Handler mHandler;
     private final IpClient.Dependencies mDependencies;
-
+    private final String mClatInterfaceName;
     private final MyNetlinkMonitor mNetlinkMonitor;
 
-    private static final boolean DBG = false;
+    private boolean mClatInterfaceExists;
+
+    // This must match the interface prefix in clatd.c.
+    // TODO: Revert this hack once IpClient and Nat464Xlat work in concert.
+    protected static final String CLAT_PREFIX = "v4-";
+    private static final boolean DBG = true;
+
+    // The default socket receive buffer size in bytes(4MB). If too many netlink messages are
+    // sent too quickly, those messages can overflow the socket receive buffer. Set a large-enough
+    // recv buffer size to avoid the ENOBUFS as much as possible.
+    @VisibleForTesting
+    static final String CONFIG_SOCKET_RECV_BUFSIZE = "ipclient_netlink_sock_recv_buf_size";
+    private static final int SOCKET_RECV_BUFSIZE = 4 * 1024 * 1024;
 
     public IpClientLinkObserver(Context context, Handler h, String iface, Callback callback,
             Configuration config, SharedLog log, IpClient.Dependencies deps) {
         mContext = context;
         mInterfaceName = iface;
+        mClatInterfaceName = CLAT_PREFIX + iface;
         mTag = "NetlinkTracker/" + mInterfaceName;
         mCallback = callback;
         mLinkProperties = new LinkProperties();
@@ -162,7 +186,11 @@ public class IpClientLinkObserver implements NetworkObserver {
         mAlarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
         mDependencies = deps;
         mNetlinkMonitor = new MyNetlinkMonitor(h, log, mTag);
-        mHandler.post(mNetlinkMonitor::start);
+        mHandler.post(() -> {
+            if (!mNetlinkMonitor.start()) {
+                Log.wtf(mTag, "Fail to start NetlinkMonitor.");
+            }
+        });
     }
 
     public void shutdown() {
@@ -188,23 +216,35 @@ public class IpClientLinkObserver implements NetworkObserver {
 
     private boolean isNetlinkEventParsingEnabled() {
         return mDependencies.isFeatureEnabled(mContext, IPCLIENT_PARSE_NETLINK_EVENTS_VERSION,
-                false /* default value */);
+                isAtLeastT() /* default value */);
+    }
+
+    private int getSocketReceiveBufferSize() {
+        final int size = mDependencies.getDeviceConfigPropertyInt(CONFIG_SOCKET_RECV_BUFSIZE,
+                SOCKET_RECV_BUFSIZE /* default value */);
+        if (size < 0) {
+            throw new IllegalArgumentException("Invalid SO_RCVBUF " + size);
+        }
+        return size;
+    }
+
+    @Override
+    public void onInterfaceAdded(String iface) {
+        if (isNetlinkEventParsingEnabled()) return;
+        maybeLog("interfaceAdded", iface);
+        if (mClatInterfaceName.equals(iface)) {
+            mCallback.onClatInterfaceStateUpdate(true /* add interface */);
+        }
     }
 
     @Override
     public void onInterfaceRemoved(String iface) {
+        if (isNetlinkEventParsingEnabled()) return;
         maybeLog("interfaceRemoved", iface);
-        if (mInterfaceName.equals(iface)) {
-            // Our interface was removed. Clear our LinkProperties and tell our owner that they are
-            // now empty. Note that from the moment that the interface is removed, any further
-            // interface-specific messages (e.g., RTM_DELADDR) will not reach us, because the netd
-            // code that parses them will not be able to resolve the ifindex to an interface name.
-            final boolean linkState;
-            synchronized (this) {
-                clearLinkProperties();
-                linkState = getInterfaceLinkStateLocked();
-            }
-            mCallback.update(linkState);
+        if (mClatInterfaceName.equals(iface)) {
+            mCallback.onClatInterfaceStateUpdate(false /* remove interface */);
+        } else if (mInterfaceName.equals(iface)) {
+            updateInterfaceRemoved();
         }
     }
 
@@ -260,10 +300,10 @@ public class IpClientLinkObserver implements NetworkObserver {
     }
 
     private void updateInterfaceDnsServerInfo(long lifetime, final String[] addresses) {
-        maybeLog("interfaceDnsServerInfo", Arrays.toString(addresses));
         final boolean changed = mDnsServerRepository.addServers(lifetime, addresses);
         final boolean linkState;
         if (changed) {
+            maybeLog("interfaceDnsServerInfo", Arrays.toString(addresses));
             synchronized (this) {
                 mDnsServerRepository.setDnsServersOn(mLinkProperties);
                 linkState = getInterfaceLinkStateLocked();
@@ -272,7 +312,7 @@ public class IpClientLinkObserver implements NetworkObserver {
         }
     }
 
-    private void updateInterfaceAddress(@NonNull final LinkAddress address, boolean add) {
+    private boolean updateInterfaceAddress(@NonNull final LinkAddress address, boolean add) {
         final boolean changed;
         final boolean linkState;
         synchronized (this) {
@@ -290,9 +330,10 @@ public class IpClientLinkObserver implements NetworkObserver {
                 mCallback.onIpv6AddressRemoved(addr);
             }
         }
+        return changed;
     }
 
-    private void updateInterfaceRoute(final RouteInfo route, boolean add) {
+    private boolean updateInterfaceRoute(final RouteInfo route, boolean add) {
         final boolean changed;
         final boolean linkState;
         synchronized (this) {
@@ -306,6 +347,20 @@ public class IpClientLinkObserver implements NetworkObserver {
         if (changed) {
             mCallback.update(linkState);
         }
+        return changed;
+    }
+
+    private void updateInterfaceRemoved() {
+        // Our interface was removed. Clear our LinkProperties and tell our owner that they are
+        // now empty. Note that from the moment that the interface is removed, any further
+        // interface-specific messages (e.g., RTM_DELADDR) will not reach us, because the netd
+        // code that parses them will not be able to resolve the ifindex to an interface name.
+        final boolean linkState;
+        synchronized (this) {
+            clearLinkProperties();
+            linkState = getInterfaceLinkStateLocked();
+        }
+        mCallback.update(linkState);
     }
 
     /**
@@ -368,11 +423,12 @@ public class IpClientLinkObserver implements NetworkObserver {
         MyNetlinkMonitor(Handler h, SharedLog log, String tag) {
             super(h, log, tag, OsConstants.NETLINK_ROUTE,
                     !isNetlinkEventParsingEnabled()
-                    ? NetlinkConstants.RTMGRP_ND_USEROPT
-                    : (NetlinkConstants.RTMGRP_ND_USEROPT | NetlinkConstants.RTMGRP_LINK
-                            | NetlinkConstants.RTMGRP_IPV4_IFADDR
-                            | NetlinkConstants.RTMGRP_IPV6_IFADDR
-                            | NetlinkConstants.RTMGRP_IPV6_ROUTE));
+                        ? NetlinkConstants.RTMGRP_ND_USEROPT
+                        : (NetlinkConstants.RTMGRP_ND_USEROPT | NetlinkConstants.RTMGRP_LINK
+                                | NetlinkConstants.RTMGRP_IPV4_IFADDR
+                                | NetlinkConstants.RTMGRP_IPV6_IFADDR
+                                | NetlinkConstants.RTMGRP_IPV6_ROUTE),
+                    getSocketReceiveBufferSize());
 
             mHandler = h;
         }
@@ -391,6 +447,9 @@ public class IpClientLinkObserver implements NetworkObserver {
         private int mIfindex;
 
         void setIfindex(int ifindex) {
+            if (!isRunning()) {
+                Log.wtf(mTag, "NetlinkMonitor is not running when setting interface parameter!");
+            }
             mIfindex = ifindex;
         }
 
@@ -503,14 +562,45 @@ public class IpClientLinkObserver implements NetworkObserver {
             }
         }
 
+        private void updateClatInterfaceLinkState(@NonNull final StructIfinfoMsg ifinfoMsg,
+                @Nullable final String ifname, short nlMsgType) {
+            switch (nlMsgType) {
+                case NetlinkConstants.RTM_NEWLINK:
+                    if (mClatInterfaceExists) break;
+                    maybeLog("clatInterfaceAdded", ifname);
+                    mCallback.onClatInterfaceStateUpdate(true /* add interface */);
+                    mClatInterfaceExists = true;
+                    break;
+
+                case NetlinkConstants.RTM_DELLINK:
+                    if (!mClatInterfaceExists) break;
+                    maybeLog("clatInterfaceRemoved", ifname);
+                    mCallback.onClatInterfaceStateUpdate(false /* remove interface */);
+                    mClatInterfaceExists = false;
+                    break;
+
+                default:
+                    Log.e(mTag, "unsupported rtnetlink link msg type " + nlMsgType);
+                    break;
+            }
+        }
+
         private void processRtNetlinkLinkMessage(RtNetlinkLinkMessage msg) {
             if (!isNetlinkEventParsingEnabled()) return;
 
+            // Check if receiving netlink link state update for clat interface.
+            final String ifname = msg.getInterfaceName();
+            final short nlMsgType = msg.getHeader().nlmsg_type;
             final StructIfinfoMsg ifinfoMsg = msg.getIfinfoHeader();
+            if (mClatInterfaceName.equals(ifname)) {
+                updateClatInterfaceLinkState(ifinfoMsg, ifname, nlMsgType);
+                return;
+            }
+
             if (ifinfoMsg.family != AF_UNSPEC || ifinfoMsg.index != mIfindex) return;
             if ((ifinfoMsg.flags & IFF_LOOPBACK) != 0) return;
 
-            switch (msg.getHeader().nlmsg_type) {
+            switch (nlMsgType) {
                 case NetlinkConstants.RTM_NEWLINK:
                     final boolean state = (ifinfoMsg.flags & IFF_LOWER_UP) != 0;
                     maybeLog("interfaceLinkStateChanged", "ifindex " + mIfindex
@@ -519,10 +609,12 @@ public class IpClientLinkObserver implements NetworkObserver {
                     break;
 
                 case NetlinkConstants.RTM_DELLINK:
+                    maybeLog("interfaceRemoved", ifname);
+                    updateInterfaceRemoved();
                     break;
 
                 default:
-                    Log.e(mTag, "Unknown rtnetlink link msg type " + msg.getHeader().nlmsg_type);
+                    Log.e(mTag, "Unknown rtnetlink link msg type " + nlMsgType);
                     break;
             }
         }
@@ -537,12 +629,14 @@ public class IpClientLinkObserver implements NetworkObserver {
 
             switch (msg.getHeader().nlmsg_type) {
                 case NetlinkConstants.RTM_NEWADDR:
-                    maybeLog("addressUpdated", mIfindex, la);
-                    updateInterfaceAddress(la, true /* add address */);
+                    if (updateInterfaceAddress(la, true /* add address */)) {
+                        maybeLog("addressUpdated", mIfindex, la);
+                    }
                     break;
                 case NetlinkConstants.RTM_DELADDR:
-                    maybeLog("addressRemoved", mIfindex, la);
-                    updateInterfaceAddress(la, false /* remove address */);
+                    if (updateInterfaceAddress(la, false /* remove address */)) {
+                        maybeLog("addressRemoved", mIfindex, la);
+                    }
                     break;
                 default:
                     Log.e(mTag, "Unknown rtnetlink address msg type " + msg.getHeader().nlmsg_type);
@@ -567,12 +661,14 @@ public class IpClientLinkObserver implements NetworkObserver {
                     mInterfaceName, msg.getRtMsgHeader().type);
             switch (msg.getHeader().nlmsg_type) {
                 case NetlinkConstants.RTM_NEWROUTE:
-                    maybeLog("routeUpdated", route);
-                    updateInterfaceRoute(route, true /* add route */);
+                    if (updateInterfaceRoute(route, true /* add route */)) {
+                        maybeLog("routeUpdated", route);
+                    }
                     break;
                 case NetlinkConstants.RTM_DELROUTE:
-                    maybeLog("routeRemoved", route);
-                    updateInterfaceRoute(route, false /* remove route */);
+                    if (updateInterfaceRoute(route, false /* remove route */)) {
+                        maybeLog("routeRemoved", route);
+                    }
                     break;
                 default:
                     Log.e(mTag, "Unknown rtnetlink route msg type " + msg.getHeader().nlmsg_type);

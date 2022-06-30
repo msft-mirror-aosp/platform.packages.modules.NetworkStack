@@ -164,9 +164,11 @@ import com.android.net.module.util.NetworkStackConstants;
 import com.android.networkstack.NetworkStackNotifier;
 import com.android.networkstack.R;
 import com.android.networkstack.apishim.CaptivePortalDataShimImpl;
+import com.android.networkstack.apishim.NetworkAgentConfigShimImpl;
 import com.android.networkstack.apishim.NetworkInformationShimImpl;
 import com.android.networkstack.apishim.api29.ConstantsShim;
 import com.android.networkstack.apishim.common.CaptivePortalDataShim;
+import com.android.networkstack.apishim.common.NetworkAgentConfigShim;
 import com.android.networkstack.apishim.common.NetworkInformationShim;
 import com.android.networkstack.apishim.common.ShimUtils;
 import com.android.networkstack.apishim.common.UnsupportedApiLevelException;
@@ -427,6 +429,7 @@ public class NetworkMonitor extends StateMachine {
     private final INetworkMonitorCallbacks mCallback;
     private final int mCallbackVersion;
     private final Network mCleartextDnsNetwork;
+    @NonNull
     private final Network mNetwork;
     private final TelephonyManager mTelephonyManager;
     private final WifiManager mWifiManager;
@@ -460,7 +463,11 @@ public class NetworkMonitor extends StateMachine {
     private final int mEvaluatingBandwidthTimeoutMs;
     private final AtomicInteger mNextEvaluatingBandwidthThreadId = new AtomicInteger(1);
 
+    @NonNull
+    private NetworkAgentConfigShim mNetworkAgentConfig;
+    @NonNull
     private NetworkCapabilities mNetworkCapabilities;
+    @NonNull
     private LinkProperties mLinkProperties;
 
     @VisibleForTesting
@@ -647,6 +654,7 @@ public class NetworkMonitor extends StateMachine {
         // even before notifyNetworkConnected.
         mLinkProperties = new LinkProperties();
         mNetworkCapabilities = new NetworkCapabilities(null);
+        mNetworkAgentConfig = NetworkAgentConfigShimImpl.newInstance(null);
     }
 
     /**
@@ -712,7 +720,7 @@ public class NetworkMonitor extends StateMachine {
 
     private void updateConnectedNetworkAttributes(Message connectedMsg) {
         final NetworkMonitorParameters params = (NetworkMonitorParameters) connectedMsg.obj;
-        // TODO : also read the NetworkAgentConfig
+        mNetworkAgentConfig = NetworkAgentConfigShimImpl.newInstance(params.networkAgentConfig);
         mLinkProperties = params.linkProperties;
         mNetworkCapabilities = params.networkCapabilities;
         suppressNotificationIfNetworkRestricted();
@@ -773,7 +781,7 @@ public class NetworkMonitor extends StateMachine {
     }
 
     private boolean isValidationRequired() {
-        return NetworkMonitorUtils.isValidationRequired(mNetworkCapabilities);
+        return NetworkMonitorUtils.isValidationRequired(mNetworkAgentConfig, mNetworkCapabilities);
     }
 
     private boolean isPrivateDnsValidationRequired() {
@@ -926,6 +934,9 @@ public class NetworkMonitor extends StateMachine {
                 case CMD_NETWORK_DISCONNECTED:
                     maybeStopCollectionAndSendMetrics();
                     logNetworkEvent(NetworkEvent.NETWORK_DISCONNECTED);
+                    if (mTcpTracker != null) {
+                        mTcpTracker.quit();
+                    }
                     quit();
                     return HANDLED;
                 case CMD_FORCE_REEVALUATION:
@@ -1058,7 +1069,15 @@ public class NetworkMonitor extends StateMachine {
                     }
                     break;
                 case EVENT_NETWORK_CAPABILITIES_CHANGED:
-                    mNetworkCapabilities = (NetworkCapabilities) message.obj;
+                    final NetworkCapabilities newCap = (NetworkCapabilities) message.obj;
+                    // Reevaluate network if underlying network changes on the validation required
+                    // VPN.
+                    if (isVpnUnderlyingNetworkChangeReevaluationRequired(
+                            newCap, mNetworkCapabilities)) {
+                        sendMessage(CMD_FORCE_REEVALUATION, NO_UID, 0);
+                    }
+
+                    mNetworkCapabilities = newCap;
                     suppressNotificationIfNetworkRestricted();
                     break;
                 case EVENT_RESOURCE_CONFIG_CHANGED:
@@ -1076,6 +1095,14 @@ public class NetworkMonitor extends StateMachine {
                     break;
             }
             return HANDLED;
+        }
+
+        private boolean isVpnUnderlyingNetworkChangeReevaluationRequired(
+                final NetworkCapabilities newCap, final NetworkCapabilities oldCap) {
+            return !newCap.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                    && isValidationRequired()
+                    && !Objects.equals(mInfoShim.getUnderlyingNetworks(newCap),
+                    mInfoShim.getUnderlyingNetworks(oldCap));
         }
 
         @Override
@@ -1384,6 +1411,7 @@ public class NetworkMonitor extends StateMachine {
                         // validation and private DNS validation.
                         validationLog("Captive portal is used as is, resolving private DNS");
                         transitionTo(mEvaluatingPrivateDnsState);
+                        return HANDLED;
                     } else if (!isValidationRequired()) {
                         if (isPrivateDnsValidationRequired()) {
                             validationLog("Network would not satisfy default request, "
