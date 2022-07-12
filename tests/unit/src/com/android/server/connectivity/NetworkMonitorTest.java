@@ -124,7 +124,6 @@ import android.net.captiveportal.CaptivePortalProbeResult;
 import android.net.metrics.IpConnectivityLog;
 import android.net.networkstack.aidl.NetworkMonitorParameters;
 import android.net.shared.PrivateDnsConfig;
-import android.net.util.SharedLog;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
@@ -150,6 +149,7 @@ import androidx.test.filters.SmallTest;
 import androidx.test.runner.AndroidJUnit4;
 
 import com.android.modules.utils.build.SdkLevel;
+import com.android.net.module.util.SharedLog;
 import com.android.networkstack.NetworkStackNotifier;
 import com.android.networkstack.R;
 import com.android.networkstack.apishim.CaptivePortalDataShimImpl;
@@ -601,6 +601,10 @@ public class NetworkMonitorTest {
                 0, mCreatedNetworkMonitors.size());
         assertEquals("BroadcastReceiver still registered after disconnect",
                 0, mRegisteredReceivers.size());
+        if (mTstDependencies.isTcpInfoParsingSupported()) {
+            verify(mTstDependencies, times(networkMonitors.length))
+                    .removeDeviceConfigChangedListener(any());
+        }
     }
 
     private void resetCallbacks() {
@@ -1850,12 +1854,12 @@ public class NetworkMonitorTest {
 
     @Test
     public void testIsDataStall_EvaluationTcp() throws Exception {
+        when(mTstDependencies.isTcpInfoParsingSupported()).thenReturn(true);
         // Evaluate TCP only. Expect ignoring DNS signal.
         setDataStallEvaluationType(DATA_STALL_EVALUATION_TYPE_TCP);
         WrappedNetworkMonitor wrappedMonitor = makeMonitor(CELL_METERED_CAPABILITIES);
         assertFalse(wrappedMonitor.isDataStall());
         // Packet received.
-        when(mTstDependencies.isTcpInfoParsingSupported()).thenReturn(true);
         when(mTst.getLatestReceivedCount()).thenReturn(5);
         // Trigger a tcp event immediately.
         setTcpPollingInterval(0);
