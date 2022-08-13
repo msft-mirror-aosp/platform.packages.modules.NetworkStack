@@ -134,7 +134,6 @@ import android.net.dhcp.DhcpDiscoverPacket;
 import android.net.dhcp.DhcpPacket;
 import android.net.dhcp.DhcpPacket.ParseException;
 import android.net.dhcp.DhcpRequestPacket;
-import android.net.ip.IpNeighborMonitor.NeighborEventConsumer;
 import android.net.ipmemorystore.NetworkAttributes;
 import android.net.ipmemorystore.OnNetworkAttributesRetrievedListener;
 import android.net.ipmemorystore.Status;
@@ -170,6 +169,8 @@ import com.android.net.module.util.ArrayTrackRecord;
 import com.android.net.module.util.InterfaceParams;
 import com.android.net.module.util.Ipv6Utils;
 import com.android.net.module.util.SharedLog;
+import com.android.net.module.util.ip.IpNeighborMonitor;
+import com.android.net.module.util.ip.IpNeighborMonitor.NeighborEventConsumer;
 import com.android.net.module.util.netlink.StructNdOptPref64;
 import com.android.net.module.util.structs.LlaOption;
 import com.android.net.module.util.structs.PrefixInformationOption;
@@ -1142,6 +1143,8 @@ public abstract class IpClientIntegrationTestCommon {
         assertNotEquals(0, lp.getDnsServers().size());
         assertEquals(addresses.size(), lp.getAddresses().size());
         assertTrue(lp.getAddresses().containsAll(addresses));
+        assertTrue(hasRouteTo(lp, IPV4_TEST_SUBNET_PREFIX)); // IPv4 directly-connected route
+        assertTrue(hasRouteTo(lp, IPV4_ANY_ADDRESS_PREFIX)); // IPv4 default route
         return lp;
     }
 
@@ -1587,7 +1590,7 @@ public abstract class IpClientIntegrationTestCommon {
             assertDhcpRequestForReacquire(packet);
             packetList.add(packet);
         }
-        assertTrue(packetList.size() > 1);
+        assertEquals(1, packetList.size());
     }
 
     private LinkProperties prepareDhcpReacquireTest() throws Exception {
@@ -1596,6 +1599,7 @@ public abstract class IpClientIntegrationTestCommon {
         mNetworkAgentThread.start();
 
         final long currentTime = System.currentTimeMillis();
+        setFeatureEnabled(NetworkStackUtils.DHCP_SLOW_RETRANSMISSION_VERSION, true);
         performDhcpHandshake(true /* isSuccessLease */,
                 TEST_LEASE_DURATION_S, true /* isDhcpLeaseCacheEnabled */,
                 false /* isDhcpRapidCommitEnabled */, TEST_DEFAULT_MTU,
@@ -1631,21 +1635,20 @@ public abstract class IpClientIntegrationTestCommon {
                 request.senderIp /* target IP */, SERVER_ADDR /* sender IP */);
         HandlerUtils.waitForIdle(handler, TEST_TIMEOUT_MS);
 
-        // Verify the multiple unicast DHCPREQUESTs to be received in the renew state per current
-        // packet retransmission schedule.
+        // Verify there should be only one unicast DHCPREQUESTs to be received per RFC2131.
         assertReceivedDhcpRequestPacketCount();
 
         return rebindAlarm;
     }
 
-    @Test @SignatureRequiredTest(reason = "Need to mock the DHCP renew/rebind/kick alarms")
+    @Test @SignatureRequiredTest(reason = "Need to mock the DHCP renew/rebind alarms")
     public void testDhcpRenew() throws Exception {
         final LinkProperties lp = prepareDhcpReacquireTest();
         final InOrder inOrder = inOrder(mAlarm);
         runDhcpRenewTest(mDependencies.mDhcpClient.getHandler(), lp, inOrder);
     }
 
-    @Test @SignatureRequiredTest(reason = "Need to mock the DHCP renew/rebind/kick alarms")
+    @Test @SignatureRequiredTest(reason = "Need to mock the DHCP renew/rebind alarms")
     public void testDhcpRebind() throws Exception {
         final LinkProperties lp = prepareDhcpReacquireTest();
         final Handler handler = mDependencies.mDhcpClient.getHandler();
@@ -1654,9 +1657,8 @@ public abstract class IpClientIntegrationTestCommon {
 
         // Trigger rebind alarm and forece DHCP client enter RebindingState. DHCP client sends
         // broadcast DHCPREQUEST to nearby servers, then check how many DHCPREQUEST packets are
-        // retransmitted within PACKET_TIMEOUT_MS(5s), there should be more than one DHCPREQUEST
-        // captured per current retransmission schedule(t=0, t=1, t=3, t=7, t=16 and allowing for
-        // 10% jitter).
+        // retransmitted within PACKET_TIMEOUT_MS(5s), there should be only one DHCPREQUEST
+        // captured per RFC2131.
         handler.post(() -> rebindAlarm.onAlarm());
         assertReceivedDhcpRequestPacketCount();
     }
