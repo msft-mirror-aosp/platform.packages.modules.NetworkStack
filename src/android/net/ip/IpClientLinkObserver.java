@@ -37,7 +37,6 @@ import android.net.IpPrefix;
 import android.net.LinkAddress;
 import android.net.LinkProperties;
 import android.net.RouteInfo;
-import android.net.util.SharedLog;
 import android.os.Handler;
 import android.system.OsConstants;
 import android.util.Log;
@@ -45,7 +44,10 @@ import android.util.Log;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.net.module.util.InterfaceParams;
+import com.android.net.module.util.SharedLog;
+import com.android.net.module.util.ip.NetlinkMonitor;
 import com.android.net.module.util.netlink.NduseroptMessage;
 import com.android.net.module.util.netlink.NetlinkConstants;
 import com.android.net.module.util.netlink.NetlinkMessage;
@@ -162,6 +164,13 @@ public class IpClientLinkObserver implements NetworkObserver {
     protected static final String CLAT_PREFIX = "v4-";
     private static final boolean DBG = true;
 
+    // The default socket receive buffer size in bytes(4MB). If too many netlink messages are
+    // sent too quickly, those messages can overflow the socket receive buffer. Set a large-enough
+    // recv buffer size to avoid the ENOBUFS as much as possible.
+    @VisibleForTesting
+    static final String CONFIG_SOCKET_RECV_BUFSIZE = "ipclient_netlink_sock_recv_buf_size";
+    private static final int SOCKET_RECV_BUFSIZE = 4 * 1024 * 1024;
+
     public IpClientLinkObserver(Context context, Handler h, String iface, Callback callback,
             Configuration config, SharedLog log, IpClient.Dependencies deps) {
         mContext = context;
@@ -209,6 +218,15 @@ public class IpClientLinkObserver implements NetworkObserver {
     private boolean isNetlinkEventParsingEnabled() {
         return mDependencies.isFeatureEnabled(mContext, IPCLIENT_PARSE_NETLINK_EVENTS_VERSION,
                 isAtLeastT() /* default value */);
+    }
+
+    private int getSocketReceiveBufferSize() {
+        final int size = mDependencies.getDeviceConfigPropertyInt(CONFIG_SOCKET_RECV_BUFSIZE,
+                SOCKET_RECV_BUFSIZE /* default value */);
+        if (size < 0) {
+            throw new IllegalArgumentException("Invalid SO_RCVBUF " + size);
+        }
+        return size;
     }
 
     @Override
@@ -406,11 +424,12 @@ public class IpClientLinkObserver implements NetworkObserver {
         MyNetlinkMonitor(Handler h, SharedLog log, String tag) {
             super(h, log, tag, OsConstants.NETLINK_ROUTE,
                     !isNetlinkEventParsingEnabled()
-                    ? NetlinkConstants.RTMGRP_ND_USEROPT
-                    : (NetlinkConstants.RTMGRP_ND_USEROPT | NetlinkConstants.RTMGRP_LINK
-                            | NetlinkConstants.RTMGRP_IPV4_IFADDR
-                            | NetlinkConstants.RTMGRP_IPV6_IFADDR
-                            | NetlinkConstants.RTMGRP_IPV6_ROUTE));
+                        ? NetlinkConstants.RTMGRP_ND_USEROPT
+                        : (NetlinkConstants.RTMGRP_ND_USEROPT | NetlinkConstants.RTMGRP_LINK
+                                | NetlinkConstants.RTMGRP_IPV4_IFADDR
+                                | NetlinkConstants.RTMGRP_IPV6_IFADDR
+                                | NetlinkConstants.RTMGRP_IPV6_ROUTE),
+                    getSocketReceiveBufferSize());
 
             mHandler = h;
         }
