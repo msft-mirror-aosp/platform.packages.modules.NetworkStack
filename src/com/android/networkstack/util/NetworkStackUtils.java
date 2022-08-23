@@ -14,10 +14,12 @@
  * limitations under the License.
  */
 
-package android.net.util;
+package com.android.networkstack.util;
 
 import android.content.Context;
 import android.net.MacAddress;
+import android.net.util.SocketUtils;
+import android.system.ErrnoException;
 
 import androidx.annotation.NonNull;
 
@@ -86,37 +88,6 @@ public class NetworkStackUtils {
      * A 204 response code from the server is used for validation.
      */
     public static final String CAPTIVE_PORTAL_HTTP_URL = "captive_portal_http_url";
-
-    /**
-     * A test URL used to override configuration settings and overlays for the network validation
-     * HTTPS URL, when set in {@link android.provider.DeviceConfig} configuration.
-     *
-     * <p>This URL will be ignored if the host is not "localhost" (it can only be used to test with
-     * a local test server), and must not be set in production scenarios (as enforced by CTS tests).
-     *
-     * <p>{@link #TEST_URL_EXPIRATION_TIME} must also be set to use this setting.
-     */
-    public static final String TEST_CAPTIVE_PORTAL_HTTPS_URL = "test_captive_portal_https_url";
-
-    /**
-     * A test URL used to override configuration settings and overlays for the network validation
-     * HTTP URL, when set in {@link android.provider.DeviceConfig} configuration.
-     *
-     * <p>This URL will be ignored if the host is not "localhost" (it can only be used to test with
-     * a local test server), and must not be set in production scenarios (as enforced by CTS tests).
-     *
-     * <p>{@link #TEST_URL_EXPIRATION_TIME} must also be set to use this setting.
-     */
-    public static final String TEST_CAPTIVE_PORTAL_HTTP_URL = "test_captive_portal_http_url";
-
-    /**
-     * Expiration time of the test URL, in ms, relative to {@link System#currentTimeMillis()}.
-     *
-     * <p>After this expiration time, test URLs will be ignored. They will also be ignored if
-     * the expiration time is more than 10 minutes in the future, to avoid misconfiguration
-     * following test runs.
-     */
-    public static final String TEST_URL_EXPIRATION_TIME = "test_url_expiration_time";
 
     /**
      * The URL used for fallback HTTP captive portal detection when previous HTTP
@@ -211,6 +182,13 @@ public class NetworkStackUtils {
             "dhcp_ipv6_only_preferred_version";
 
     /**
+     * Minimum module version at which to enable slow DHCP retransmission approach in renew/rebind
+     * state suggested in RFC2131 section 4.4.5.
+     */
+    public static final String DHCP_SLOW_RETRANSMISSION_VERSION =
+            "dhcp_slow_retransmission_version";
+
+    /**
      * Minimum module version at which to enable dismissal CaptivePortalLogin app in validated
      * network feature. CaptivePortalLogin app will also use validation facilities in
      * {@link NetworkMonitor} to perform portal validation if feature is enabled.
@@ -301,7 +279,7 @@ public class NetworkStackUtils {
     /**
      * Attaches a socket filter that accepts DHCP packets to the given socket.
      */
-    public static native void attachDhcpFilter(FileDescriptor fd) throws SocketException;
+    public static native void attachDhcpFilter(FileDescriptor fd) throws ErrnoException;
 
     /**
      * Attaches a socket filter that accepts ICMPv6 router advertisements to the given socket.
