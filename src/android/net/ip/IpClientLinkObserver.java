@@ -16,7 +16,6 @@
 
 package android.net.ip;
 
-import static android.net.util.NetworkStackUtils.IPCLIENT_PARSE_NETLINK_EVENTS_VERSION;
 import static android.system.OsConstants.AF_INET6;
 import static android.system.OsConstants.AF_UNSPEC;
 import static android.system.OsConstants.IFF_LOOPBACK;
@@ -29,6 +28,7 @@ import static com.android.net.module.util.netlink.NetlinkConstants.RTN_UNICAST;
 import static com.android.net.module.util.netlink.NetlinkConstants.RTPROT_KERNEL;
 import static com.android.net.module.util.netlink.NetlinkConstants.RTPROT_RA;
 import static com.android.net.module.util.netlink.NetlinkConstants.RT_SCOPE_UNIVERSE;
+import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_PARSE_NETLINK_EVENTS_VERSION;
 
 import android.app.AlarmManager;
 import android.content.Context;
@@ -37,7 +37,6 @@ import android.net.IpPrefix;
 import android.net.LinkAddress;
 import android.net.LinkProperties;
 import android.net.RouteInfo;
-import android.net.util.SharedLog;
 import android.os.Handler;
 import android.system.OsConstants;
 import android.util.Log;
@@ -47,6 +46,8 @@ import androidx.annotation.Nullable;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.net.module.util.InterfaceParams;
+import com.android.net.module.util.SharedLog;
+import com.android.net.module.util.ip.NetlinkMonitor;
 import com.android.net.module.util.netlink.NduseroptMessage;
 import com.android.net.module.util.netlink.NetlinkConstants;
 import com.android.net.module.util.netlink.NetlinkMessage;
