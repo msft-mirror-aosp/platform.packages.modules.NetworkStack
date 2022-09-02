@@ -16,8 +16,9 @@
 
 package android.net.ip;
 
-import static android.net.util.NetworkStackUtils.IPCLIENT_PARSE_NETLINK_EVENTS_VERSION;
 import static android.system.OsConstants.RT_SCOPE_UNIVERSE;
+
+import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_PARSE_NETLINK_EVENTS_VERSION;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -69,10 +70,10 @@ import androidx.test.runner.AndroidJUnit4;
 
 import com.android.net.module.util.InterfaceParams;
 import com.android.networkstack.R;
+import com.android.networkstack.ipmemorystore.IpMemoryStoreService;
 import com.android.server.NetworkObserver;
 import com.android.server.NetworkObserverRegistry;
 import com.android.server.NetworkStackService;
-import com.android.server.connectivity.ipmemorystore.IpMemoryStoreService;
 import com.android.testutils.DevSdkIgnoreRule;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreAfter;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo;
@@ -465,7 +466,17 @@ public class IpClientTest {
                     routes("fe80::/64", "fd2c:4e57:8e3c::/64"),
                     dns(),
                     conf(links("fe80::e1f7:22d1/64", "fd2c:4e57:8e3c:0:548d:2db2:4fcf:ef75/64"),
-                        prefixes( "fe80::/64", "fd2c:4e57:8e3c::/64"), ips()))
+                        prefixes("fe80::/64", "fd2c:4e57:8e3c::/64"), ips())),
+
+            // Test case with excluded route
+            notProvisionedCase(
+                    links("fe80::e1f7:22d1/64", "fd2c:4e57:8e3c:0:548d:2db2:4fcf:ef75/64"),
+                    routes(
+                            routes("fe80::/64"),
+                            excludedRoutes("fd2c:4e57:8e3c::/64")),
+                    dns(),
+                    conf(links("fe80::e1f7:22d1/64", "fd2c:4e57:8e3c:0:548d:2db2:4fcf:ef75/64"),
+                            prefixes("fe80::/64", "fd2c:4e57:8e3c::/64"), ips()))
         };
 
         for (IsProvisionedTestCase testcase : testcases) {
@@ -625,6 +636,20 @@ public class IpClientTest {
     static Set<RouteInfo> routes(String... routes) {
         return mapIntoSet(routes, (r) -> new RouteInfo(new IpPrefix(r), null /* gateway */,
                 TEST_IFNAME));
+    }
+
+    static Set<RouteInfo> excludedRoutes(String... excludedRoutes) {
+        return mapIntoSet(excludedRoutes, (r) -> new RouteInfo(new IpPrefix(r), null /* gateway */,
+                TEST_IFNAME, RouteInfo.RTN_THROW));
+    }
+
+    static Set<RouteInfo> routes(Set<RouteInfo> includedRoutes, Set<RouteInfo> excludedRoutes) {
+        Set<RouteInfo> result = new HashSet<>(includedRoutes.size() + excludedRoutes.size());
+
+        result.addAll(includedRoutes);
+        result.addAll(excludedRoutes);
+
+        return result;
     }
 
     @SuppressLint("NewApi")

@@ -17,7 +17,6 @@ package android.net.ip
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.net.ip.IpNeighborMonitor.NeighborEventConsumer
 import android.net.INetd
 import android.net.InetAddresses.parseNumericAddress
 import android.net.IpPrefix
@@ -25,8 +24,7 @@ import android.net.LinkAddress
 import android.net.LinkProperties
 import android.net.RouteInfo
 import android.net.metrics.IpConnectivityLog
-import android.net.util.NetworkStackUtils.IP_REACHABILITY_MCAST_RESOLICIT_VERSION
-import android.net.util.SharedLog
+import com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_MCAST_RESOLICIT_VERSION
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.MessageQueue
@@ -54,6 +52,8 @@ import androidx.test.filters.SmallTest
 import androidx.test.runner.AndroidJUnit4
 import com.android.networkstack.metrics.IpReachabilityMonitorMetrics
 import com.android.net.module.util.InterfaceParams
+import com.android.net.module.util.SharedLog
+import com.android.net.module.util.ip.IpNeighborMonitor
 import com.android.net.module.util.netlink.StructNdMsg.NUD_FAILED
 import com.android.net.module.util.netlink.StructNdMsg.NUD_REACHABLE
 import com.android.net.module.util.netlink.StructNdMsg.NUD_STALE
@@ -83,6 +83,7 @@ import java.net.InetAddress
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlin.test.fail
 
@@ -600,5 +601,34 @@ class IpReachabilityMonitorTest {
         prepareNeighborReachableButMacAddrChangedTest(TEST_LINK_PROPERTIES, TEST_IPV6_GATEWAY)
 
         verifyNudMacAddrChangedType(TEST_IPV6_GATEWAY, NUD_ORGANIC_MAC_ADDRESS_CHANGED, IPV6)
+    }
+
+    @SuppressLint("NewApi")
+    @Test
+    fun testIsOnLink() {
+        val routes: List<RouteInfo> = listOf(
+                RouteInfo(
+                        IpPrefix(parseNumericAddress("192.168.0.0"), 16),
+                        null /* gateway */,
+                        null /* iface */,
+                        RouteInfo.RTN_THROW),
+                RouteInfo(IpPrefix(parseNumericAddress("0.0.0.0"), 0), null /* gateway */)
+        )
+
+        assertTrue(IpReachabilityMonitor.isOnLink(routes, parseNumericAddress("192.168.0.1")))
+    }
+
+    @SuppressLint("NewApi")
+    @Test
+    fun testIsOnLink_withThrowRoutes() {
+        val routes: List<RouteInfo> = listOf(
+                RouteInfo(
+                        IpPrefix(parseNumericAddress("192.168.0.0"), 16),
+                        null /* gateway */,
+                        null /* iface */,
+                        RouteInfo.RTN_THROW)
+        )
+
+        assertFalse(IpReachabilityMonitor.isOnLink(routes, parseNumericAddress("192.168.0.1")))
     }
 }
