@@ -284,7 +284,6 @@ java_defaults {
         "statsprotos",
         "captiveportal-lib",
         "net-utils-device-common",
-        "net-utils-device-common-ip",
         "net-utils-device-common-netlink",
     ],
     plugins: ["java_api_finder"],

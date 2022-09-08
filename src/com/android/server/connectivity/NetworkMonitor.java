@@ -118,6 +118,7 @@ import android.net.shared.NetworkMonitorUtils;
 import android.net.shared.PrivateDnsConfig;
 import android.net.util.DataStallUtils.EvaluationType;
 import android.net.util.NetworkStackUtils;
+import android.net.util.SharedLog;
 import android.net.util.Stopwatch;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
@@ -160,7 +161,6 @@ import com.android.internal.util.StateMachine;
 import com.android.modules.utils.build.SdkLevel;
 import com.android.net.module.util.DeviceConfigUtils;
 import com.android.net.module.util.NetworkStackConstants;
-import com.android.net.module.util.SharedLog;
 import com.android.networkstack.NetworkStackNotifier;
 import com.android.networkstack.R;
 import com.android.networkstack.apishim.CaptivePortalDataShimImpl;
@@ -934,9 +934,6 @@ public class NetworkMonitor extends StateMachine {
                 case CMD_NETWORK_DISCONNECTED:
                     maybeStopCollectionAndSendMetrics();
                     logNetworkEvent(NetworkEvent.NETWORK_DISCONNECTED);
-                    if (mTcpTracker != null) {
-                        mTcpTracker.quit();
-                    }
                     quit();
                     return HANDLED;
                 case CMD_FORCE_REEVALUATION:
