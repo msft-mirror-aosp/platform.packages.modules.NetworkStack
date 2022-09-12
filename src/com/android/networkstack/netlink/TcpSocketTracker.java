@@ -43,7 +43,6 @@ import android.content.Context;
 import android.net.INetd;
 import android.net.MarkMaskParcel;
 import android.net.Network;
-import android.net.util.NetworkStackUtils;
 import android.net.util.SocketUtils;
 import android.os.AsyncTask;
 import android.os.Build;
@@ -70,6 +69,7 @@ import com.android.net.module.util.netlink.StructNlMsgHdr;
 import com.android.networkstack.apishim.NetworkShimImpl;
 import com.android.networkstack.apishim.common.ShimUtils;
 import com.android.networkstack.apishim.common.UnsupportedApiLevelException;
+import com.android.networkstack.util.NetworkStackUtils;
 
 import java.io.FileDescriptor;
 import java.io.InterruptedIOException;
@@ -433,6 +433,11 @@ public class TcpSocketTracker {
         if (DBG) Log.d(TAG, str);
     }
 
+    /** Stops monitoring and releases resources. */
+    public void quit() {
+        mDependencies.removeDeviceConfigChangedListener(mConfigListener);
+    }
+
     /**
      * Corresponds to {@code struct rtattr} from bionic/libc/kernel/uapi/linux/rtnetlink.h
      *
@@ -614,6 +619,12 @@ public class TcpSocketTracker {
                 @NonNull final DeviceConfig.OnPropertiesChangedListener listener) {
             DeviceConfig.addOnPropertiesChangedListener(NAMESPACE_CONNECTIVITY,
                     AsyncTask.THREAD_POOL_EXECUTOR, listener);
+        }
+
+        /** Remove device config change listener */
+        public void removeDeviceConfigChangedListener(
+                @NonNull final DeviceConfig.OnPropertiesChangedListener listener) {
+            DeviceConfig.removeOnPropertiesChangedListener(listener);
         }
     }
 }
