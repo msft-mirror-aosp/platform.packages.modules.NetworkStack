@@ -20,20 +20,18 @@ import static android.net.metrics.IpReachabilityEvent.NUD_FAILED;
 import static android.net.metrics.IpReachabilityEvent.NUD_FAILED_ORGANIC;
 import static android.net.metrics.IpReachabilityEvent.PROVISIONING_LOST;
 import static android.net.metrics.IpReachabilityEvent.PROVISIONING_LOST_ORGANIC;
-import static android.net.util.NetworkStackUtils.IP_REACHABILITY_MCAST_RESOLICIT_VERSION;
 import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
+
+import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_MCAST_RESOLICIT_VERSION;
 
 import android.content.Context;
 import android.net.ConnectivityManager;
 import android.net.INetd;
 import android.net.LinkProperties;
 import android.net.RouteInfo;
-import android.net.ip.IpNeighborMonitor.NeighborEvent;
-import android.net.ip.IpNeighborMonitor.NeighborEventConsumer;
 import android.net.metrics.IpConnectivityLog;
 import android.net.metrics.IpReachabilityEvent;
 import android.net.networkstack.aidl.ip.ReachabilityLossReason;
-import android.net.util.SharedLog;
 import android.os.ConditionVariable;
 import android.os.Handler;
 import android.os.Looper;
@@ -54,6 +52,10 @@ import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.Preconditions;
 import com.android.net.module.util.DeviceConfigUtils;
 import com.android.net.module.util.InterfaceParams;
+import com.android.net.module.util.SharedLog;
+import com.android.net.module.util.ip.IpNeighborMonitor;
+import com.android.net.module.util.ip.IpNeighborMonitor.NeighborEvent;
+import com.android.net.module.util.ip.IpNeighborMonitor.NeighborEventConsumer;
 import com.android.net.module.util.netlink.StructNdMsg;
 import com.android.networkstack.R;
 import com.android.networkstack.metrics.IpReachabilityMonitorMetrics;
@@ -174,7 +176,8 @@ public class IpReachabilityMonitor {
      * Encapsulates IpReachabilityMonitor dependencies on systems that hinder unit testing.
      * TODO: consider also wrapping MultinetworkPolicyTracker in this interface.
      */
-    interface Dependencies {
+    @VisibleForTesting(visibility = VisibleForTesting.Visibility.PACKAGE)
+    public interface Dependencies {
         void acquireWakeLock(long durationMs);
         IpNeighborMonitor makeIpNeighborMonitor(Handler h, SharedLog log, NeighborEventConsumer cb);
         boolean isFeatureEnabled(Context context, String name, boolean defaultEnabled);
@@ -238,9 +241,9 @@ public class IpReachabilityMonitor {
     }
 
     @VisibleForTesting
-    IpReachabilityMonitor(Context context, InterfaceParams ifParams, Handler h, SharedLog log,
-            Callback callback, boolean usingMultinetworkPolicyTracker, Dependencies dependencies,
-            final IpConnectivityLog metricsLog, final INetd netd) {
+    public IpReachabilityMonitor(Context context, InterfaceParams ifParams, Handler h,
+            SharedLog log, Callback callback, boolean usingMultinetworkPolicyTracker,
+            Dependencies dependencies, final IpConnectivityLog metricsLog, final INetd netd) {
         if (ifParams == null) throw new IllegalArgumentException("null InterfaceParams");
 
         mContext = context;
