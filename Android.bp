@@ -372,7 +372,7 @@ java_genrule {
     ],
     out: ["NetworkStackJarJarRules.txt"],
     cmd: "$(location jarjar-rules-generator) " +
-        "--jars $(location :NetworkStackApiStableLib{.jar}) " +
+        "$(location :NetworkStackApiStableLib{.jar}) " +
         "--prefix com.android.networkstack " +
         "--excludes $(location jarjar-excludes.txt) " +
         "--output $(out)",
@@ -397,6 +397,7 @@ java_defaults {
     jarjar_rules: ":NetworkStackJarJarRules",
     use_embedded_native_libs: true,
     optimize: {
+        ignore_warnings: false,
         proguard_flags_files: ["proguard.flags"],
     },
 }
