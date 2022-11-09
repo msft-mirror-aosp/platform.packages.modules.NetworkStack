@@ -122,11 +122,11 @@ import android.net.MacAddress;
 import android.net.NetworkAgentConfig;
 import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
+import android.net.NetworkSpecifier;
 import android.net.NetworkStackIpMemoryStore;
 import android.net.RouteInfo;
 import android.net.TestNetworkInterface;
 import android.net.TestNetworkManager;
-import android.net.TestNetworkSpecifier;
 import android.net.Uri;
 import android.net.dhcp.DhcpClient;
 import android.net.dhcp.DhcpDeclinePacket;
@@ -189,6 +189,7 @@ import com.android.networkstack.util.NetworkStackUtils;
 import com.android.server.NetworkObserver;
 import com.android.server.NetworkObserverRegistry;
 import com.android.server.NetworkStackService.NetworkStackServiceManager;
+import com.android.testutils.CompatUtil;
 import com.android.testutils.DevSdkIgnoreRule;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreAfter;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo;
@@ -1555,7 +1556,8 @@ public abstract class IpClientIntegrationTestCommon {
     private void createTestNetworkAgentAndRegister(final LinkProperties lp) throws Exception {
         final Context context = InstrumentationRegistry.getInstrumentation().getContext();
         final ConnectivityManager cm = context.getSystemService(ConnectivityManager.class);
-        final TestNetworkSpecifier testNetworkSpecifier = new TestNetworkSpecifier(mIfaceName);
+        final NetworkSpecifier testNetworkSpecifier =
+                CompatUtil.makeTestNetworkSpecifier(mIfaceName);
         final TestableNetworkCallback cb = new TestableNetworkCallback();
 
         // Requesting a network make sure the NetworkAgent is alive during the whole life cycle of
@@ -3497,6 +3499,25 @@ public abstract class IpClientIntegrationTestCommon {
         assertTrue(target.isGlobalPreferred());
     }
 
+    private void assertMulticastNsFromIpv6Gua(final NeighborSolicitation ns) throws Exception {
+        final Inet6Address solicitedNodeMulticast =
+                NetworkStackUtils.ipv6AddressToSolicitedNodeMulticast(ROUTER_LINK_LOCAL);
+        final MacAddress etherMulticast =
+                NetworkStackUtils.ipv6MulticastToEthernetMulticast(solicitedNodeMulticast);
+
+        assertEquals(etherMulticast, ns.ethHdr.dstMac);
+        assertEquals(ETH_P_IPV6, ns.ethHdr.etherType);
+        assertEquals(IPPROTO_ICMPV6, ns.ipv6Hdr.nextHeader);
+        assertEquals(0xff, ns.ipv6Hdr.hopLimit);
+
+        final LinkAddress srcIp = new LinkAddress(ns.ipv6Hdr.srcIp.getHostAddress() + "/64");
+        assertTrue(srcIp.isGlobalPreferred());
+        assertEquals(solicitedNodeMulticast, ns.ipv6Hdr.dstIp);
+        assertEquals(ICMPV6_NEIGHBOR_SOLICITATION, ns.icmpv6Hdr.type);
+        assertEquals(0, ns.icmpv6Hdr.code);
+        assertEquals(ROUTER_LINK_LOCAL, ns.nsHdr.target);
+    }
+
     @Test
     public void testGratuitousNaForNewGlobalUnicastAddresses() throws Exception {
         final ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
@@ -4002,5 +4023,32 @@ public abstract class IpClientIntegrationTestCommon {
         assertNotNull(lp);
         assertFalse(hasRouteTo(lp, prefix));
         assertFalse(lp.hasIpv6DefaultRoute());
+    }
+
+    @Test
+    public void testMulticastNsFromIPv6Gua() throws Exception {
+        final ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
+                .withoutIpReachabilityMonitor()
+                .withoutIPv4()
+                .build();
+
+        setFeatureEnabled(NetworkStackUtils.IPCLIENT_MULTICAST_NS_VERSION,
+                true /* isUnsolicitedNsEnabled */);
+        assertTrue(isFeatureEnabled(NetworkStackUtils.IPCLIENT_MULTICAST_NS_VERSION, false));
+        startIpClientProvisioning(config);
+
+        doIpv6OnlyProvisioning();
+
+        final List<NeighborSolicitation> nsList = new ArrayList<>();
+        NeighborSolicitation packet;
+        while ((packet = getNextNeighborSolicitation()) != null) {
+            // Filter out the NSes used for duplicate address detetction, whose target address
+            // is the global IPv6 address inside these NSes.
+            if (packet.nsHdr.target.isLinkLocalAddress()) {
+                assertMulticastNsFromIpv6Gua(packet);
+                nsList.add(packet);
+            }
+        }
+        assertEquals(2, nsList.size()); // from privacy address and stable privacy address
     }
 }
