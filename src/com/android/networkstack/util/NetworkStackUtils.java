@@ -194,14 +194,6 @@ public class NetworkStackUtils {
             "dhcp_slow_retransmission_version";
 
     /**
-     * Minimum module version at which to enable dismissal CaptivePortalLogin app in validated
-     * network feature. CaptivePortalLogin app will also use validation facilities in
-     * {@link NetworkMonitor} to perform portal validation if feature is enabled.
-     */
-    public static final String DISMISS_PORTAL_IN_VALIDATED_NETWORK =
-            "dismiss_portal_in_validated_network";
-
-    /**
      * Experiment flag to enable considering DNS probes returning private IP addresses as failed
      * when attempting to detect captive portals.
      *
@@ -258,13 +250,6 @@ public class NetworkStackUtils {
      */
     public static final String IP_REACHABILITY_MCAST_RESOLICIT_VERSION =
             "ip_reachability_mcast_resolicit_version";
-
-    /**
-     * Experiment flag to wait for IP addresses cleared completely before transition to
-     * IpClient#StoppedState from IpClient#StoppingState.
-     */
-    public static final String IPCLIENT_CLEAR_ADDRESSES_ON_STOP_VERSION =
-            "ipclient_clear_addresses_on_stop_version";
 
     static {
         System.loadLibrary("networkstackutilsjni");
