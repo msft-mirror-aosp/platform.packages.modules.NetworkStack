@@ -122,11 +122,11 @@ import android.net.MacAddress;
 import android.net.NetworkAgentConfig;
 import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
+import android.net.NetworkSpecifier;
 import android.net.NetworkStackIpMemoryStore;
 import android.net.RouteInfo;
 import android.net.TestNetworkInterface;
 import android.net.TestNetworkManager;
-import android.net.TestNetworkSpecifier;
 import android.net.Uri;
 import android.net.dhcp.DhcpClient;
 import android.net.dhcp.DhcpDeclinePacket;
@@ -189,6 +189,7 @@ import com.android.networkstack.util.NetworkStackUtils;
 import com.android.server.NetworkObserver;
 import com.android.server.NetworkObserverRegistry;
 import com.android.server.NetworkStackService.NetworkStackServiceManager;
+import com.android.testutils.CompatUtil;
 import com.android.testutils.DevSdkIgnoreRule;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreAfter;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo;
@@ -264,6 +265,7 @@ public abstract class IpClientIntegrationTestCommon {
     private static final int IFA_F_STABLE_PRIVACY = 0x800;
 
     protected static final long TEST_TIMEOUT_MS = 2_000L;
+    private static final long TEST_WAIT_ENOBUFS_TIMEOUT_MS = 30_000L;
 
     @Rule
     public final DevSdkIgnoreRule mIgnoreRule = new DevSdkIgnoreRule();
@@ -642,7 +644,6 @@ public abstract class IpClientIntegrationTestCommon {
         when(mCb.getInterfaceVersion()).thenReturn(IpClient.VERSION_ADDED_REACHABILITY_FAILURE);
 
         mDependencies.setDeviceConfigProperty(IpClient.CONFIG_MIN_RDNSS_LIFETIME, 67);
-        mDependencies.setDeviceConfigProperty(IpClient.CONFIG_CLEAR_ADDRESSES_TIMEOUT, 50);
         mDependencies.setDeviceConfigProperty(DhcpClient.DHCP_RESTART_CONFIG_DELAY, 10);
         mDependencies.setDeviceConfigProperty(DhcpClient.ARP_FIRST_PROBE_DELAY_MS, 10);
         mDependencies.setDeviceConfigProperty(DhcpClient.ARP_PROBE_MIN_MS, 10);
@@ -1556,7 +1557,8 @@ public abstract class IpClientIntegrationTestCommon {
     private void createTestNetworkAgentAndRegister(final LinkProperties lp) throws Exception {
         final Context context = InstrumentationRegistry.getInstrumentation().getContext();
         final ConnectivityManager cm = context.getSystemService(ConnectivityManager.class);
-        final TestNetworkSpecifier testNetworkSpecifier = new TestNetworkSpecifier(mIfaceName);
+        final NetworkSpecifier testNetworkSpecifier =
+                CompatUtil.makeTestNetworkSpecifier(mIfaceName);
         final TestableNetworkCallback cb = new TestableNetworkCallback();
 
         // Requesting a network make sure the NetworkAgent is alive during the whole life cycle of
@@ -1805,9 +1807,10 @@ public abstract class IpClientIntegrationTestCommon {
                 mPacketReader.popPacket(PACKET_TIMEOUT_MS, this::isRouterSolicitation));
     }
 
-    private void sendRouterAdvertisement(boolean waitForRs, short lifetime) throws Exception {
+    private void sendRouterAdvertisement(boolean waitForRs, short lifetime, int valid,
+            int preferred) throws Exception {
         final String dnsServer = "2001:4860:4860::64";
-        final ByteBuffer pio = buildPioOption(3600, 1800, "2001:db8:1::/64");
+        final ByteBuffer pio = buildPioOption(valid, preferred, "2001:db8:1::/64");
         final ByteBuffer rdnss = buildRdnssOption(3600, dnsServer);
         sendRouterAdvertisement(waitForRs, lifetime, pio, rdnss);
     }
@@ -1822,11 +1825,13 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     private void sendBasicRouterAdvertisement(boolean waitForRs) throws Exception {
-        sendRouterAdvertisement(waitForRs, (short) 1800);
+        sendRouterAdvertisement(waitForRs, (short) 1800 /* lifetime */, 3600 /* valid */,
+                1800 /* preferred */);
     }
 
-    private void sendRouterAdvertisementWithZeroLifetime() throws Exception {
-        sendRouterAdvertisement(false /* waitForRs */, (short) 0);
+    private void sendRouterAdvertisementWithZeroRouterLifetime() throws Exception {
+        sendRouterAdvertisement(false /* waitForRs */, (short) 0 /* lifetime */, 3600 /* valid */,
+                1800 /* preferred */);
     }
 
     // TODO: move this and the following method to a common location and use them in ApfTest.
@@ -2187,7 +2192,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
-    public void testClearAddressesOnStartState() throws Exception {
+    public void testIpClientClearingIpAddressState() throws Exception {
         doIPv4OnlyProvisioningAndExitWithLeftAddress();
 
         ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
@@ -2208,7 +2213,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
-    public void testClearAddressesOnStartState_enablePreconnection() throws Exception {
+    public void testIpClientClearingIpAddressState_enablePreconnection() throws Exception {
         doIPv4OnlyProvisioningAndExitWithLeftAddress();
 
         // Enter ClearingIpAddressesState to clear the remaining IPv4 addresses and transition to
@@ -2813,7 +2818,7 @@ public abstract class IpClientIntegrationTestCommon {
                 true /* shouldReplyNakOnRoam */);
     }
 
-    private LinkProperties performDualStackProvisioning() throws Exception {
+    private void performDualStackProvisioning() throws Exception {
         final InOrder inOrder = inOrder(mCb);
         final CompletableFuture<LinkProperties> lpFuture = new CompletableFuture<>();
         final String dnsServer = "2001:4860:4860::64";
@@ -2839,10 +2844,9 @@ public abstract class IpClientIntegrationTestCommon {
         assertTrue(lp.getDnsServers().contains(SERVER_ADDR));
 
         reset(mCb);
-        return lp;
     }
 
-    private LinkProperties doDualStackProvisioning(boolean shouldDisableAcceptRa) throws Exception {
+    private void doDualStackProvisioning(boolean shouldDisableAcceptRa) throws Exception {
         when(mCm.shouldAvoidBadWifi()).thenReturn(true);
 
         final ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
@@ -2857,7 +2861,7 @@ public abstract class IpClientIntegrationTestCommon {
                 false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
         mIpc.startProvisioning(config);
 
-        return performDualStackProvisioning();
+        performDualStackProvisioning();
     }
 
     @Test @SignatureRequiredTest(reason = "signature perms are required due to mocked callabck")
@@ -2868,7 +2872,7 @@ public abstract class IpClientIntegrationTestCommon {
 
         // Send RA with 0-lifetime and wait until all IPv6-related default route and DNS servers
         // have been removed, then verify if there is IPv4-only info left in the LinkProperties.
-        sendRouterAdvertisementWithZeroLifetime();
+        sendRouterAdvertisementWithZeroRouterLifetime();
         verify(mCb, timeout(TEST_TIMEOUT_MS).atLeastOnce()).onLinkPropertiesChange(
                 argThat(x -> {
                     final boolean isOnlyIPv4Provisioned = (x.getLinkAddresses().size() == 1
@@ -2907,7 +2911,7 @@ public abstract class IpClientIntegrationTestCommon {
         // Send RA with 0-lifetime and wait until all global IPv6 addresses, IPv6-related default
         // route and DNS servers have been removed, then verify if there is IPv4-only, IPv6 link
         // local address and route to fe80::/64 info left in the LinkProperties.
-        sendRouterAdvertisementWithZeroLifetime();
+        sendRouterAdvertisementWithZeroRouterLifetime();
         verify(mCb, timeout(TEST_TIMEOUT_MS).atLeastOnce()).onLinkPropertiesChange(
                 argThat(x -> {
                     // Only IPv4 provisioned and IPv6 link-local address
@@ -4008,7 +4012,7 @@ public abstract class IpClientIntegrationTestCommon {
 
         // Unblock the IpClient handler and ENOBUFS should happen then.
         latch.countDown();
-        HandlerUtils.waitForIdle(handler, TEST_TIMEOUT_MS);
+        HandlerUtils.waitForIdle(handler, TEST_WAIT_ENOBUFS_TIMEOUT_MS);
 
         reset(mCb);
 
@@ -4016,34 +4020,13 @@ public abstract class IpClientIntegrationTestCommon {
         // Due to ignoring the ENOBUFS and wait until handler gets idle, IpClient should be still
         // able to see the RA with 0 router lifetime and the IPv6 default route will be removed.
         // LinkProperties should not include any route to the new prefix 2001:db8:dead:beef::/64.
-        sendRouterAdvertisementWithZeroLifetime();
+        sendRouterAdvertisementWithZeroRouterLifetime();
         final ArgumentCaptor<LinkProperties> captor = ArgumentCaptor.forClass(LinkProperties.class);
         verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningFailure(captor.capture());
         final LinkProperties lp = captor.getValue();
         assertNotNull(lp);
         assertFalse(hasRouteTo(lp, prefix));
         assertFalse(lp.hasIpv6DefaultRoute());
-    }
-
-    @Test @SignatureRequiredTest(reason = "Need MANAGE_TEST_NETWORKS perm to create NetworkAgent")
-    public void testClearAddressesOnStopState() throws Exception {
-        setFeatureEnabled(NetworkStackUtils.IPCLIENT_CLEAR_ADDRESSES_ON_STOP_VERSION, true);
-        mNetworkAgentThread =
-                new HandlerThread(IpClientIntegrationTestCommon.class.getSimpleName());
-        mNetworkAgentThread.start();
-
-        final LinkProperties lp = doDualStackProvisioning(false /* shouldDisableAcceptRa */);
-        runAsShell(MANAGE_TEST_NETWORKS, () -> createTestNetworkAgentAndRegister(lp));
-
-        // Verify the link addresses and IPv6 routes get removed before transition to StoppedState..
-        mNetworkAgent.unregister();
-        mNetworkAgentThread.quitSafely();
-        mIIpClient.shutdown();
-        verify(mCb, timeout(TEST_TIMEOUT_MS)).onLinkPropertiesChange(argThat(
-                x -> x.getAddresses().size() == 0
-                        && !x.hasIpv6DefaultRoute()
-                        && x.getDnsServers().size() == 0));
-        awaitIpClientShutdown();
     }
 
     @Test
@@ -4071,5 +4054,35 @@ public abstract class IpClientIntegrationTestCommon {
             }
         }
         assertEquals(2, nsList.size()); // from privacy address and stable privacy address
+    }
+
+    @Test
+    public void testDeprecatedGlobalUnicastAddress() throws Exception {
+        ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
+                .withoutIPv4()
+                .build();
+        startIpClientProvisioning(config);
+        doIpv6OnlyProvisioning();
+
+        // Send RA with PIO(0 preferred but valid lifetime) to deprecate the global IPv6 addresses.
+        // Check all of global IPv6 addresses will become deprecated, but still valid.
+        // NetworkStackUtils#isIPv6GUA() will return false for deprecated addresses, however, when
+        // checking if the DNS is still reachable, deprecated addresses are not acceptable, that
+        // results in the on-link DNS server gets lost from LinkProperties, and provisioning failure
+        // happened.
+        // TODO: update the logic of checking reachable on-link DNS server to accept the deprecated
+        // addresses, then onProvisioningFailure callback should never happen.
+        sendRouterAdvertisement(false /* waitForRs*/, (short) 1800 /* router lifetime */,
+                3600 /* valid */, 0 /* preferred */);
+        final ArgumentCaptor<LinkProperties> captor = ArgumentCaptor.forClass(LinkProperties.class);
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningFailure(captor.capture());
+        final LinkProperties lp = captor.getValue();
+        assertNotNull(lp);
+        assertFalse(lp.hasGlobalIpv6Address());
+        assertEquals(3, lp.getLinkAddresses().size()); // IPv6 privacy, stable privacy, link-local
+        for (LinkAddress la : lp.getLinkAddresses()) {
+            final Inet6Address address = (Inet6Address) la.getAddress();
+            assertFalse(NetworkStackUtils.isIPv6GUA(la));
+        }
     }
 }

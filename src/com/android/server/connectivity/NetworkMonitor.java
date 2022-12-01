@@ -57,6 +57,7 @@ import static android.net.util.DataStallUtils.DEFAULT_DNS_LOG_SIZE;
 import static android.net.util.DataStallUtils.DEFAULT_TCP_POLLING_INTERVAL_MS;
 import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
 
+import static com.android.modules.utils.build.SdkLevel.isAtLeastU;
 import static com.android.net.module.util.CollectionUtils.isEmpty;
 import static com.android.net.module.util.ConnectivityUtils.isIPv6ULA;
 import static com.android.net.module.util.DeviceConfigUtils.getResBooleanConfig;
@@ -85,7 +86,6 @@ import static com.android.networkstack.util.NetworkStackUtils.DEFAULT_CAPTIVE_PO
 import static com.android.networkstack.util.NetworkStackUtils.DEFAULT_CAPTIVE_PORTAL_FALLBACK_PROBE_SPECS;
 import static com.android.networkstack.util.NetworkStackUtils.DEFAULT_CAPTIVE_PORTAL_HTTPS_URLS;
 import static com.android.networkstack.util.NetworkStackUtils.DEFAULT_CAPTIVE_PORTAL_HTTP_URLS;
-import static com.android.networkstack.util.NetworkStackUtils.DISMISS_PORTAL_IN_VALIDATED_NETWORK;
 import static com.android.networkstack.util.NetworkStackUtils.DNS_PROBE_PRIVATE_IP_NO_INTERNET_VERSION;
 
 import android.app.PendingIntent;
@@ -785,7 +785,9 @@ public class NetworkMonitor extends StateMachine {
     }
 
     private boolean isValidationRequired() {
-        return NetworkMonitorUtils.isValidationRequired(
+        final boolean dunValidationRequired = isAtLeastU()
+                || mContext.getResources().getBoolean(R.bool.config_validate_dun_networks);
+        return NetworkMonitorUtils.isValidationRequired(dunValidationRequired,
                 mNetworkAgentConfig.isVpnValidationRequired(), mNetworkCapabilities);
     }
 
@@ -1322,10 +1324,7 @@ public class NetworkMonitor extends StateMachine {
         private boolean useRedirectUrlForPortal() {
             // It must match the conditions in CaptivePortalLogin in which the redirect URL is not
             // used to validate that the portal is gone.
-            final boolean aboveQ =
-                    ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.Q);
-            return aboveQ && mDependencies.isFeatureEnabled(mContext, NAMESPACE_CONNECTIVITY,
-                    DISMISS_PORTAL_IN_VALIDATED_NETWORK, aboveQ /* defaultEnabled */);
+            return ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.Q);
         }
 
         @Override
