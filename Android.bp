@@ -67,6 +67,7 @@ java_defaults {
     min_sdk_version: "29",
     sdk_version: "module_current",
     libs: [
+        "framework-configinfrastructure",
         "framework-connectivity",
         "framework-connectivity-t",
         "framework-statsd",
@@ -74,11 +75,18 @@ java_defaults {
     ]
 }
 
+// Common defaults for NetworkStack integration tests, root tests and coverage tests
+// to keep tests always running against the same target sdk version with NetworkStack.
 java_defaults {
-    name: "NetworkStackReleaseApiLevel",
-    sdk_version: module_33_version,
+    name: "NetworkStackReleaseTargetSdk",
     min_sdk_version: "29",
     target_sdk_version: "33",
+}
+
+java_defaults {
+    name: "NetworkStackReleaseApiLevel",
+    defaults:["NetworkStackReleaseTargetSdk"],
+    sdk_version: module_33_version,
     libs: [
         "framework-connectivity",
         "framework-connectivity-t",
@@ -290,7 +298,6 @@ java_defaults {
         "net-utils-device-common-ip",
         "net-utils-device-common-netlink",
     ],
-    plugins: ["java_api_finder"],
 }
 
 // The versions of the android library containing network stack code compiled for each SDK variant.
@@ -372,7 +379,7 @@ java_genrule {
     ],
     out: ["NetworkStackJarJarRules.txt"],
     cmd: "$(location jarjar-rules-generator) " +
-        "--jars $(location :NetworkStackApiStableLib{.jar}) " +
+        "$(location :NetworkStackApiStableLib{.jar}) " +
         "--prefix com.android.networkstack " +
         "--excludes $(location jarjar-excludes.txt) " +
         "--output $(out)",

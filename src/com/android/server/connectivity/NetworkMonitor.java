@@ -57,6 +57,7 @@ import static android.net.util.DataStallUtils.DEFAULT_DNS_LOG_SIZE;
 import static android.net.util.DataStallUtils.DEFAULT_TCP_POLLING_INTERVAL_MS;
 import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
 
+import static com.android.modules.utils.build.SdkLevel.isAtLeastU;
 import static com.android.net.module.util.CollectionUtils.isEmpty;
 import static com.android.net.module.util.ConnectivityUtils.isIPv6ULA;
 import static com.android.net.module.util.DeviceConfigUtils.getResBooleanConfig;
@@ -85,7 +86,6 @@ import static com.android.networkstack.util.NetworkStackUtils.DEFAULT_CAPTIVE_PO
 import static com.android.networkstack.util.NetworkStackUtils.DEFAULT_CAPTIVE_PORTAL_FALLBACK_PROBE_SPECS;
 import static com.android.networkstack.util.NetworkStackUtils.DEFAULT_CAPTIVE_PORTAL_HTTPS_URLS;
 import static com.android.networkstack.util.NetworkStackUtils.DEFAULT_CAPTIVE_PORTAL_HTTP_URLS;
-import static com.android.networkstack.util.NetworkStackUtils.DISMISS_PORTAL_IN_VALIDATED_NETWORK;
 import static com.android.networkstack.util.NetworkStackUtils.DNS_PROBE_PRIVATE_IP_NO_INTERNET_VERSION;
 
 import android.app.PendingIntent;
@@ -442,6 +442,10 @@ public class NetworkMonitor extends StateMachine {
     private final String mCaptivePortalHttpsUrlFromSetting;
     private final String mCaptivePortalHttpUrlFromSetting;
     @Nullable
+    private final URL mTestCaptivePortalHttpsUrl;
+    @Nullable
+    private final URL mTestCaptivePortalHttpUrl;
+    @Nullable
     private final CaptivePortalProbeSpec[] mCaptivePortalFallbackSpecs;
 
     // The probing URLs may be updated after constructor if system notifies configuration changed.
@@ -613,6 +617,9 @@ public class NetworkMonitor extends StateMachine {
                 mDependencies.getSetting(context, CAPTIVE_PORTAL_HTTPS_URL, null);
         mCaptivePortalHttpUrlFromSetting =
                 mDependencies.getSetting(context, CAPTIVE_PORTAL_HTTP_URL, null);
+        mTestCaptivePortalHttpsUrl =
+                getTestUrl(TEST_CAPTIVE_PORTAL_HTTPS_URL, validationLogs, deps);
+        mTestCaptivePortalHttpUrl = getTestUrl(TEST_CAPTIVE_PORTAL_HTTP_URL, validationLogs, deps);
         mIsCaptivePortalCheckEnabled = getIsCaptivePortalCheckEnabled();
         mPrivateIpNoInternetEnabled = getIsPrivateIpNoInternetEnabled();
         mMetricsEnabled = deps.isFeatureEnabled(context, NAMESPACE_CONNECTIVITY,
@@ -778,7 +785,9 @@ public class NetworkMonitor extends StateMachine {
     }
 
     private boolean isValidationRequired() {
-        return NetworkMonitorUtils.isValidationRequired(
+        final boolean dunValidationRequired = isAtLeastU()
+                || mContext.getResources().getBoolean(R.bool.config_validate_dun_networks);
+        return NetworkMonitorUtils.isValidationRequired(dunValidationRequired,
                 mNetworkAgentConfig.isVpnValidationRequired(), mNetworkCapabilities);
     }
 
@@ -1315,10 +1324,7 @@ public class NetworkMonitor extends StateMachine {
         private boolean useRedirectUrlForPortal() {
             // It must match the conditions in CaptivePortalLogin in which the redirect URL is not
             // used to validate that the portal is gone.
-            final boolean aboveQ =
-                    ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.Q);
-            return aboveQ && mDependencies.isFeatureEnabled(mContext, NAMESPACE_CONNECTIVITY,
-                    DISMISS_PORTAL_IN_VALIDATED_NETWORK, aboveQ /* defaultEnabled */);
+            return ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.Q);
         }
 
         @Override
@@ -2065,8 +2071,9 @@ public class NetworkMonitor extends StateMachine {
     }
 
     @Nullable
-    private URL getTestUrl(@NonNull String key) {
-        final String strExpiration = mDependencies.getDeviceConfigProperty(NAMESPACE_CONNECTIVITY,
+    private static URL getTestUrl(@NonNull String key, @NonNull SharedLog log,
+            @NonNull Dependencies deps) {
+        final String strExpiration = deps.getDeviceConfigProperty(NAMESPACE_CONNECTIVITY,
                 TEST_URL_EXPIRATION_TIME, null);
         if (strExpiration == null) return null;
 
@@ -2074,23 +2081,23 @@ public class NetworkMonitor extends StateMachine {
         try {
             expTime = Long.parseUnsignedLong(strExpiration);
         } catch (NumberFormatException e) {
-            loge("Invalid test URL expiration time format", e);
+            log.e("Invalid test URL expiration time format", e);
             return null;
         }
 
         final long now = System.currentTimeMillis();
         if (expTime < now || (expTime - now) > TEST_URL_EXPIRATION_MS) {
-            logw("Skipping test URL with expiration " + expTime + ", now " + now);
+            log.w("Skipping test URL with expiration " + expTime + ", now " + now);
             return null;
         }
 
-        final String strUrl = mDependencies.getDeviceConfigProperty(NAMESPACE_CONNECTIVITY,
+        final String strUrl = deps.getDeviceConfigProperty(NAMESPACE_CONNECTIVITY,
                 key, null /* defaultValue */);
         if (!isValidTestUrl(strUrl)) {
-            logw("Skipping invalid test URL " + strUrl);
+            log.w("Skipping invalid test URL " + strUrl);
             return null;
         }
-        return makeURL(strUrl);
+        return makeURL(strUrl, log);
     }
 
     private String getCaptivePortalServerHttpsUrl(@NonNull Context context) {
@@ -2251,8 +2258,7 @@ public class NetworkMonitor extends StateMachine {
     }
 
     private URL[] makeCaptivePortalHttpsUrls(@NonNull Context context) {
-        final URL testUrl = getTestUrl(TEST_CAPTIVE_PORTAL_HTTPS_URL);
-        if (testUrl != null) return new URL[] { testUrl };
+        if (mTestCaptivePortalHttpsUrl != null) return new URL[] { mTestCaptivePortalHttpsUrl };
 
         final String firstUrl = getCaptivePortalServerHttpsUrl(context);
         try {
@@ -2272,8 +2278,7 @@ public class NetworkMonitor extends StateMachine {
     }
 
     private URL[] makeCaptivePortalHttpUrls(@NonNull Context context) {
-        final URL testUrl = getTestUrl(TEST_CAPTIVE_PORTAL_HTTP_URL);
-        if (testUrl != null) return new URL[] { testUrl };
+        if (mTestCaptivePortalHttpUrl != null) return new URL[] { mTestCaptivePortalHttpUrl };
 
         final String firstUrl = getCaptivePortalServerHttpUrl(context);
         try {
@@ -3171,12 +3176,18 @@ public class NetworkMonitor extends StateMachine {
         }
     }
 
-    private URL makeURL(String url) {
+    @Nullable
+    private URL makeURL(@Nullable String url) {
+        return makeURL(url, mValidationLogs);
+    }
+
+    @Nullable
+    private static URL makeURL(@Nullable String url, @NonNull SharedLog log) {
         if (url != null) {
             try {
                 return new URL(url);
             } catch (MalformedURLException e) {
-                validationLog("Bad URL: " + url);
+                log.w("Bad URL: " + url);
             }
         }
         return null;
