@@ -19,7 +19,6 @@ package com.android.networkstack.util;
 import android.content.Context;
 import android.net.LinkAddress;
 import android.net.MacAddress;
-import android.net.util.SocketUtils;
 import android.system.ErrnoException;
 import android.util.Log;
 
@@ -166,6 +165,11 @@ public class NetworkStackUtils {
     public static final String DHCP_RAPID_COMMIT_ENABLED = "dhcp_rapid_commit_enabled";
 
     /**
+     * Disable dropping DHCP packets with IPv4 MF flag set.
+     */
+    public static final String DHCP_DISABLE_DROP_MF = "dhcp_disable_drop_mf";
+
+    /**
      * Minimum module version at which to enable the DHCP INIT-REBOOT state.
      */
     public static final String DHCP_INIT_REBOOT_VERSION = "dhcp_init_reboot_version";
@@ -256,16 +260,6 @@ public class NetworkStackUtils {
     }
 
     /**
-     * Close a socket, ignoring any exception while closing.
-     */
-    public static void closeSocketQuietly(FileDescriptor fd) {
-        try {
-            SocketUtils.closeSocket(fd);
-        } catch (IOException ignored) {
-        }
-    }
-
-    /**
      * Convert IPv6 multicast address to ethernet multicast address in network order.
      */
     public static MacAddress ipv6MulticastToEthernetMulticast(@NonNull final Inet6Address addr) {
@@ -304,7 +298,7 @@ public class NetworkStackUtils {
     }
 
     /**
-     * Check whether a link address is IPv6 global unicast address.
+     * Check whether a link address is IPv6 global preferred unicast address.
      */
     public static boolean isIPv6GUA(@NonNull final LinkAddress address) {
         return address.isIpv6() && address.isGlobalPreferred();
@@ -313,7 +307,8 @@ public class NetworkStackUtils {
     /**
      * Attaches a socket filter that accepts DHCP packets to the given socket.
      */
-    public static native void attachDhcpFilter(FileDescriptor fd) throws ErrnoException;
+    public static native void attachDhcpFilter(FileDescriptor fd, boolean dropMF)
+            throws ErrnoException;
 
     /**
      * Attaches a socket filter that accepts ICMPv6 router advertisements to the given socket.
