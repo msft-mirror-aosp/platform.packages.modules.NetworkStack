@@ -59,6 +59,7 @@ import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ROUTER_SO
 import static com.android.net.module.util.NetworkStackConstants.IPV4_ADDR_ANY;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ALL_NODES_MULTICAST;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ALL_ROUTERS_MULTICAST;
+import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ANY;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_HEADER_LEN;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_PROTOCOL_OFFSET;
 import static com.android.net.module.util.NetworkStackConstants.NEIGHBOR_ADVERTISEMENT_FLAG_OVERRIDE;
@@ -88,6 +89,7 @@ import static org.mockito.ArgumentMatchers.longThat;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.argThat;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.eq;
@@ -122,11 +124,11 @@ import android.net.MacAddress;
 import android.net.NetworkAgentConfig;
 import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
+import android.net.NetworkSpecifier;
 import android.net.NetworkStackIpMemoryStore;
 import android.net.RouteInfo;
 import android.net.TestNetworkInterface;
 import android.net.TestNetworkManager;
-import android.net.TestNetworkSpecifier;
 import android.net.Uri;
 import android.net.dhcp.DhcpClient;
 import android.net.dhcp.DhcpDeclinePacket;
@@ -144,7 +146,6 @@ import android.net.networkstack.aidl.ip.ReachabilityLossReason;
 import android.net.shared.Layer2Information;
 import android.net.shared.ProvisioningConfiguration;
 import android.net.shared.ProvisioningConfiguration.ScanResultInfo;
-import android.net.util.NetworkStackUtils;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -180,15 +181,17 @@ import com.android.networkstack.apishim.CaptivePortalDataShimImpl;
 import com.android.networkstack.apishim.ConstantsShim;
 import com.android.networkstack.apishim.common.ShimUtils;
 import com.android.networkstack.arp.ArpPacket;
+import com.android.networkstack.ipmemorystore.IpMemoryStoreService;
 import com.android.networkstack.metrics.IpProvisioningMetrics;
 import com.android.networkstack.metrics.IpReachabilityMonitorMetrics;
 import com.android.networkstack.metrics.NetworkQuirkMetrics;
 import com.android.networkstack.packets.NeighborAdvertisement;
 import com.android.networkstack.packets.NeighborSolicitation;
+import com.android.networkstack.util.NetworkStackUtils;
 import com.android.server.NetworkObserver;
 import com.android.server.NetworkObserverRegistry;
 import com.android.server.NetworkStackService.NetworkStackServiceManager;
-import com.android.server.connectivity.ipmemorystore.IpMemoryStoreService;
+import com.android.testutils.CompatUtil;
 import com.android.testutils.DevSdkIgnoreRule;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreAfter;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo;
@@ -264,6 +267,7 @@ public abstract class IpClientIntegrationTestCommon {
     private static final int IFA_F_STABLE_PRIVACY = 0x800;
 
     protected static final long TEST_TIMEOUT_MS = 2_000L;
+    private static final long TEST_WAIT_ENOBUFS_TIMEOUT_MS = 30_000L;
 
     @Rule
     public final DevSdkIgnoreRule mIgnoreRule = new DevSdkIgnoreRule();
@@ -610,8 +614,15 @@ public abstract class IpClientIntegrationTestCommon {
                 mIsNetlinkEventParseEnabled /* default value */);
 
         setUpTapInterface();
-        mCb = mock(IIpClientCallbacks.class);
+        // It turns out that Router Solicitation will also be sent out even after the tap interface
+        // is brought up, however, we want to wait for RS which is sent due to IPv6 stack is enabled
+        // in the test code. The early RS might bring kind of race, for example, the IPv6 stack has
+        // not been enabled when test code sees the RS, then kernel will not process RA even if we
+        // replies immediately after receiving RS. Always waiting for the first RS show up after
+        // interface is brought up helps prevent the race.
+        waitForRouterSolicitation();
 
+        mCb = mock(IIpClientCallbacks.class);
         if (useNetworkStackSignature()) {
             setUpMocks();
             setUpIpClient();
@@ -1555,7 +1566,8 @@ public abstract class IpClientIntegrationTestCommon {
     private void createTestNetworkAgentAndRegister(final LinkProperties lp) throws Exception {
         final Context context = InstrumentationRegistry.getInstrumentation().getContext();
         final ConnectivityManager cm = context.getSystemService(ConnectivityManager.class);
-        final TestNetworkSpecifier testNetworkSpecifier = new TestNetworkSpecifier(mIfaceName);
+        final NetworkSpecifier testNetworkSpecifier =
+                CompatUtil.makeTestNetworkSpecifier(mIfaceName);
         final TestableNetworkCallback cb = new TestableNetworkCallback();
 
         // Requesting a network make sure the NetworkAgent is alive during the whole life cycle of
@@ -1804,9 +1816,10 @@ public abstract class IpClientIntegrationTestCommon {
                 mPacketReader.popPacket(PACKET_TIMEOUT_MS, this::isRouterSolicitation));
     }
 
-    private void sendRouterAdvertisement(boolean waitForRs, short lifetime) throws Exception {
+    private void sendRouterAdvertisement(boolean waitForRs, short lifetime, int valid,
+            int preferred) throws Exception {
         final String dnsServer = "2001:4860:4860::64";
-        final ByteBuffer pio = buildPioOption(3600, 1800, "2001:db8:1::/64");
+        final ByteBuffer pio = buildPioOption(valid, preferred, "2001:db8:1::/64");
         final ByteBuffer rdnss = buildRdnssOption(3600, dnsServer);
         sendRouterAdvertisement(waitForRs, lifetime, pio, rdnss);
     }
@@ -1821,11 +1834,13 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     private void sendBasicRouterAdvertisement(boolean waitForRs) throws Exception {
-        sendRouterAdvertisement(waitForRs, (short) 1800);
+        sendRouterAdvertisement(waitForRs, (short) 1800 /* lifetime */, 3600 /* valid */,
+                1800 /* preferred */);
     }
 
-    private void sendRouterAdvertisementWithZeroLifetime() throws Exception {
-        sendRouterAdvertisement(false /* waitForRs */, (short) 0);
+    private void sendRouterAdvertisementWithZeroRouterLifetime() throws Exception {
+        sendRouterAdvertisement(false /* waitForRs */, (short) 0 /* lifetime */, 3600 /* valid */,
+                1800 /* preferred */);
     }
 
     // TODO: move this and the following method to a common location and use them in ApfTest.
@@ -2837,7 +2852,7 @@ public abstract class IpClientIntegrationTestCommon {
         assertTrue(lp.getDnsServers().contains(InetAddress.getByName(dnsServer)));
         assertTrue(lp.getDnsServers().contains(SERVER_ADDR));
 
-        reset(mCb);
+        clearInvocations(mCb);
     }
 
     private void doDualStackProvisioning(boolean shouldDisableAcceptRa) throws Exception {
@@ -2866,7 +2881,7 @@ public abstract class IpClientIntegrationTestCommon {
 
         // Send RA with 0-lifetime and wait until all IPv6-related default route and DNS servers
         // have been removed, then verify if there is IPv4-only info left in the LinkProperties.
-        sendRouterAdvertisementWithZeroLifetime();
+        sendRouterAdvertisementWithZeroRouterLifetime();
         verify(mCb, timeout(TEST_TIMEOUT_MS).atLeastOnce()).onLinkPropertiesChange(
                 argThat(x -> {
                     final boolean isOnlyIPv4Provisioned = (x.getLinkAddresses().size() == 1
@@ -2905,7 +2920,7 @@ public abstract class IpClientIntegrationTestCommon {
         // Send RA with 0-lifetime and wait until all global IPv6 addresses, IPv6-related default
         // route and DNS servers have been removed, then verify if there is IPv4-only, IPv6 link
         // local address and route to fe80::/64 info left in the LinkProperties.
-        sendRouterAdvertisementWithZeroLifetime();
+        sendRouterAdvertisementWithZeroRouterLifetime();
         verify(mCb, timeout(TEST_TIMEOUT_MS).atLeastOnce()).onLinkPropertiesChange(
                 argThat(x -> {
                     // Only IPv4 provisioned and IPv6 link-local address
@@ -3174,10 +3189,15 @@ public abstract class IpClientIntegrationTestCommon {
         }
         final int after = getNumOpenFds();
 
-        // Check that the number of open fds is the same as before.
-        // If this exact match becomes flaky, we could add some tolerance here (e.g., allow 2-3
-        // extra fds), since it's likely that any leak would at least leak one FD per loop.
-        assertEquals("Fd leak after " + iterations + " iterations: ", before, after);
+        // Check that the number of open fds is the same as before, within some tolerance (e.g.,
+        // garbage collection or other cleanups might have caused an fd to be closed). This
+        // shouldn't make leak detection much less reliable, since it's likely that any leak would
+        // at least leak one FD per loop.
+        final int tolerance = 4;
+        assertTrue(
+                "FD leak detected after " + iterations + " iterations: expected "
+                        + before + " +/- " + tolerance + " fds, found " + after,
+                Math.abs(after - before) <= tolerance);
     }
 
     // TODO: delete when DhcpOption is @JavaOnlyImmutable.
@@ -3492,6 +3512,25 @@ public abstract class IpClientIntegrationTestCommon {
         assertTrue(target.isGlobalPreferred());
     }
 
+    private void assertMulticastNsFromIpv6Gua(final NeighborSolicitation ns) throws Exception {
+        final Inet6Address solicitedNodeMulticast =
+                NetworkStackUtils.ipv6AddressToSolicitedNodeMulticast(ROUTER_LINK_LOCAL);
+        final MacAddress etherMulticast =
+                NetworkStackUtils.ipv6MulticastToEthernetMulticast(solicitedNodeMulticast);
+
+        assertEquals(etherMulticast, ns.ethHdr.dstMac);
+        assertEquals(ETH_P_IPV6, ns.ethHdr.etherType);
+        assertEquals(IPPROTO_ICMPV6, ns.ipv6Hdr.nextHeader);
+        assertEquals(0xff, ns.ipv6Hdr.hopLimit);
+
+        final LinkAddress srcIp = new LinkAddress(ns.ipv6Hdr.srcIp.getHostAddress() + "/64");
+        assertTrue(srcIp.isGlobalPreferred());
+        assertEquals(solicitedNodeMulticast, ns.ipv6Hdr.dstIp);
+        assertEquals(ICMPV6_NEIGHBOR_SOLICITATION, ns.icmpv6Hdr.type);
+        assertEquals(0, ns.icmpv6Hdr.code);
+        assertEquals(ROUTER_LINK_LOCAL, ns.nsHdr.target);
+    }
+
     @Test
     public void testGratuitousNaForNewGlobalUnicastAddresses() throws Exception {
         final ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
@@ -3672,6 +3711,23 @@ public abstract class IpClientIntegrationTestCommon {
         }
         assertFalse(nsList.isEmpty());
         return nsList;
+    }
+
+    private NeighborSolicitation expectDadNeighborSolicitationForLinkLocal(boolean shouldDisableDad)
+            throws Exception {
+        final NeighborSolicitation ns = getNextNeighborSolicitation();
+        if (!shouldDisableDad) {
+            final Inet6Address solicitedNodeMulticast =
+                    NetworkStackUtils.ipv6AddressToSolicitedNodeMulticast(ns.nsHdr.target);
+            assertNotNull("No multicast NS received on interface within timeout", ns);
+            assertEquals(IPV6_ADDR_ANY, ns.ipv6Hdr.srcIp);     // srcIp: ::/
+            assertTrue(ns.ipv6Hdr.dstIp.isMulticastAddress()); // dstIp: solicited-node mcast
+            assertTrue(ns.ipv6Hdr.dstIp.equals(solicitedNodeMulticast));
+            assertTrue(ns.nsHdr.target.isLinkLocalAddress());  // targetIp: IPv6 LL address
+        } else {
+            assertNull(ns);
+        }
+        return ns;
     }
 
     // Override this function with disabled experiment flag by default, in order not to
@@ -3920,6 +3976,59 @@ public abstract class IpClientIntegrationTestCommon {
         );
     }
 
+    private void runIpv6LinkLocalOnlyDadTransmitsCheckTest(boolean shouldDisableDad)
+            throws Exception {
+        ProvisioningConfiguration.Builder config = new ProvisioningConfiguration.Builder()
+                .withoutIPv4()
+                .withIpv6LinkLocalOnly()
+                .withRandomMacAddress();
+        if (shouldDisableDad) config.withUniqueEui64AddressesOnly();
+
+        // dad_transmits has been set to 0 in disableIpv6ProvisioningDelays, re-enable dad_transmits
+        // for testing, but production code could disable dad again later, we should never see any
+        // multicast NS for duplicate address detection then.
+        mNetd.setProcSysNet(INetd.IPV6, INetd.CONF, mIfaceName, "dad_transmits", "1");
+        startIpClientProvisioning(config.build());
+        verify(mNetd, timeout(TEST_TIMEOUT_MS)).interfaceSetEnableIPv6(mIfaceName, true);
+        // Check dad_transmits should be set to 0 if UniqueEui64AddressesOnly mode is enabled.
+        int dadTransmits = Integer.parseUnsignedInt(
+                mNetd.getProcSysNet(INetd.IPV6, INetd.CONF, mIfaceName, "dad_transmits"));
+        if (shouldDisableDad) {
+            assertEquals(0, dadTransmits);
+        } else {
+            assertEquals(1, dadTransmits);
+        }
+
+        final NeighborSolicitation ns =
+                expectDadNeighborSolicitationForLinkLocal(shouldDisableDad);
+        if (shouldDisableDad) {
+            assertNull(ns);
+        } else {
+            assertNotNull(ns);
+        }
+
+        // Shutdown IpClient and check if the dad_transmits always equals to default value 1 (if
+        // dad_transmit was set to 0 before, it should get recovered to default value 1 after
+        // shutting down IpClient)
+        mIpc.shutdown();
+        awaitIpClientShutdown();
+        dadTransmits = Integer.parseUnsignedInt(
+                mNetd.getProcSysNet(INetd.IPV6, INetd.CONF, mIfaceName, "dad_transmits"));
+        assertEquals(1, dadTransmits);
+    }
+
+    @Test
+    @SignatureRequiredTest(reason = "requires mocked netd")
+    public void testIPv6LinkLocalOnly_enableDad() throws Exception {
+        runIpv6LinkLocalOnlyDadTransmitsCheckTest(false /* shouldDisableDad */);
+    }
+
+    @Test
+    @SignatureRequiredTest(reason = "requires mocked netd")
+    public void testIPv6LinkLocalOnly_disableDad() throws Exception {
+        runIpv6LinkLocalOnlyDadTransmitsCheckTest(true /* shouldDisableDad */);
+    }
+
     // Since createTapInterface(boolean, String) method was introduced since T, this method
     // cannot be found on Q/R/S platform, ignore this test on T- platform.
     @Test
@@ -3982,7 +4091,7 @@ public abstract class IpClientIntegrationTestCommon {
 
         // Unblock the IpClient handler and ENOBUFS should happen then.
         latch.countDown();
-        HandlerUtils.waitForIdle(handler, TEST_TIMEOUT_MS);
+        HandlerUtils.waitForIdle(handler, TEST_WAIT_ENOBUFS_TIMEOUT_MS);
 
         reset(mCb);
 
@@ -3990,12 +4099,92 @@ public abstract class IpClientIntegrationTestCommon {
         // Due to ignoring the ENOBUFS and wait until handler gets idle, IpClient should be still
         // able to see the RA with 0 router lifetime and the IPv6 default route will be removed.
         // LinkProperties should not include any route to the new prefix 2001:db8:dead:beef::/64.
-        sendRouterAdvertisementWithZeroLifetime();
+        sendRouterAdvertisementWithZeroRouterLifetime();
         final ArgumentCaptor<LinkProperties> captor = ArgumentCaptor.forClass(LinkProperties.class);
         verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningFailure(captor.capture());
         final LinkProperties lp = captor.getValue();
         assertNotNull(lp);
         assertFalse(hasRouteTo(lp, prefix));
         assertFalse(lp.hasIpv6DefaultRoute());
+    }
+
+    @Test
+    public void testMulticastNsFromIPv6Gua() throws Exception {
+        final ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
+                .withoutIpReachabilityMonitor()
+                .withoutIPv4()
+                .build();
+
+        setFeatureEnabled(NetworkStackUtils.IPCLIENT_MULTICAST_NS_VERSION,
+                true /* isUnsolicitedNsEnabled */);
+        assertTrue(isFeatureEnabled(NetworkStackUtils.IPCLIENT_MULTICAST_NS_VERSION, false));
+        startIpClientProvisioning(config);
+
+        doIpv6OnlyProvisioning();
+
+        final List<NeighborSolicitation> nsList = new ArrayList<>();
+        NeighborSolicitation packet;
+        while ((packet = getNextNeighborSolicitation()) != null) {
+            // Filter out the NSes used for duplicate address detetction, whose target address
+            // is the global IPv6 address inside these NSes.
+            if (packet.nsHdr.target.isLinkLocalAddress()) {
+                assertMulticastNsFromIpv6Gua(packet);
+                nsList.add(packet);
+            }
+        }
+        assertEquals(2, nsList.size()); // from privacy address and stable privacy address
+    }
+
+    @Test
+    public void testDeprecatedGlobalUnicastAddress() throws Exception {
+        ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
+                .withoutIPv4()
+                .build();
+        startIpClientProvisioning(config);
+        doIpv6OnlyProvisioning();
+
+        // Send RA with PIO(0 preferred but valid lifetime) to deprecate the global IPv6 addresses.
+        // Check all of global IPv6 addresses will become deprecated, but still valid.
+        // NetworkStackUtils#isIPv6GUA() will return false for deprecated addresses, however, when
+        // checking if the DNS is still reachable, deprecated addresses are not acceptable, that
+        // results in the on-link DNS server gets lost from LinkProperties, and provisioning failure
+        // happened.
+        // TODO: update the logic of checking reachable on-link DNS server to accept the deprecated
+        // addresses, then onProvisioningFailure callback should never happen.
+        sendRouterAdvertisement(false /* waitForRs*/, (short) 1800 /* router lifetime */,
+                3600 /* valid */, 0 /* preferred */);
+        final ArgumentCaptor<LinkProperties> captor = ArgumentCaptor.forClass(LinkProperties.class);
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningFailure(captor.capture());
+        final LinkProperties lp = captor.getValue();
+        assertNotNull(lp);
+        assertFalse(lp.hasGlobalIpv6Address());
+        assertEquals(3, lp.getLinkAddresses().size()); // IPv6 privacy, stable privacy, link-local
+        for (LinkAddress la : lp.getLinkAddresses()) {
+            assertFalse(NetworkStackUtils.isIPv6GUA(la));
+        }
+    }
+
+    @Test @SignatureRequiredTest(reason = "requires mNetd to delete IPv6 GUAs")
+    public void testOnIpv6AddressRemoved() throws Exception {
+        ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
+                .withoutIPv4()
+                .build();
+        startIpClientProvisioning(config);
+
+        LinkProperties lp = doIpv6OnlyProvisioning();
+        assertNotNull(lp);
+        assertEquals(3, lp.getLinkAddresses().size()); // IPv6 privacy, stable privacy, link-local
+        for (LinkAddress la : lp.getLinkAddresses()) {
+            final Inet6Address address = (Inet6Address) la.getAddress();
+            if (address.isLinkLocalAddress()) continue;
+            // Remove IPv6 GUAs from interface.
+            mNetd.interfaceDelAddress(mIfaceName, address.getHostAddress(), la.getPrefixLength());
+        }
+
+        final ArgumentCaptor<LinkProperties> captor = ArgumentCaptor.forClass(LinkProperties.class);
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningFailure(captor.capture());
+        lp = captor.getValue();
+        assertFalse(lp.hasGlobalIpv6Address());
+        assertEquals(1, lp.getLinkAddresses().size()); // only link-local
     }
 }

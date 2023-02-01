@@ -49,7 +49,6 @@ import android.net.metrics.ApfProgramEvent;
 import android.net.metrics.ApfStats;
 import android.net.metrics.IpConnectivityLog;
 import android.net.metrics.RaEvent;
-import android.net.util.NetworkStackUtils;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.system.ErrnoException;
@@ -67,6 +66,8 @@ import com.android.internal.util.IndentingPrintWriter;
 import com.android.net.module.util.CollectionUtils;
 import com.android.net.module.util.ConnectivityUtils;
 import com.android.net.module.util.InterfaceParams;
+import com.android.net.module.util.SocketUtils;
+import com.android.networkstack.util.NetworkStackUtils;
 
 import java.io.FileDescriptor;
 import java.io.IOException;
@@ -191,7 +192,7 @@ public class ApfFilter {
 
     // Thread to listen for RAs.
     @VisibleForTesting
-    class ReceiveThread extends Thread {
+    public class ReceiveThread extends Thread {
         private final byte[] mPacket = new byte[1514];
         private final FileDescriptor mSocket;
         private final long mStart = SystemClock.elapsedRealtime();
@@ -212,7 +213,7 @@ public class ApfFilter {
         public void halt() {
             mStopped = true;
             // Interrupts the read() call the thread is blocked in.
-            NetworkStackUtils.closeSocketQuietly(mSocket);
+            SocketUtils.closeSocketQuietly(mSocket);
         }
 
         @Override
@@ -348,9 +349,9 @@ public class ApfFilter {
     private final IpConnectivityLog mMetricsLog;
 
     @VisibleForTesting
-    byte[] mHardwareAddress;
+    public byte[] mHardwareAddress;
     @VisibleForTesting
-    ReceiveThread mReceiveThread;
+    public ReceiveThread mReceiveThread;
     @GuardedBy("this")
     private long mUniqueCounter;
     @GuardedBy("this")
@@ -386,7 +387,7 @@ public class ApfFilter {
     private int mIPv4PrefixLength;
 
     @VisibleForTesting
-    ApfFilter(Context context, ApfConfiguration config, InterfaceParams ifParams,
+    public ApfFilter(Context context, ApfConfiguration config, InterfaceParams ifParams,
             IpClientCallbacksWrapper ipClientCallback, IpConnectivityLog log) {
         mApfCapabilities = config.apfCapabilities;
         mIpClientCallback = ipClientCallback;
@@ -466,7 +467,7 @@ public class ApfFilter {
      * filters to ignore useless RAs.
      */
     @VisibleForTesting
-    void maybeStartFilter() {
+    public void maybeStartFilter() {
         FileDescriptor socket;
         try {
             mHardwareAddress = mInterfaceParams.macAddr.toByteArray();
@@ -546,7 +547,7 @@ public class ApfFilter {
 
     // A class to hold information about an RA.
     @VisibleForTesting
-    class Ra {
+    public class Ra {
         // From RFC4861:
         private static final int ICMP6_RA_HEADER_LEN = 16;
         private static final int ICMP6_RA_CHECKSUM_OFFSET =
@@ -771,7 +772,8 @@ public class ApfFilter {
         // Buffer.position(int) or due to an invalid-length option) or IndexOutOfBoundsException
         // (from ByteBuffer.get(int) ) if parsing encounters something non-compliant with
         // specifications.
-        Ra(byte[] packet, int length) throws InvalidRaException {
+        @VisibleForTesting
+        public Ra(byte[] packet, int length) throws InvalidRaException {
             if (length < ICMP6_RA_OPTION_OFFSET) {
                 throw new InvalidRaException("Not an ICMP6 router advertisement: too short");
             }
@@ -902,13 +904,21 @@ public class ApfFilter {
 
         // Append a filter for this RA to {@code gen}. Jump to DROP_LABEL if it should be dropped.
         // Jump to the next filter if packet doesn't match this RA.
+        // Return Long.MAX_VALUE if we don't install any filter program for this RA. As the return
+        // value of this function is used to calculate the program min lifetime (which corresponds
+        // to the smallest generated filter lifetime). Returning Long.MAX_VALUE in the case no
+        // filter gets generated makes sure the program lifetime stays unaffected.
         @GuardedBy("ApfFilter.this")
         long generateFilterLocked(ApfGenerator gen) throws IllegalInstructionException {
+            // Filter for a fraction of the lifetime and adjust for the age of the RA.
+            int filterLifetime = (int) (mMinLifetime / FRACTION_OF_LIFETIME_TO_FILTER)
+                    - (int) (mProgramBaseTime - mLastSeen);
+            if (filterLifetime <= 0) return Long.MAX_VALUE;
+
             String nextFilterLabel = "Ra" + getUniqueNumberLocked();
             // Skip if packet is not the right size
             gen.addLoadFromMemory(Register.R0, gen.PACKET_SIZE_MEMORY_SLOT);
             gen.addJumpIfR0NotEquals(mPacket.capacity(), nextFilterLabel);
-            int filterLifetime = (int)(currentLifetime() / FRACTION_OF_LIFETIME_TO_FILTER);
             // Skip filter if expired
             gen.addLoadFromMemory(Register.R0, gen.FILTER_AGE_MEMORY_SLOT);
             gen.addJumpIfR0GreaterThan(filterLifetime, nextFilterLabel);
@@ -1176,6 +1186,11 @@ public class ApfFilter {
     // packets may be dropped, so let's use 6.
     private static final int FRACTION_OF_LIFETIME_TO_FILTER = 6;
 
+    // The base time for this filter program. In seconds since Unix Epoch.
+    // This is the time when the APF program was generated. All filters in the program should use
+    // this base time as their current time for consistency purposes.
+    @GuardedBy("this")
+    private long mProgramBaseTime;
     // When did we last install a filter program? In seconds since Unix Epoch.
     @GuardedBy("this")
     private long mLastTimeInstalledProgram;
@@ -1619,7 +1634,7 @@ public class ApfFilter {
      */
     @GuardedBy("this")
     @VisibleForTesting
-    void installNewProgramLocked() {
+    public void installNewProgramLocked() {
         purgeExpiredRasLocked();
         ArrayList<Ra> rasToFilter = new ArrayList<>();
         final byte[] program;
@@ -1630,6 +1645,7 @@ public class ApfFilter {
             maximumApfProgramSize -= Counter.totalSize();
         }
 
+        mProgramBaseTime = currentTimeSeconds();
         try {
             // Step 1: Determine how many RA filters we can fit in the program.
             ApfGenerator gen = emitPrologueLocked();
@@ -1666,8 +1682,8 @@ public class ApfFilter {
             Log.e(TAG, "Failed to generate APF program.", e);
             return;
         }
-        final long now = currentTimeSeconds();
-        mLastTimeInstalledProgram = now;
+        mIpClientCallback.installPacketFilter(program);
+        mLastTimeInstalledProgram = mProgramBaseTime;
         mLastInstalledProgramMinLifetime = programMinLifetime;
         mLastInstalledProgram = program;
         mNumProgramUpdates++;
@@ -1675,8 +1691,7 @@ public class ApfFilter {
         if (VDBG) {
             hexDump("Installing filter: ", program, program.length);
         }
-        mIpClientCallback.installPacketFilter(program);
-        logApfProgramEventLocked(now);
+        logApfProgramEventLocked(mProgramBaseTime);
         mLastInstallEvent = new ApfProgramEvent.Builder()
                 .setLifetime(programMinLifetime)
                 .setFilteredRas(rasToFilter.size())
@@ -1730,7 +1745,7 @@ public class ApfFilter {
      * @return a ProcessRaResult enum describing what action was performed.
      */
     @VisibleForTesting
-    synchronized ProcessRaResult processRa(byte[] packet, int length) {
+    public synchronized ProcessRaResult processRa(byte[] packet, int length) {
         if (VDBG) hexDump("Read packet = ", packet, length);
 
         // Have we seen this RA before?
@@ -1951,6 +1966,11 @@ public class ApfFilter {
                 mLastInstalledProgram.length, currentTimeSeconds() - mLastTimeInstalledProgram,
                 mLastInstalledProgramMinLifetime));
 
+        pw.print("Denylisted Ethertypes:");
+        for (int p : mEthTypeBlackList) {
+            pw.print(String.format(" %04x", p));
+        }
+        pw.println();
         pw.println("RA filters:");
         pw.increaseIndent();
         for (Ra ra: mRas) {

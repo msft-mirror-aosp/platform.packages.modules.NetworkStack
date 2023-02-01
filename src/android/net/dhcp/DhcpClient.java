@@ -31,12 +31,6 @@ import static android.net.dhcp.DhcpPacket.DHCP_VENDOR_INFO;
 import static android.net.dhcp.DhcpPacket.INADDR_ANY;
 import static android.net.dhcp.DhcpPacket.INADDR_BROADCAST;
 import static android.net.dhcp.DhcpPacket.INFINITE_LEASE;
-import static android.net.util.NetworkStackUtils.DHCP_INIT_REBOOT_VERSION;
-import static android.net.util.NetworkStackUtils.DHCP_IPV6_ONLY_PREFERRED_VERSION;
-import static android.net.util.NetworkStackUtils.DHCP_IP_CONFLICT_DETECT_VERSION;
-import static android.net.util.NetworkStackUtils.DHCP_RAPID_COMMIT_VERSION;
-import static android.net.util.NetworkStackUtils.DHCP_SLOW_RETRANSMISSION_VERSION;
-import static android.net.util.NetworkStackUtils.closeSocketQuietly;
 import static android.net.util.SocketUtils.makePacketSocketAddress;
 import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
 import static android.system.OsConstants.AF_INET;
@@ -57,6 +51,13 @@ import static com.android.net.module.util.NetworkStackConstants.ETHER_ADDR_LEN;
 import static com.android.net.module.util.NetworkStackConstants.IPV4_ADDR_ANY;
 import static com.android.net.module.util.NetworkStackConstants.IPV4_CONFLICT_ANNOUNCE_NUM;
 import static com.android.net.module.util.NetworkStackConstants.IPV4_CONFLICT_PROBE_NUM;
+import static com.android.net.module.util.SocketUtils.closeSocketQuietly;
+import static com.android.networkstack.util.NetworkStackUtils.DHCP_DISABLE_DROP_MF;
+import static com.android.networkstack.util.NetworkStackUtils.DHCP_INIT_REBOOT_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.DHCP_IPV6_ONLY_PREFERRED_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.DHCP_IP_CONFLICT_DETECT_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.DHCP_RAPID_COMMIT_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.DHCP_SLOW_RETRANSMISSION_VERSION;
 
 import android.content.Context;
 import android.net.DhcpResults;
@@ -74,7 +75,6 @@ import android.net.metrics.DhcpErrorEvent;
 import android.net.metrics.IpConnectivityLog;
 import android.net.networkstack.aidl.dhcp.DhcpOption;
 import android.net.util.HostnameTransliterator;
-import android.net.util.NetworkStackUtils;
 import android.net.util.SocketUtils;
 import android.os.Build;
 import android.os.Handler;
@@ -108,6 +108,7 @@ import com.android.networkstack.apishim.SocketUtilsShimImpl;
 import com.android.networkstack.apishim.common.ShimUtils;
 import com.android.networkstack.arp.ArpPacket;
 import com.android.networkstack.metrics.IpProvisioningMetrics;
+import com.android.networkstack.util.NetworkStackUtils;
 
 import java.io.ByteArrayOutputStream;
 import java.io.FileDescriptor;
@@ -692,9 +693,11 @@ public class DhcpClient extends StateMachine {
 
         @Override
         protected FileDescriptor createFd() {
+            boolean dropMF = !DeviceConfigUtils.getDeviceConfigPropertyBoolean(
+                    NAMESPACE_CONNECTIVITY, DHCP_DISABLE_DROP_MF, false);
             try {
                 mPacketSock = Os.socket(AF_PACKET, SOCK_RAW | SOCK_NONBLOCK, 0 /* protocol */);
-                NetworkStackUtils.attachDhcpFilter(mPacketSock);
+                NetworkStackUtils.attachDhcpFilter(mPacketSock, dropMF);
                 final SocketAddress addr = makePacketSocketAddress(ETH_P_IP, mIface.index);
                 Os.bind(mPacketSock, addr);
             } catch (SocketException | ErrnoException e) {
