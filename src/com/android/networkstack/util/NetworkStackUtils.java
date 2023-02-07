@@ -19,7 +19,6 @@ package com.android.networkstack.util;
 import android.content.Context;
 import android.net.LinkAddress;
 import android.net.MacAddress;
-import android.net.util.SocketUtils;
 import android.system.ErrnoException;
 import android.util.Log;
 
@@ -256,18 +255,22 @@ public class NetworkStackUtils {
     public static final String IP_REACHABILITY_MCAST_RESOLICIT_VERSION =
             "ip_reachability_mcast_resolicit_version";
 
-    static {
-        System.loadLibrary("networkstackutilsjni");
-    }
+    /**
+     * Experiment flag to attempt to ignore the on-link IPv6 DNS server which fails to respond to
+     * address resolution.
+     */
+    public static final String IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION =
+            "ip_reachability_ignore_incompleted_ipv6_dns_server_version";
 
     /**
-     * Close a socket, ignoring any exception while closing.
+     * Experiment flag to attempt to ignore the IPv6 default router which fails to respond to
+     * address resolution.
      */
-    public static void closeSocketQuietly(FileDescriptor fd) {
-        try {
-            SocketUtils.closeSocket(fd);
-        } catch (IOException ignored) {
-        }
+    public static final String IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION =
+            "ip_reachability_ignore_incompleted_ipv6_default_router_version";
+
+    static {
+        System.loadLibrary("networkstackutilsjni");
     }
 
     /**
@@ -309,7 +312,7 @@ public class NetworkStackUtils {
     }
 
     /**
-     * Check whether a link address is IPv6 global unicast address.
+     * Check whether a link address is IPv6 global preferred unicast address.
      */
     public static boolean isIPv6GUA(@NonNull final LinkAddress address) {
         return address.isIpv6() && address.isGlobalPreferred();
