@@ -37,7 +37,6 @@ import static android.net.dhcp.DhcpPacket.MIN_V6ONLY_WAIT_MS;
 import static android.net.dhcp.DhcpResultsParcelableUtil.fromStableParcelable;
 import static android.net.ip.IpClientLinkObserver.CLAT_PREFIX;
 import static android.net.ip.IpClientLinkObserver.CONFIG_SOCKET_RECV_BUFSIZE;
-import static android.net.ip.IpReachabilityMonitor.MIN_NUD_SOLICIT_NUM;
 import static android.net.ip.IpReachabilityMonitor.NUD_MCAST_RESOLICIT_NUM;
 import static android.net.ip.IpReachabilityMonitor.nudEventTypeToInt;
 import static android.net.ipmemorystore.Status.SUCCESS;
@@ -576,6 +575,10 @@ public abstract class IpClientIntegrationTestCommon {
     protected abstract void storeNetworkAttributes(String l2Key, NetworkAttributes na);
 
     protected abstract void assertIpMemoryNeverStoreNetworkAttributes(String l2Key, long timeout);
+
+    protected abstract int readNudSolicitNumInSteadyStateFromResource();
+
+    protected abstract int readNudSolicitNumPostRoamingFromResource();
 
     protected final boolean testSkipped() {
         if (!useNetworkStackSignature() && !TestNetworkStackServiceClient.isSupported()) {
@@ -2865,7 +2868,6 @@ public abstract class IpClientIntegrationTestCommon {
         assertTrue(lp.getDnsServers().contains(dnsServer));
         assertTrue(lp.getDnsServers().contains(SERVER_ADDR));
 
-        clearInvocations(mCb);
         return lp;
     }
 
@@ -3180,6 +3182,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     private void shutdownAndRecreateIpClient() throws Exception {
+        clearInvocations(mCb);
         mIpc.shutdown();
         awaitIpClientShutdown();
         mIpc = makeIpClient();
@@ -3806,7 +3809,8 @@ public abstract class IpClientIntegrationTestCommon {
         prepareIpReachabilityMonitorTest();
 
         final List<NeighborSolicitation> nsList = waitForMultipleNeighborSolicitations();
-        assertEquals(MIN_NUD_SOLICIT_NUM, nsList.size());
+        final int expectedNudSolicitNum = readNudSolicitNumPostRoamingFromResource();
+        assertEquals(expectedNudSolicitNum, nsList.size());
         for (NeighborSolicitation ns : nsList) {
             assertUnicastNeighborSolicitation(ns, ROUTER_MAC /* dstMac */,
                     ROUTER_LINK_LOCAL /* dstIp */, ROUTER_LINK_LOCAL /* targetIp */);
@@ -3849,13 +3853,14 @@ public abstract class IpClientIntegrationTestCommon {
         prepareIpReachabilityMonitorTest(true /* isMulticastResolicitEnabled */);
 
         final List<NeighborSolicitation> nsList = waitForMultipleNeighborSolicitations();
-        int expectedSize = MIN_NUD_SOLICIT_NUM + NUD_MCAST_RESOLICIT_NUM;
-        assertEquals(expectedSize, nsList.size()); // 5 unicast NSes + 3 multicast NSes
-        for (NeighborSolicitation ns : nsList.subList(0, MIN_NUD_SOLICIT_NUM)) {
+        final int expectedNudSolicitNum = readNudSolicitNumPostRoamingFromResource();
+        int expectedSize = expectedNudSolicitNum + NUD_MCAST_RESOLICIT_NUM;
+        assertEquals(expectedSize, nsList.size());
+        for (NeighborSolicitation ns : nsList.subList(0, expectedNudSolicitNum)) {
             assertUnicastNeighborSolicitation(ns, ROUTER_MAC /* dstMac */,
                     ROUTER_LINK_LOCAL /* dstIp */, ROUTER_LINK_LOCAL /* targetIp */);
         }
-        for (NeighborSolicitation ns : nsList.subList(MIN_NUD_SOLICIT_NUM, nsList.size())) {
+        for (NeighborSolicitation ns : nsList.subList(expectedNudSolicitNum, nsList.size())) {
             assertMulticastNeighborSolicitation(ns, ROUTER_LINK_LOCAL /* targetIp */);
         }
     }
@@ -4060,12 +4065,8 @@ public abstract class IpClientIntegrationTestCommon {
         assertEquals(0, lp.getDnsServers().size());
         final List<LinkAddress> addresses = lp.getLinkAddresses();
         assertEquals(1, addresses.size());
-        assertTrue(addresses.get(0).getAddress().isLinkLocalAddress());
-        assertEquals(1, lp.getRoutes().size());
-        final RouteInfo route = lp.getRoutes().get(0);
-        assertNotNull(route);
-        assertTrue(route.getDestination().equals(new IpPrefix("fe80::/64")));
-        assertTrue(route.getGateway().isAnyLocalAddress());
+        assertTrue(addresses.get(0).getAddress().isLinkLocalAddress()); // only IPv6 link-local
+        assertTrue(hasRouteTo(lp, IPV6_LINK_LOCAL_PREFIX)); // fe80::/64 -> :: iface mtu 0
 
         // Check that if an RA is received, no IP addresses, routes, or DNS servers are configured.
         // Instead of waiting some period of time for the RA to be received and checking the
@@ -4217,7 +4218,7 @@ public abstract class IpClientIntegrationTestCommon {
         });
 
         // Send large amount of RAs to overflow the netlink socket receive buffer.
-        for (int i = 0; i < 100; i++) {
+        for (int i = 0; i < 200; i++) {
             sendBasicRouterAdvertisement(false /* waitRs */);
         }
 
