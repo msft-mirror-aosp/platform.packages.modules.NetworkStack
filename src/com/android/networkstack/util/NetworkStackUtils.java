@@ -255,6 +255,13 @@ public class NetworkStackUtils {
     public static final String IP_REACHABILITY_MCAST_RESOLICIT_VERSION =
             "ip_reachability_mcast_resolicit_version";
 
+    /**
+     * Experiment flag to use the RA lifetime calculation fix in aosp/2276160. It can be disabled
+     * if OEM finds additional battery usage and want to use the old buggy behavior again.
+     */
+    public static final String APF_USE_RA_LIFETIME_CALCULATION_FIX_VERSION =
+            "apf_use_ra_lifetime_calculation_fix_version";
+
     static {
         System.loadLibrary("networkstackutilsjni");
     }
