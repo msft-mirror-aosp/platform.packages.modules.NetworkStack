@@ -19,7 +19,6 @@ package com.android.networkstack.util;
 import android.content.Context;
 import android.net.LinkAddress;
 import android.net.MacAddress;
-import android.net.util.SocketUtils;
 import android.system.ErrnoException;
 import android.util.Log;
 
@@ -166,6 +165,11 @@ public class NetworkStackUtils {
     public static final String DHCP_RAPID_COMMIT_ENABLED = "dhcp_rapid_commit_enabled";
 
     /**
+     * Disable dropping DHCP packets with IPv4 MF flag set.
+     */
+    public static final String DHCP_DISABLE_DROP_MF = "dhcp_disable_drop_mf";
+
+    /**
      * Minimum module version at which to enable the DHCP INIT-REBOOT state.
      */
     public static final String DHCP_INIT_REBOOT_VERSION = "dhcp_init_reboot_version";
@@ -192,14 +196,6 @@ public class NetworkStackUtils {
      */
     public static final String DHCP_SLOW_RETRANSMISSION_VERSION =
             "dhcp_slow_retransmission_version";
-
-    /**
-     * Minimum module version at which to enable dismissal CaptivePortalLogin app in validated
-     * network feature. CaptivePortalLogin app will also use validation facilities in
-     * {@link NetworkMonitor} to perform portal validation if feature is enabled.
-     */
-    public static final String DISMISS_PORTAL_IN_VALIDATED_NETWORK =
-            "dismiss_portal_in_validated_network";
 
     /**
      * Experiment flag to enable considering DNS probes returning private IP addresses as failed
@@ -260,24 +256,28 @@ public class NetworkStackUtils {
             "ip_reachability_mcast_resolicit_version";
 
     /**
-     * Experiment flag to wait for IP addresses cleared completely before transition to
-     * IpClient#StoppedState from IpClient#StoppingState.
+     * Experiment flag to attempt to ignore the on-link IPv6 DNS server which fails to respond to
+     * address resolution.
      */
-    public static final String IPCLIENT_CLEAR_ADDRESSES_ON_STOP_VERSION =
-            "ipclient_clear_addresses_on_stop_version";
+    public static final String IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION =
+            "ip_reachability_ignore_incompleted_ipv6_dns_server_version";
+
+    /**
+     * Experiment flag to attempt to ignore the IPv6 default router which fails to respond to
+     * address resolution.
+     */
+    public static final String IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION =
+            "ip_reachability_ignore_incompleted_ipv6_default_router_version";
+
+    /**
+     * Experiment flag to use the RA lifetime calculation fix in aosp/2276160. It can be disabled
+     * if OEM finds additional battery usage and want to use the old buggy behavior again.
+     */
+    public static final String APF_USE_RA_LIFETIME_CALCULATION_FIX_VERSION =
+            "apf_use_ra_lifetime_calculation_fix_version";
 
     static {
         System.loadLibrary("networkstackutilsjni");
-    }
-
-    /**
-     * Close a socket, ignoring any exception while closing.
-     */
-    public static void closeSocketQuietly(FileDescriptor fd) {
-        try {
-            SocketUtils.closeSocket(fd);
-        } catch (IOException ignored) {
-        }
     }
 
     /**
@@ -319,7 +319,7 @@ public class NetworkStackUtils {
     }
 
     /**
-     * Check whether a link address is IPv6 global unicast address.
+     * Check whether a link address is IPv6 global preferred unicast address.
      */
     public static boolean isIPv6GUA(@NonNull final LinkAddress address) {
         return address.isIpv6() && address.isGlobalPreferred();
@@ -328,7 +328,8 @@ public class NetworkStackUtils {
     /**
      * Attaches a socket filter that accepts DHCP packets to the given socket.
      */
-    public static native void attachDhcpFilter(FileDescriptor fd) throws ErrnoException;
+    public static native void attachDhcpFilter(FileDescriptor fd, boolean dropMF)
+            throws ErrnoException;
 
     /**
      * Attaches a socket filter that accepts ICMPv6 router advertisements to the given socket.
