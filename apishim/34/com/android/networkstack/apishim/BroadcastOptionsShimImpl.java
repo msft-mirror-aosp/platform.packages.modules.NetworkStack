@@ -63,4 +63,12 @@ public class BroadcastOptionsShimImpl extends
         mOptions.setDeliveryGroupMatchingKey(namespace, key);
         return this;
     }
+
+    /** See android.app.BroadcastOptions#setDeferralPolicy */
+    @Override
+    public BroadcastOptionsShim setDeferralPolicy(int deferralPolicy)
+            throws UnsupportedApiLevelException {
+        mOptions.setDeferralPolicy(deferralPolicy);
+        return this;
+    }
 }

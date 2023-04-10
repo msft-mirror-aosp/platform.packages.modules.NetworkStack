@@ -16,7 +16,9 @@
 
 package com.android.networkstack.apishim;
 
+import android.content.pm.PackageManager;
 import android.os.Build;
+import android.system.OsConstants;
 
 import androidx.annotation.RequiresApi;
 import androidx.annotation.VisibleForTesting;
@@ -35,4 +37,12 @@ public class ConstantsShim extends com.android.networkstack.apishim.api33.Consta
      */
     @VisibleForTesting
     public static final int VERSION = 34;
+
+    // Constants defined in android.content.pm.PackageManager
+    public static final String PROPERTY_SELF_CERTIFIED_NETWORK_CAPABILITIES =
+            PackageManager.PROPERTY_SELF_CERTIFIED_NETWORK_CAPABILITIES;
+
+    // Constants defined in android.system.OsConstants
+    public static final int IFA_F_MANAGETEMPADDR = OsConstants.IFA_F_MANAGETEMPADDR;
+    public static final int IFA_F_NOPREFIXROUTE = OsConstants.IFA_F_NOPREFIXROUTE;
 }
