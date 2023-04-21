@@ -188,6 +188,7 @@ java_library {
         "framework-connectivity",
         "framework-connectivity-t.stubs.module_lib",
         "framework-tethering",
+        "android.net.ipsec.ike.stubs.module_lib",
     ],
     sdk_version: "module_33",
     visibility: ["//visibility:private"],
@@ -216,6 +217,7 @@ java_library {
         "framework-connectivity",
         "framework-connectivity-t.stubs.module_lib",
         "framework-tethering",
+        "android.net.ipsec.ike.stubs.module_lib"
     ],
     sdk_version: "module_current",
     visibility: ["//visibility:private"],
@@ -243,8 +245,7 @@ java_library {
         "//packages/modules/Connectivity/Tethering",
         "//packages/modules/Connectivity/service",
         "//packages/modules/Connectivity/service-t",
-        "//packages/modules/Connectivity/tests/cts/net",
-        "//packages/modules/Connectivity/tests/cts/hostside/app",
+        "//packages/modules/Connectivity/tests:__subpackages__",
     ],
 }
 
@@ -266,7 +267,7 @@ java_library {
         "//packages/modules/Connectivity/Tethering",
         "//packages/modules/Connectivity/service",
         "//packages/modules/Connectivity/service-t",
-        "//packages/modules/Connectivity/tests/cts:__subpackages__",
+        "//packages/modules/Connectivity/tests:__subpackages__",
     ],
 }
 
@@ -451,6 +452,7 @@ android_app {
     required: [
         "privapp_whitelist_com.android.networkstack",
     ],
+    updatable: true,
     lint: { strict_updatability_linting: true },
 }
 
