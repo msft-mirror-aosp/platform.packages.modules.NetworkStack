@@ -180,7 +180,7 @@ public class Dhcp6Packet {
         }
     }
 
-    private static void skipOption(final ByteBuffer packet, int optionLen)
+    private static void skipOption(@NonNull final ByteBuffer packet, int optionLen)
             throws BufferUnderflowException {
         for (int i = 0; i < optionLen; i++) {
             packet.get();
@@ -297,6 +297,8 @@ public class Dhcp6Packet {
                         statusMsg = readAsciiString(packet, expectedLen - 2, false /* isNullOk */);
                         break;
                     default:
+                        expectedLen = optionLen;
+                        // BufferUnderflowException will be thrown if option is truncated.
                         skipOption(packet, optionLen);
                         break;
                 }
@@ -325,6 +327,12 @@ public class Dhcp6Packet {
             case DHCP6_MESSAGE_TYPE_REPLY:
                 newPacket = new Dhcp6ReplyPacket(transId, clientDuid, serverDuid, iapd);
                 break;
+            case DHCP6_MESSAGE_TYPE_RENEW:
+                newPacket = new Dhcp6RenewPacket(transId, secs, clientDuid, serverDuid, iapd);
+                break;
+            case DHCP6_MESSAGE_TYPE_REBIND:
+                newPacket = new Dhcp6RebindPacket(transId, secs, clientDuid, iapd);
+                break;
             default:
                 throw new ParseException("Unimplemented DHCP6 message type %d" + messageType);
         }
@@ -342,6 +350,15 @@ public class Dhcp6Packet {
         newPacket.mStatusMsg = statusMsg;
 
         return newPacket;
+    }
+
+    /**
+     * Parse a packet from an array of bytes, stopping at the given length.
+     */
+    public static Dhcp6Packet decodePacket(@NonNull final byte[] packet, int length)
+            throws ParseException {
+        final ByteBuffer buffer = ByteBuffer.wrap(packet, 0, length).order(ByteOrder.BIG_ENDIAN);
+        return decodePacket(buffer);
     }
 
     /**
@@ -401,6 +418,25 @@ public class Dhcp6Packet {
             @NonNull final byte[] clientDuid, @NonNull final byte[] serverDuid) {
         final Dhcp6RequestPacket pkt =
                 new Dhcp6RequestPacket(transId, secs, clientDuid, serverDuid, iapd);
+        return pkt.buildPacket();
+    }
+
+    /**
+     * Builds a DHCPv6 RENEW packet from the required specified parameters.
+     */
+    public static ByteBuffer buildRenewPacket(int transId, short secs, @NonNull final byte[] iapd,
+            @NonNull final byte[] clientDuid, @NonNull final byte[] serverDuid) {
+        final Dhcp6RenewPacket pkt =
+                new Dhcp6RenewPacket(transId, secs, clientDuid, serverDuid, iapd);
+        return pkt.buildPacket();
+    }
+
+    /**
+     * Builds a DHCPv6 REBIND packet from the required specified parameters.
+     */
+    public static ByteBuffer buildRebindPacket(int transId, short secs, @NonNull final byte[] iapd,
+            @NonNull final byte[] clientDuid) {
+        final Dhcp6RebindPacket pkt = new Dhcp6RebindPacket(transId, secs, clientDuid, iapd);
         return pkt.buildPacket();
     }
 }
