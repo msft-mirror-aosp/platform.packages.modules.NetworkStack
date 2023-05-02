@@ -46,6 +46,7 @@ import androidx.annotation.Nullable;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.net.module.util.HexDump;
+import com.android.net.module.util.InetAddressUtils;
 import com.android.net.module.util.InterfaceParams;
 import com.android.net.module.util.SharedLog;
 import com.android.net.module.util.ip.NetlinkMonitor;
@@ -539,7 +540,8 @@ public class IpClientLinkObserver implements NetworkObserver {
             if (!mNetlinkEventParsingEnabled) return;
             final String[] addresses = new String[opt.servers.length];
             for (int i = 0; i < opt.servers.length; i++) {
-                addresses[i] = opt.servers[i].getHostAddress();
+                final Inet6Address addr = opt.servers[i];
+                addresses[i] = InetAddressUtils.withScopeId(addr, mIfindex).getHostAddress();
             }
             updateInterfaceDnsServerInfo(opt.header.lifetime, addresses);
         }
