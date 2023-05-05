@@ -23,29 +23,30 @@ import androidx.annotation.NonNull;
 import java.nio.ByteBuffer;
 
 /**
- * DHCPv6 SOLICIT packet class, a client sends a Solicit message to locate DHCPv6 servers.
+ * DHCPv6 ADVERTISE packet class, a server sends an Advertise message to indicate that it's
+ * available for DHCP service, in response to a Solicit message received from a client.
  *
  * https://tools.ietf.org/html/rfc8415#page-24
  */
-public class Dhcp6SolicitPacket extends Dhcp6Packet {
+public class Dhcp6AdvertisePacket extends Dhcp6Packet {
     /**
-     * Generates a solicit packet with the specified parameters.
+     * Generates an advertise packet with the specified parameters.
      */
-    Dhcp6SolicitPacket(int transId, short secs, @NonNull final byte[] clientDuid,
-            final byte[] iapd) {
-        super(transId, secs, clientDuid, null /* serverDuid */, iapd);
+    Dhcp6AdvertisePacket(int transId, @NonNull final byte[] clientDuid,
+            @NonNull final byte[] serverDuid, final byte[] iapd) {
+        super(transId, (short) 0 /* secs */, clientDuid, serverDuid, iapd);
     }
 
     /**
-     * Build a DHCPv6 Solicit message with the specific parameters.
+     * Build a DHCPv6 Advertise message with the specific parameters.
      */
     public ByteBuffer buildPacket() {
         final ByteBuffer packet = ByteBuffer.allocate(DHCP_MAX_LENGTH);
-        final int msgTypeAndTransId = (DHCP6_MESSAGE_TYPE_SOLICIT << 24) | (mTransId & 0x0FFF);
+        final int msgTypeAndTransId = (DHCP6_MESSAGE_TYPE_ADVERTISE << 24) | (mTransId & 0x0FFF);
         packet.putInt(msgTypeAndTransId);
 
-        addTlv(packet, DHCP6_ELAPSED_TIME, mSecs);
         addTlv(packet, DHCP6_CLIENT_IDENTIFIER, mClientDuid);
+        addTlv(packet, DHCP6_SERVER_IDENTIFIER, mServerDuid);
         addTlv(packet, DHCP6_IA_PD, mIaPd);
 
         packet.flip();
