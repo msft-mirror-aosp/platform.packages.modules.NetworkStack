@@ -45,24 +45,20 @@ import com.android.net.module.util.InterfaceParams
 import com.android.net.module.util.IpUtils
 import com.android.net.module.util.Ipv6Utils
 import com.android.net.module.util.NetworkStackConstants.ETHER_ADDR_LEN
+import com.android.net.module.util.NetworkStackConstants.ETHER_HEADER_LEN
 import com.android.net.module.util.NetworkStackConstants.IPV4_ADDR_ANY
 import com.android.net.module.util.NetworkStackConstants.IPV4_CHECKSUM_OFFSET
+import com.android.net.module.util.NetworkStackConstants.IPV4_FLAGS_OFFSET
 import com.android.net.module.util.NetworkStackConstants.IPV4_FLAG_DF
 import com.android.net.module.util.NetworkStackConstants.IPV4_FLAG_MF
-import com.android.net.module.util.NetworkStackConstants.IPV4_FLAGS_OFFSET
+import com.android.net.module.util.NetworkStackConstants.IPV4_HEADER_MIN_LEN
 import com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ALL_NODES_MULTICAST
+import com.android.net.module.util.NetworkStackConstants.UDP_HEADER_LEN
 import com.android.net.module.util.structs.PrefixInformationOption
 import com.android.networkstack.util.NetworkStackUtils
 import com.android.testutils.ArpRequestFilter
-import com.android.testutils.ETHER_HEADER_LENGTH
-import com.android.testutils.IPV4_HEADER_LENGTH
 import com.android.testutils.IPv4UdpFilter
 import com.android.testutils.TapPacketReader
-import com.android.testutils.UDP_HEADER_LENGTH
-import org.junit.After
-import org.junit.Assert.assertArrayEquals
-import org.junit.Before
-import org.junit.Test
 import java.io.FileDescriptor
 import java.net.Inet4Address
 import java.net.Inet6Address
@@ -71,8 +67,13 @@ import java.util.Arrays
 import kotlin.reflect.KClass
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.test.fail
+import org.junit.After
+import org.junit.Assert.assertArrayEquals
+import org.junit.Before
+import org.junit.Test
 
 class NetworkStackUtilsIntegrationTest {
     private val inst by lazy { InstrumentationRegistry.getInstrumentation() }
@@ -153,7 +154,7 @@ class NetworkStackUtilsIntegrationTest {
         assertEquals(TEST_TARGET_MAC, sentTargetAddr, "Destination ethernet address does not match")
 
         val sentDhcpPacket = sentPacket.copyOfRange(
-                ETHER_HEADER_LENGTH + IPV4_HEADER_LENGTH + UDP_HEADER_LENGTH, sentPacket.size)
+                ETHER_HEADER_LEN + IPV4_HEADER_MIN_LEN + UDP_HEADER_LEN, sentPacket.size)
 
         assertArrayEquals("Sent packet != original packet", originalPacket, sentDhcpPacket)
     }
@@ -225,6 +226,41 @@ class NetworkStackUtilsIntegrationTest {
         assertSolicitedNodeMulticastAddress(addr3, TEST_INET6ADDR_3)
     }
 
+    @Test
+    fun testConvertMacAddressToEui64() {
+        // MAC address with universal/local bit set (the first byte: 0xBA)
+        var expected = byteArrayOf(
+                0xB8.toByte(), 0x98.toByte(), 0x76.toByte(), 0xFF.toByte(),
+                0xFE.toByte(), 0x54.toByte(), 0x32.toByte(), 0x10.toByte())
+        val srcEui64 = NetworkStackUtils.macAddressToEui64(TEST_SRC_MAC)
+        assertArrayEquals(expected, srcEui64)
+
+        // MAC address with universal/local bit unset (the first byte: 0x01).
+        expected = byteArrayOf(
+                0x03.toByte(), 0x23.toByte(), 0x45.toByte(), 0xFF.toByte(),
+                0xFE.toByte(), 0x67.toByte(), 0x89.toByte(), 0x0A.toByte())
+        val targetEui64 = NetworkStackUtils.macAddressToEui64(TEST_TARGET_MAC)
+        assertArrayEquals(expected, targetEui64)
+    }
+
+    @Test
+    fun testGenerateIpv6AddressFromEui64() {
+        val eui64 = NetworkStackUtils.macAddressToEui64(TEST_SRC_MAC)
+        var prefix = IpPrefix("2001:db8:1::/80")
+        // Don't accept the prefix length larger than 64.
+        assertNull(NetworkStackUtils.createInet6AddressFromEui64(prefix, eui64))
+
+        prefix = IpPrefix("2001:db8:1::/48")
+        // Don't accept the prefix length less than 64.
+        assertNull(NetworkStackUtils.createInet6AddressFromEui64(prefix, eui64))
+
+        prefix = IpPrefix("2001:db8:1::/64")
+        // IPv6 address string is formed by combining the IPv6 prefix("2001:db8:1::") and
+        // EUI64 converted from TEST_SRC_MAC, see above test for the output EUI64 example.
+        val expected = parseNumericAddress("2001:db8:1::b898:76ff:fe54:3210") as Inet6Address
+        assertEquals(expected, NetworkStackUtils.createInet6AddressFromEui64(prefix, eui64))
+    }
+
     private fun assertSocketReadErrno(msg: String, fd: FileDescriptor, errno: Int) {
         val received = ByteBuffer.allocate(TEST_MTU)
         try {
@@ -243,7 +279,7 @@ class NetworkStackUtilsIntegrationTest {
     }
 
     private fun setMfBit(packet: ByteBuffer, set: Boolean) {
-        val offset = ETHER_HEADER_LENGTH + IPV4_FLAGS_OFFSET
+        val offset = ETHER_HEADER_LEN + IPV4_FLAGS_OFFSET
         var flagOff: Int = packet.getShort(offset).toInt()
         if (set) {
             flagOff = (flagOff or IPV4_FLAG_MF) and IPV4_FLAG_DF.inv()
@@ -252,16 +288,17 @@ class NetworkStackUtilsIntegrationTest {
         }
         packet.putShort(offset, flagOff.toShort())
         // Recalculate the checksum, which requires first clearing the checksum field.
-        val checksumOffset = ETHER_HEADER_LENGTH + IPV4_CHECKSUM_OFFSET
+        val checksumOffset = ETHER_HEADER_LEN + IPV4_CHECKSUM_OFFSET
         packet.putShort(checksumOffset, 0)
-        packet.putShort(checksumOffset, IpUtils.ipChecksum(packet, ETHER_HEADER_LENGTH))
+        packet.putShort(checksumOffset, IpUtils.ipChecksum(packet, ETHER_HEADER_LEN))
     }
 
-    private fun doTestDhcpResponseWithMfBit(dropMf: Boolean) {
+    @Test
+    fun testDhcpResponseWithMfBitDropped() {
         val ifindex = InterfaceParams.getByName(iface.interfaceName).index
         val packetSock = Os.socket(AF_PACKET, SOCK_RAW or SOCK_NONBLOCK, /*protocol=*/0)
         try {
-            NetworkStackUtils.attachDhcpFilter(packetSock, dropMf)
+            NetworkStackUtils.attachDhcpFilter(packetSock)
             val addr = SocketUtils.makePacketSocketAddress(OsConstants.ETH_P_IP, ifindex)
             Os.bind(packetSock, addr)
             val packet = DhcpPacket.buildNakPacket(DhcpPacket.ENCAP_L2, 42,
@@ -270,31 +307,17 @@ class NetworkStackUtilsIntegrationTest {
             setMfBit(packet, true)
             reader.sendResponse(packet)
 
-            // Packet with MF bit set is received iff dropMf is false.
-            if (dropMf) {
-                assertSocketReadErrno("Packet with MF bit should have been dropped",
-                    packetSock, OsConstants.EAGAIN)
-            } else {
-                assertNextPacketOnSocket(packetSock, packet)
-            }
+            // Packet with MF bit set is not received.
+            assertSocketReadErrno("Packet with MF bit should have been dropped",
+                packetSock, OsConstants.EAGAIN)
 
-            // Identical packet, except with MF bit cleared, should always be received.
+            // Identical packet, except with MF bit cleared, should be received.
             setMfBit(packet, false)
             reader.sendResponse(packet)
             assertNextPacketOnSocket(packetSock, packet)
         } finally {
             Os.close(packetSock)
         }
-    }
-
-    @Test
-    fun testDhcpResponseWithMfBitDropped() {
-        doTestDhcpResponseWithMfBit(/*dropMf=*/ true)
-    }
-
-    @Test
-    fun testDhcpResponseWithMfBitReceived() {
-        doTestDhcpResponseWithMfBit(/*dropMf=*/ false)
     }
 }
 
