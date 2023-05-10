@@ -45,6 +45,8 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.net.module.util.HexDump;
+import com.android.net.module.util.InetAddressUtils;
 import com.android.net.module.util.InterfaceParams;
 import com.android.net.module.util.SharedLog;
 import com.android.net.module.util.ip.NetlinkMonitor;
@@ -60,7 +62,6 @@ import com.android.net.module.util.netlink.StructNdOptPref64;
 import com.android.net.module.util.netlink.StructNdOptRdnss;
 import com.android.networkstack.apishim.NetworkInformationShimImpl;
 import com.android.networkstack.apishim.common.NetworkInformationShim;
-import com.android.networkstack.util.NetworkStackUtils;
 import com.android.server.NetworkObserver;
 
 import java.net.Inet6Address;
@@ -121,7 +122,7 @@ public class IpClientLinkObserver implements NetworkObserver {
         void update(boolean linkState);
 
         /**
-         * Called when an IPv6 global unicast address was removed from the interface.
+         * Called when an IPv6 address was removed from the interface.
          *
          * @param addr The removed IPv6 address.
          */
@@ -205,7 +206,8 @@ public class IpClientLinkObserver implements NetworkObserver {
     private void maybeLog(String operation, String iface, LinkAddress address) {
         if (DBG) {
             Log.d(mTag, operation + ": " + address + " on " + iface
-                    + " flags " + address.getFlags() + " scope " + address.getScope());
+                    + " flags " + "0x" + HexDump.toHexString(address.getFlags())
+                    + " scope " + address.getScope());
         }
     }
 
@@ -325,7 +327,7 @@ public class IpClientLinkObserver implements NetworkObserver {
         }
         if (changed) {
             mCallback.update(linkState);
-            if (!add && NetworkStackUtils.isIPv6GUA(address)) {
+            if (!add && address.isIpv6()) {
                 final Inet6Address addr = (Inet6Address) address.getAddress();
                 mCallback.onIpv6AddressRemoved(addr);
             }
@@ -538,7 +540,8 @@ public class IpClientLinkObserver implements NetworkObserver {
             if (!mNetlinkEventParsingEnabled) return;
             final String[] addresses = new String[opt.servers.length];
             for (int i = 0; i < opt.servers.length; i++) {
-                addresses[i] = opt.servers[i].getHostAddress();
+                final Inet6Address addr = opt.servers[i];
+                addresses[i] = InetAddressUtils.withScopeId(addr, mIfindex).getHostAddress();
             }
             updateInterfaceDnsServerInfo(opt.header.lifetime, addresses);
         }

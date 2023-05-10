@@ -17,9 +17,9 @@
 package com.android.networkstack.util;
 
 import android.content.Context;
+import android.net.IpPrefix;
 import android.net.LinkAddress;
 import android.net.MacAddress;
-import android.net.util.SocketUtils;
 import android.system.ErrnoException;
 import android.util.Log;
 
@@ -27,6 +27,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.android.net.module.util.DeviceConfigUtils;
+import com.android.net.module.util.HexDump;
 
 import java.io.FileDescriptor;
 import java.io.IOException;
@@ -194,14 +195,6 @@ public class NetworkStackUtils {
             "dhcp_slow_retransmission_version";
 
     /**
-     * Minimum module version at which to enable dismissal CaptivePortalLogin app in validated
-     * network feature. CaptivePortalLogin app will also use validation facilities in
-     * {@link NetworkMonitor} to perform portal validation if feature is enabled.
-     */
-    public static final String DISMISS_PORTAL_IN_VALIDATED_NETWORK =
-            "dismiss_portal_in_validated_network";
-
-    /**
      * Experiment flag to enable considering DNS probes returning private IP addresses as failed
      * when attempting to detect captive portals.
      *
@@ -259,18 +252,29 @@ public class NetworkStackUtils {
     public static final String IP_REACHABILITY_MCAST_RESOLICIT_VERSION =
             "ip_reachability_mcast_resolicit_version";
 
-    static {
-        System.loadLibrary("networkstackutilsjni");
-    }
+    /**
+     * Experiment flag to attempt to ignore the on-link IPv6 DNS server which fails to respond to
+     * address resolution.
+     */
+    public static final String IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION =
+            "ip_reachability_ignore_incompleted_ipv6_dns_server_version";
 
     /**
-     * Close a socket, ignoring any exception while closing.
+     * Experiment flag to attempt to ignore the IPv6 default router which fails to respond to
+     * address resolution.
      */
-    public static void closeSocketQuietly(FileDescriptor fd) {
-        try {
-            SocketUtils.closeSocket(fd);
-        } catch (IOException ignored) {
-        }
+    public static final String IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION =
+            "ip_reachability_ignore_incompleted_ipv6_default_router_version";
+
+    /**
+     * Experiment flag to use the RA lifetime calculation fix in aosp/2276160. It can be disabled
+     * if OEM finds additional battery usage and want to use the old buggy behavior again.
+     */
+    public static final String APF_USE_RA_LIFETIME_CALCULATION_FIX_VERSION =
+            "apf_use_ra_lifetime_calculation_fix_version";
+
+    static {
+        System.loadLibrary("networkstackutilsjni");
     }
 
     /**
@@ -312,10 +316,51 @@ public class NetworkStackUtils {
     }
 
     /**
-     * Check whether a link address is IPv6 global unicast address.
+     * Check whether a link address is IPv6 global preferred unicast address.
      */
     public static boolean isIPv6GUA(@NonNull final LinkAddress address) {
         return address.isIpv6() && address.isGlobalPreferred();
+    }
+
+    /**
+     * Convert 48bits MAC address to 64bits link-layer address(EUI64).
+     *     1. insert the 0xFFFE in the middle of mac address
+     *     2. flip the 7th bit(universal/local) of the first byte.
+     */
+    public static byte[] macAddressToEui64(@NonNull final MacAddress hwAddr) {
+        final byte[] eui64 = new byte[8];
+        final byte[] mac48 = hwAddr.toByteArray();
+        System.arraycopy(mac48 /* src */, 0 /* srcPos */, eui64 /* dest */, 0 /* destPos */,
+                3 /* length */);
+        eui64[3] = (byte) 0xFF;
+        eui64[4] = (byte) 0xFE;
+        System.arraycopy(mac48 /* src */, 3 /* srcPos */, eui64 /* dest */, 5 /* destPos */,
+                3 /* length */);
+        eui64[0] = (byte) (eui64[0] ^ 0x02); // flip 7th bit
+        return eui64;
+    }
+
+    /**
+     * Generate an IPv6 address based on the given prefix(/64) and stable interface
+     * identifier(EUI64).
+     */
+    public static Inet6Address createInet6AddressFromEui64(@NonNull final IpPrefix prefix,
+            @NonNull final byte[] eui64) {
+        if (prefix.getPrefixLength() != 64) {
+            Log.e(TAG, "Invalid IPv6 prefix length " + prefix.getPrefixLength());
+            return null;
+        }
+        final byte[] address = new byte[16];
+        System.arraycopy(prefix.getRawAddress() /* src */, 0 /* srcPos */, address /* dest */,
+                0 /* destPos*/, 8 /* length */);
+        System.arraycopy(eui64 /* src */, 0 /* srcPos */, address /* dest */, 8 /* destPos */,
+                eui64.length);
+        try {
+            return (Inet6Address) InetAddress.getByAddress(address);
+        } catch (UnknownHostException e) {
+            Log.e(TAG, "Invalid IPv6 address " + HexDump.toHexString(address), e);
+            return null;
+        }
     }
 
     /**

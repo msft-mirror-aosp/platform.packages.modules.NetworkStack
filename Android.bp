@@ -45,10 +45,6 @@ package {
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
-// In some branches, this may be module_current instead of module_33 if the SDK prebuilts are not
-// yet dropped there, meaning module_33 cannot be used yet.
-module_33_version = "module_33"
-
 // TODO: remove this default and replace with ConnectivityNextEnableDefaults. This will need to be
 // done separately in each branch due to merge conflicts.
 // Defaults to enable/disable java targets that depend on
@@ -67,6 +63,7 @@ java_defaults {
     min_sdk_version: "29",
     sdk_version: "module_current",
     libs: [
+        "framework-configinfrastructure",
         "framework-connectivity",
         "framework-connectivity-t",
         "framework-statsd",
@@ -85,7 +82,7 @@ java_defaults {
 java_defaults {
     name: "NetworkStackReleaseApiLevel",
     defaults:["NetworkStackReleaseTargetSdk"],
-    sdk_version: module_33_version,
+    sdk_version: "module_33",
     libs: [
         "framework-connectivity",
         "framework-connectivity-t",
@@ -178,7 +175,7 @@ java_library {
 
 java_library {
     name: "NetworkStackApi33Shims",
-    defaults: ["NetworkStackShimsDefaults", "ConnectivityNextEnableDefaults"],
+    defaults: ["NetworkStackShimsDefaults"],
     srcs: [
         "apishim/33/**/*.java",
     ],
@@ -191,8 +188,9 @@ java_library {
         "framework-connectivity",
         "framework-connectivity-t.stubs.module_lib",
         "framework-tethering",
+        "android.net.ipsec.ike.stubs.module_lib",
     ],
-    sdk_version: module_33_version,
+    sdk_version: "module_33",
     visibility: ["//visibility:private"],
 }
 
@@ -219,6 +217,7 @@ java_library {
         "framework-connectivity",
         "framework-connectivity-t.stubs.module_lib",
         "framework-tethering",
+        "android.net.ipsec.ike.stubs.module_lib"
     ],
     sdk_version: "module_current",
     visibility: ["//visibility:private"],
@@ -246,8 +245,7 @@ java_library {
         "//packages/modules/Connectivity/Tethering",
         "//packages/modules/Connectivity/service",
         "//packages/modules/Connectivity/service-t",
-        "//packages/modules/Connectivity/tests/cts/net",
-        "//packages/modules/Connectivity/tests/cts/hostside/app",
+        "//packages/modules/Connectivity/tests:__subpackages__",
     ],
 }
 
@@ -269,7 +267,7 @@ java_library {
         "//packages/modules/Connectivity/Tethering",
         "//packages/modules/Connectivity/service",
         "//packages/modules/Connectivity/service-t",
-        "//packages/modules/Connectivity/tests/cts:__subpackages__",
+        "//packages/modules/Connectivity/tests:__subpackages__",
     ],
 }
 
@@ -297,7 +295,6 @@ java_defaults {
         "net-utils-device-common-ip",
         "net-utils-device-common-netlink",
     ],
-    plugins: ["java_api_finder"],
 }
 
 // The versions of the android library containing network stack code compiled for each SDK variant.
@@ -455,6 +452,7 @@ android_app {
     required: [
         "privapp_whitelist_com.android.networkstack",
     ],
+    updatable: true,
     lint: { strict_updatability_linting: true },
 }
 

@@ -82,6 +82,7 @@ android_test {
     platform_apis: true,
     test_suites: ["device-tests"],
     jarjar_rules: ":NetworkStackJarJarRules",
+    host_required: ["net-tests-utils-host-common"],
     test_config_template: "AndroidTestTemplate_Integration.xml",
 }
 
@@ -98,12 +99,13 @@ android_test {
         "signature/**/*.kt",
     ],
     static_libs: [
-        "NetworkStackApiCurrentLib",
+        "NetworkStackApiStableLib",
     ],
     certificate: "networkstack",
     platform_apis: true,
     test_suites: ["device-tests"],
     jarjar_rules: ":NetworkStackJarJarRules",
+    host_required: ["net-tests-utils-host-common"],
     test_config_template: "AndroidTestTemplate_Integration.xml",
 }
 
@@ -119,12 +121,15 @@ android_test {
         "root/**/*.kt",
     ],
     static_libs: [
-        "NetworkStackApiCurrentLib",
+        "NetworkStackApiStableLib",
     ],
     platform_apis: true,
     test_suites: ["general-tests", "mts-networking"],
+    compile_multilib: "both",
     manifest: "AndroidManifest_root.xml",
     jarjar_rules: ":NetworkStackJarJarRules",
+    host_required: ["net-tests-utils-host-common"],
+    test_config_template: "AndroidTestTemplate_Integration.xml",
 }
 
 // Special version of the network stack tests that includes all tests necessary for code coverage
