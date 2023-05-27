@@ -28,6 +28,7 @@ import static com.android.net.module.util.netlink.NetlinkConstants.RTN_UNICAST;
 import static com.android.net.module.util.netlink.NetlinkConstants.RTPROT_KERNEL;
 import static com.android.net.module.util.netlink.NetlinkConstants.RTPROT_RA;
 import static com.android.net.module.util.netlink.NetlinkConstants.RT_SCOPE_UNIVERSE;
+import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_ACCEPT_IPV6_LINK_LOCAL_DNS_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_PARSE_NETLINK_EVENTS_VERSION;
 
 import android.app.AlarmManager;
@@ -46,6 +47,7 @@ import androidx.annotation.Nullable;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.net.module.util.HexDump;
+import com.android.net.module.util.InetAddressUtils;
 import com.android.net.module.util.InterfaceParams;
 import com.android.net.module.util.SharedLog;
 import com.android.net.module.util.ip.NetlinkMonitor;
@@ -65,7 +67,6 @@ import com.android.server.NetworkObserver;
 
 import java.net.Inet6Address;
 import java.net.InetAddress;
-import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -201,6 +202,11 @@ public class IpClientLinkObserver implements NetworkObserver {
 
     public void shutdown() {
         mHandler.post(mNetlinkMonitor::stop);
+    }
+
+    private boolean isIpv6LinkLocalDnsAccepted() {
+        return mDependencies.isFeatureEnabled(mContext,
+                IPCLIENT_ACCEPT_IPV6_LINK_LOCAL_DNS_VERSION, true /* default value */);
     }
 
     private void maybeLog(String operation, String iface, LinkAddress address) {
@@ -540,16 +546,9 @@ public class IpClientLinkObserver implements NetworkObserver {
             if (!mNetlinkEventParsingEnabled) return;
             final String[] addresses = new String[opt.servers.length];
             for (int i = 0; i < opt.servers.length; i++) {
-                Inet6Address addr = (Inet6Address) opt.servers[i];
-                if (addr.isLinkLocalAddress()) {
-                    try {
-                        addr = Inet6Address.getByAddress(null /* hostname */, addr.getAddress(),
-                                mIfindex);
-                    } catch (UnknownHostException impossible) {
-                        Log.wtf("Cannot construct scoped Inet6Address with Inet6Address.getAddress("
-                                + addr.getHostAddress() + "): ", impossible);
-                    }
-                }
+                final Inet6Address addr = isIpv6LinkLocalDnsAccepted()
+                        ? InetAddressUtils.withScopeId(opt.servers[i], mIfindex)
+                        : opt.servers[i];
                 addresses[i] = addr.getHostAddress();
             }
             updateInterfaceDnsServerInfo(opt.header.lifetime, addresses);
