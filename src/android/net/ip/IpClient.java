@@ -21,6 +21,7 @@ import static android.net.dhcp.DhcpResultsParcelableUtil.toStableParcelable;
 import static android.net.ip.IIpClient.PROV_IPV4_DISABLED;
 import static android.net.ip.IIpClient.PROV_IPV6_DISABLED;
 import static android.net.ip.IIpClient.PROV_IPV6_LINKLOCAL;
+import static android.net.ip.IIpClient.PROV_IPV6_SLAAC;
 import static android.net.ip.IIpClientCallbacks.DTIM_MULTIPLIER_RESET;
 import static android.net.ip.IpReachabilityMonitor.INVALID_REACHABILITY_LOSS_TYPE;
 import static android.net.ip.IpReachabilityMonitor.nudEventTypeToInt;
@@ -642,7 +643,7 @@ public class IpClient extends StateMachine {
     private String mCluster; // The cluster for this network, for writing into the memory store
     private boolean mMulticastFiltering;
     private long mStartTimeMillis;
-    private long mInitialProvisioningEndTimeMillis;
+    private long mIPv6ProvisioningDtimGracePeriodMillis;
     private MacAddress mCurrentBssid;
     private boolean mHasDisabledIpv6OrAcceptRaOnProvLoss;
     private Integer mDadTransmits = null;
@@ -995,7 +996,7 @@ public class IpClient extends StateMachine {
 
     private boolean isMulticastNsEnabled() {
         return mDependencies.isFeatureEnabled(mContext, IPCLIENT_MULTICAST_NS_VERSION,
-                false /* defaultEnabled */);
+                true /* defaultEnabled */);
     }
 
     @VisibleForTesting
@@ -1868,7 +1869,10 @@ public class IpClient extends StateMachine {
             dispatchCallback(delta, newLp);
             // We cannot do this along with onProvisioningSuccess callback, because the network
             // can become dual-stack after a success IPv6 provisioning, and the multiplier also
-            // needs to be updated upon the loss of IPv4 and/or IPv6 provisioning.
+            // needs to be updated upon the loss of IPv4 and/or IPv6 provisioning. The multiplier
+            // has been initialized with DTIM_MULTIPLIER_RESET before starting provisioning, it
+            // gets updated on the first LinkProperties update (which usually happens when the
+            // IPv6 link-local address appears).
             updateMaxDtimMultiplier();
         }
         return (delta != PROV_CHANGE_LOST_PROVISIONING);
@@ -2265,7 +2269,7 @@ public class IpClient extends StateMachine {
             if (mMaxDtimMultiplier != DTIM_MULTIPLIER_RESET) {
                 mCallback.setMaxDtimMultiplier(DTIM_MULTIPLIER_RESET);
                 mMaxDtimMultiplier = DTIM_MULTIPLIER_RESET;
-                mInitialProvisioningEndTimeMillis = 0;
+                mIPv6ProvisioningDtimGracePeriodMillis = 0;
             }
         }
 
@@ -2445,19 +2449,24 @@ public class IpClient extends StateMachine {
         public void enter() {
             mIpProvisioningMetrics.reset();
             mStartTimeMillis = SystemClock.elapsedRealtime();
-            final int delay = mDependencies.getDeviceConfigPropertyInt(
-                    CONFIG_INITIAL_PROVISIONING_DTIM_DELAY_MS,
-                    DEFAULT_INITIAL_PROVISIONING_DTIM_DELAY_MS);
-            mInitialProvisioningEndTimeMillis = mStartTimeMillis + delay;
 
             if (mConfiguration.mProvisioningTimeoutMs > 0) {
                 final long alarmTime = SystemClock.elapsedRealtime()
                         + mConfiguration.mProvisioningTimeoutMs;
                 mProvisioningTimeoutAlarm.schedule(alarmTime);
             }
-            // Send a delay message to wait for IP provisioning to complete eventually and set the
-            // specific DTIM multiplier by checking the target network type.
-            sendMessageDelayed(CMD_SET_DTIM_MULTIPLIER_AFTER_DELAY, delay);
+
+            // There is no need to temporarlily lower the DTIM multiplier in IPv6 link-local
+            // only mode or when IPv6 is disabled.
+            if (mConfiguration.mIPv6ProvisioningMode == PROV_IPV6_SLAAC) {
+                // Send a delay message to wait for IP provisioning to complete eventually and
+                // set the specific DTIM multiplier by checking the target network type.
+                final int delay = mDependencies.getDeviceConfigPropertyInt(
+                        CONFIG_INITIAL_PROVISIONING_DTIM_DELAY_MS,
+                        DEFAULT_INITIAL_PROVISIONING_DTIM_DELAY_MS);
+                mIPv6ProvisioningDtimGracePeriodMillis = mStartTimeMillis + delay;
+                sendMessageDelayed(CMD_SET_DTIM_MULTIPLIER_AFTER_DELAY, delay);
+            }
         }
 
         @Override
@@ -2864,7 +2873,7 @@ public class IpClient extends StateMachine {
                     CONFIG_MULTICAST_LOCK_MAX_DTIM_MULTIPLIER,
                     DEFAULT_MULTICAST_LOCK_MAX_DTIM_MULTIPLIER);
         } else if (!hasIpv6Addr
-                && (SystemClock.elapsedRealtime() < mInitialProvisioningEndTimeMillis)) {
+                && (SystemClock.elapsedRealtime() < mIPv6ProvisioningDtimGracePeriodMillis)) {
             // IPv6 provisioning may or may not complete soon in the future, we don't know when
             // it will complete, however, setting multiplier to a high value will cause higher
             // RA packet loss, that increases the overall IPv6 provisioning latency. So just set

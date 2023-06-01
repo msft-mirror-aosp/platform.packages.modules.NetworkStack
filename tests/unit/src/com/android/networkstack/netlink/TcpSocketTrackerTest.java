@@ -21,8 +21,6 @@ import static android.net.util.DataStallUtils.DEFAULT_TCP_PACKETS_FAIL_PERCENTAG
 import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
 import static android.system.OsConstants.AF_INET;
 
-import static com.android.net.module.util.netlink.NetlinkConstants.SOCKDIAG_MSG_HEADER_SIZE;
-
 import static junit.framework.Assert.assertEquals;
 import static junit.framework.Assert.assertFalse;
 import static junit.framework.Assert.assertTrue;
@@ -75,6 +73,7 @@ import org.mockito.MockitoAnnotations;
 import java.io.FileDescriptor;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.ArrayList;
 
 // TODO: Add more tests for missing coverage.
 @RunWith(AndroidJUnit4.class)
@@ -117,6 +116,9 @@ public class TcpSocketTrackerTest {
     private static final int TEST_NETID1_FWMARK = 0x0A85;
     private static final int TEST_NETID2_FWMARK = 0x1A85;
     private static final int NETID_MASK = 0xffff;
+    private static final int TEST_UID1 = 1234;
+    private static final int TEST_DST_PORT = 29113;
+    private static final long TEST_COOKIE1 = 43387759684916L;
     @Mock private TcpSocketTracker.Dependencies mDependencies;
     @Mock private INetd mNetd;
     private final Network mNetwork = new Network(TEST_NETID1);
@@ -174,15 +176,18 @@ public class TcpSocketTrackerTest {
     @Test
     public void testParseSockInfo() {
         final ByteBuffer buffer = getByteBuffer(SOCK_DIAG_TCP_INET_ZERO_LOST_BYTES);
-        final TcpSocketTracker tst = new TcpSocketTracker(mDependencies, mNetwork);
-        buffer.position(SOCKDIAG_MSG_HEADER_SIZE);
-        final TcpSocketTracker.SocketInfo parsed =
-                tst.parseSockInfo(buffer, AF_INET, 276, 100L);
+        final ArrayList<TcpSocketTracker.SocketInfo> infoList = new ArrayList<>();
+        TcpSocketTracker.parseMessage(buffer, AF_INET, infoList, 100L);
+        assertEquals(1, infoList.size());
+        final TcpSocketTracker.SocketInfo parsed = infoList.get(0);
 
         assertEquals(parsed.tcpInfo, TEST_TCPINFO);
         assertEquals(parsed.fwmark, 789125);
         assertEquals(parsed.updateTime, 100);
         assertEquals(parsed.ipFamily, AF_INET);
+        assertEquals(parsed.uid, TEST_UID1);
+        assertEquals(parsed.cookie, TEST_COOKIE1);
+        assertEquals(parsed.dstPort, TEST_DST_PORT);
     }
 
     @Test
@@ -410,8 +415,8 @@ public class TcpSocketTrackerTest {
                 "00" +              // timer
                 "00" +              // retrans
                 // inet_diag_sockid
-                "DEA5" +            // idiag_sport = 42462
-                "71B9" +            // idiag_dport = 47473
+                "DEA5" +            // idiag_sport = 56997
+                "71B9" +            // idiag_dport = 29113
                 "0a006402000000000000000000000000" + // idiag_src = 10.0.100.2
                 "08080808000000000000000000000000" + // idiag_dst = 8.8.8.8
                 "00000000" +            // idiag_if
@@ -419,7 +424,7 @@ public class TcpSocketTrackerTest {
                 "00000000" +            // idiag_expires
                 "00000000" +            // idiag_rqueue
                 "00000000" +            // idiag_wqueue
-                "00000000" +            // idiag_uid
+                "D2040000" +            // idiag_uid = 1234
                 "00000000" +            // idiag_inode
                 // rtattr
                 "0500" +            // len = 5
