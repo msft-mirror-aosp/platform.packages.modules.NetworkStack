@@ -21,6 +21,7 @@ import static android.net.dhcp.DhcpResultsParcelableUtil.toStableParcelable;
 import static android.net.ip.IIpClient.PROV_IPV4_DISABLED;
 import static android.net.ip.IIpClient.PROV_IPV6_DISABLED;
 import static android.net.ip.IIpClient.PROV_IPV6_LINKLOCAL;
+import static android.net.ip.IIpClient.PROV_IPV6_SLAAC;
 import static android.net.ip.IIpClientCallbacks.DTIM_MULTIPLIER_RESET;
 import static android.net.ip.IpReachabilityMonitor.INVALID_REACHABILITY_LOSS_TYPE;
 import static android.net.ip.IpReachabilityMonitor.nudEventTypeToInt;
@@ -486,6 +487,7 @@ public class IpClient extends StateMachine {
     private static final int CMD_COMPLETE_PRECONNECTION = 16;
     private static final int CMD_UPDATE_L2INFORMATION = 17;
     private static final int CMD_SET_DTIM_MULTIPLIER_AFTER_DELAY = 18;
+    private static final int CMD_UPDATE_APF_CAPABILITIES = 19;
 
     private static final int ARG_LINKPROP_CHANGED_LINKSTATE_DOWN = 0;
     private static final int ARG_LINKPROP_CHANGED_LINKSTATE_UP = 1;
@@ -642,11 +644,12 @@ public class IpClient extends StateMachine {
     private String mCluster; // The cluster for this network, for writing into the memory store
     private boolean mMulticastFiltering;
     private long mStartTimeMillis;
-    private long mInitialProvisioningEndTimeMillis;
+    private long mIPv6ProvisioningDtimGracePeriodMillis;
     private MacAddress mCurrentBssid;
     private boolean mHasDisabledIpv6OrAcceptRaOnProvLoss;
     private Integer mDadTransmits = null;
     private int mMaxDtimMultiplier = DTIM_MULTIPLIER_RESET;
+    private ApfCapabilities mCurrentApfCapabilities;
 
     /**
      * Reading the snapshot is an asynchronous operation initiated by invoking
@@ -942,6 +945,11 @@ public class IpClient extends StateMachine {
             enforceNetworkStackCallingPermission();
             IpClient.this.updateLayer2Information(info);
         }
+        @Override
+        public void updateApfCapabilities(ApfCapabilities apfCapabilities) {
+            enforceNetworkStackCallingPermission();
+            IpClient.this.updateApfCapabilities(apfCapabilities);
+        }
 
         @Override
         public int getInterfaceVersion() {
@@ -995,7 +1003,7 @@ public class IpClient extends StateMachine {
 
     private boolean isMulticastNsEnabled() {
         return mDependencies.isFeatureEnabled(mContext, IPCLIENT_MULTICAST_NS_VERSION,
-                false /* defaultEnabled */);
+                true /* defaultEnabled */);
     }
 
     @VisibleForTesting
@@ -1052,6 +1060,7 @@ public class IpClient extends StateMachine {
 
         mCurrentBssid = getInitialBssid(req.mLayer2Info, req.mScanResultInfo,
                 ShimUtils.isAtLeastS());
+        mCurrentApfCapabilities = req.mApfCapabilities;
         if (req.mLayer2Info != null) {
             mL2Key = req.mLayer2Info.mL2Key;
             mCluster = req.mLayer2Info.mCluster;
@@ -1173,6 +1182,19 @@ public class IpClient extends StateMachine {
      */
     public void updateLayer2Information(@NonNull Layer2InformationParcelable info) {
         sendMessage(CMD_UPDATE_L2INFORMATION, info);
+    }
+
+    /**
+     * Update the APF capabilities.
+     *
+     * This method will update the APF capabilities used in IpClient and decide if a new APF
+     * program should be installed to filter the incoming packets based on that. So far this
+     * method only allows for the APF capabilities to go from null to non-null, and no other
+     * changes are allowed. One use case is when WiFi interface switches from secondary to
+     * primary in STA+STA mode.
+     */
+    public void updateApfCapabilities(@NonNull ApfCapabilities apfCapabilities) {
+        sendMessage(CMD_UPDATE_APF_CAPABILITIES, apfCapabilities);
     }
 
     /**
@@ -1868,7 +1890,10 @@ public class IpClient extends StateMachine {
             dispatchCallback(delta, newLp);
             // We cannot do this along with onProvisioningSuccess callback, because the network
             // can become dual-stack after a success IPv6 provisioning, and the multiplier also
-            // needs to be updated upon the loss of IPv4 and/or IPv6 provisioning.
+            // needs to be updated upon the loss of IPv4 and/or IPv6 provisioning. The multiplier
+            // has been initialized with DTIM_MULTIPLIER_RESET before starting provisioning, it
+            // gets updated on the first LinkProperties update (which usually happens when the
+            // IPv6 link-local address appears).
             updateMaxDtimMultiplier();
         }
         return (delta != PROV_CHANGE_LOST_PROVISIONING);
@@ -2173,6 +2198,45 @@ public class IpClient extends StateMachine {
         mCurrentBssid = info.bssid;
     }
 
+    @Nullable
+    private ApfFilter maybeCreateApfFilter(final ApfCapabilities apfCapabilities) {
+        ApfFilter.ApfConfiguration apfConfig = new ApfFilter.ApfConfiguration();
+        apfConfig.apfCapabilities = apfCapabilities;
+        apfConfig.multicastFilter = mMulticastFiltering;
+        // Get the Configuration for ApfFilter from Context
+        // Resource settings were moved from ApfCapabilities APIs to NetworkStack resources in S
+        if (ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.R)) {
+            final Resources res = mContext.getResources();
+            apfConfig.ieee802_3Filter = res.getBoolean(R.bool.config_apfDrop802_3Frames);
+            apfConfig.ethTypeBlackList = res.getIntArray(R.array.config_apfEthTypeDenyList);
+        } else {
+            apfConfig.ieee802_3Filter = ApfCapabilities.getApfDrop8023Frames();
+            apfConfig.ethTypeBlackList = ApfCapabilities.getApfEtherTypeBlackList();
+        }
+
+        apfConfig.minRdnssLifetimeSec = mMinRdnssLifetimeSec;
+        return mDependencies.maybeCreateApfFilter(mContext, apfConfig, mInterfaceParams,
+                mCallback);
+    }
+
+    private boolean handleUpdateApfCapabilities(@NonNull final ApfCapabilities apfCapabilities) {
+        // For the use case where the wifi interface switches from secondary to primary, the
+        // secondary interface does not support APF by default see the overlay config about
+        // {@link config_wifiEnableApfOnNonPrimarySta}. so we should see empty ApfCapabilities
+        // in {@link ProvisioningConfiguration} when wifi starts provisioning on the secondary
+        // interface. For other cases, we should not accept the updateApfCapabilities call.
+        if (mCurrentApfCapabilities != null || apfCapabilities == null) {
+            Log.wtf(mTag, "current ApfCapabilities " + mCurrentApfCapabilities
+                    + " is not null or new ApfCapabilities " + apfCapabilities + " is null");
+            return false;
+        }
+        if (mApfFilter != null) {
+            mApfFilter.shutdown();
+        }
+        mCurrentApfCapabilities = apfCapabilities;
+        return apfCapabilities != null;
+    }
+
     class StoppedState extends State {
         @Override
         public void enter() {
@@ -2265,7 +2329,7 @@ public class IpClient extends StateMachine {
             if (mMaxDtimMultiplier != DTIM_MULTIPLIER_RESET) {
                 mCallback.setMaxDtimMultiplier(DTIM_MULTIPLIER_RESET);
                 mMaxDtimMultiplier = DTIM_MULTIPLIER_RESET;
-                mInitialProvisioningEndTimeMillis = 0;
+                mIPv6ProvisioningDtimGracePeriodMillis = 0;
             }
         }
 
@@ -2445,24 +2509,30 @@ public class IpClient extends StateMachine {
         public void enter() {
             mIpProvisioningMetrics.reset();
             mStartTimeMillis = SystemClock.elapsedRealtime();
-            final int delay = mDependencies.getDeviceConfigPropertyInt(
-                    CONFIG_INITIAL_PROVISIONING_DTIM_DELAY_MS,
-                    DEFAULT_INITIAL_PROVISIONING_DTIM_DELAY_MS);
-            mInitialProvisioningEndTimeMillis = mStartTimeMillis + delay;
 
             if (mConfiguration.mProvisioningTimeoutMs > 0) {
                 final long alarmTime = SystemClock.elapsedRealtime()
                         + mConfiguration.mProvisioningTimeoutMs;
                 mProvisioningTimeoutAlarm.schedule(alarmTime);
             }
-            // Send a delay message to wait for IP provisioning to complete eventually and set the
-            // specific DTIM multiplier by checking the target network type.
-            sendMessageDelayed(CMD_SET_DTIM_MULTIPLIER_AFTER_DELAY, delay);
+
+            // There is no need to temporarlily lower the DTIM multiplier in IPv6 link-local
+            // only mode or when IPv6 is disabled.
+            if (mConfiguration.mIPv6ProvisioningMode == PROV_IPV6_SLAAC) {
+                // Send a delay message to wait for IP provisioning to complete eventually and
+                // set the specific DTIM multiplier by checking the target network type.
+                final int delay = mDependencies.getDeviceConfigPropertyInt(
+                        CONFIG_INITIAL_PROVISIONING_DTIM_DELAY_MS,
+                        DEFAULT_INITIAL_PROVISIONING_DTIM_DELAY_MS);
+                mIPv6ProvisioningDtimGracePeriodMillis = mStartTimeMillis + delay;
+                sendMessageDelayed(CMD_SET_DTIM_MULTIPLIER_AFTER_DELAY, delay);
+            }
         }
 
         @Override
         public void exit() {
             mProvisioningTimeoutAlarm.cancel();
+            mCurrentApfCapabilities = null;
 
             // Record metrics information once this provisioning has completed due to certain
             // reason (normal termination, provisioning timeout, lost provisioning and etc).
@@ -2494,6 +2564,13 @@ public class IpClient extends StateMachine {
                     handleUpdateL2Information((Layer2InformationParcelable) msg.obj);
                     break;
 
+                // Only update the current ApfCapabilities but do not create and start APF
+                // filter until transition to RunningState, actually we should always do that
+                // in RunningState.
+                case CMD_UPDATE_APF_CAPABILITIES:
+                    handleUpdateApfCapabilities((ApfCapabilities) msg.obj);
+                    break;
+
                 case EVENT_PROVISIONING_TIMEOUT:
                     handleProvisioningFailure(DisconnectCode.DC_PROVISIONING_TIMEOUT);
                     break;
@@ -2521,23 +2598,7 @@ public class IpClient extends StateMachine {
 
         @Override
         public void enter() {
-            ApfFilter.ApfConfiguration apfConfig = new ApfFilter.ApfConfiguration();
-            apfConfig.apfCapabilities = mConfiguration.mApfCapabilities;
-            apfConfig.multicastFilter = mMulticastFiltering;
-            // Get the Configuration for ApfFilter from Context
-            // Resource settings were moved from ApfCapabilities APIs to NetworkStack resources in S
-            if (ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.R)) {
-                final Resources res = mContext.getResources();
-                apfConfig.ieee802_3Filter = res.getBoolean(R.bool.config_apfDrop802_3Frames);
-                apfConfig.ethTypeBlackList = res.getIntArray(R.array.config_apfEthTypeDenyList);
-            } else {
-                apfConfig.ieee802_3Filter = ApfCapabilities.getApfDrop8023Frames();
-                apfConfig.ethTypeBlackList = ApfCapabilities.getApfEtherTypeBlackList();
-            }
-
-            apfConfig.minRdnssLifetimeSec = mMinRdnssLifetimeSec;
-            mApfFilter = mDependencies.maybeCreateApfFilter(mContext, apfConfig, mInterfaceParams,
-                    mCallback);
+            mApfFilter = maybeCreateApfFilter(mCurrentApfCapabilities);
             // TODO: investigate the effects of any multicast filtering racing/interfering with the
             // rest of this IP configuration startup.
             if (mApfFilter == null) {
@@ -2817,6 +2878,13 @@ public class IpClient extends StateMachine {
                     updateMaxDtimMultiplier();
                     break;
 
+                case CMD_UPDATE_APF_CAPABILITIES:
+                    final ApfCapabilities apfCapabilities = (ApfCapabilities) msg.obj;
+                    if (handleUpdateApfCapabilities(apfCapabilities)) {
+                        mApfFilter = maybeCreateApfFilter(apfCapabilities);
+                    }
+                    break;
+
                 default:
                     return NOT_HANDLED;
             }
@@ -2864,7 +2932,7 @@ public class IpClient extends StateMachine {
                     CONFIG_MULTICAST_LOCK_MAX_DTIM_MULTIPLIER,
                     DEFAULT_MULTICAST_LOCK_MAX_DTIM_MULTIPLIER);
         } else if (!hasIpv6Addr
-                && (SystemClock.elapsedRealtime() < mInitialProvisioningEndTimeMillis)) {
+                && (SystemClock.elapsedRealtime() < mIPv6ProvisioningDtimGracePeriodMillis)) {
             // IPv6 provisioning may or may not complete soon in the future, we don't know when
             // it will complete, however, setting multiplier to a high value will cause higher
             // RA packet loss, that increases the overall IPv6 provisioning latency. So just set
