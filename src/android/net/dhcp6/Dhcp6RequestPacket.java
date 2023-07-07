@@ -42,11 +42,11 @@ public class Dhcp6RequestPacket extends Dhcp6Packet {
      */
     public ByteBuffer buildPacket() {
         final ByteBuffer packet = ByteBuffer.allocate(DHCP_MAX_LENGTH);
-        final int msgTypeAndTransId = (DHCP6_MESSAGE_TYPE_REQUEST << 24) | (mTransId & 0x0FFF);
+        final int msgTypeAndTransId = (DHCP6_MESSAGE_TYPE_REQUEST << 24) | mTransId;
         packet.putInt(msgTypeAndTransId);
 
-        addTlv(packet, DHCP6_SERVER_IDENTIFIER, getServerDuid());
-        addTlv(packet, DHCP6_CLIENT_IDENTIFIER, getClientDuid());
+        addTlv(packet, DHCP6_SERVER_IDENTIFIER, mServerDuid);
+        addTlv(packet, DHCP6_CLIENT_IDENTIFIER, mClientDuid);
         addTlv(packet, DHCP6_ELAPSED_TIME, mSecs);
         addTlv(packet, DHCP6_IA_PD, mIaPd);
 
