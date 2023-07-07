@@ -45,9 +45,9 @@ package {
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
-// In some branches, this may be module_current instead of module_33 if the SDK prebuilts are not
-// yet dropped there, meaning module_33 cannot be used yet.
-module_33_version = "module_33"
+// In some branches, this may be module_current instead of module_34 if the SDK prebuilts are not
+// yet dropped there, meaning module_34 cannot be used yet.
+module_34_version = "module_34"
 
 // TODO: remove this default and replace with ConnectivityNextEnableDefaults. This will need to be
 // done separately in each branch due to merge conflicts.
@@ -64,9 +64,10 @@ java_defaults {
 
 java_defaults {
     name: "NetworkStackDevApiLevel",
-    min_sdk_version: "29",
+    min_sdk_version: "30",
     sdk_version: "module_current",
     libs: [
+        "framework-configinfrastructure",
         "framework-connectivity",
         "framework-connectivity-t",
         "framework-statsd",
@@ -74,12 +75,20 @@ java_defaults {
     ]
 }
 
+// Common defaults for NetworkStack integration tests, root tests and coverage tests
+// to keep tests always running against the same target sdk version with NetworkStack.
+java_defaults {
+    name: "NetworkStackReleaseTargetSdk",
+    min_sdk_version: "30",
+    target_sdk_version: "34",
+}
+
 java_defaults {
     name: "NetworkStackReleaseApiLevel",
-    sdk_version: module_33_version,
-    min_sdk_version: "29",
-    target_sdk_version: "33",
+    defaults:["NetworkStackReleaseTargetSdk"],
+    sdk_version: module_34_version,
     libs: [
+        "framework-configinfrastructure",
         "framework-connectivity",
         "framework-connectivity-t",
         "framework-statsd",
@@ -99,16 +108,16 @@ java_defaults {
     ],
     apex_available: [
         "com.android.tethering",
-        "//apex_available:platform",  // For InProcessNetworkStack and InProcessTethering
+        "//apex_available:platform",  // For InProcessNetworkStack
     ],
-    min_sdk_version: "29",
+    min_sdk_version: "30",
 }
 
 // Common shim code. This includes the shim interface definitions themselves, and things like
 // ShimUtils and UnsupportedApiLevelException. Compiles against system_current because ShimUtils
 // needs access to all Build.VERSION_CODES.*, which by definition are only in the newest SDK.
 // TODO: consider moving ShimUtils into a library (or removing it in favour of SdkLevel) and compile
-// this target against the lowest-supported SDK (currently 29).
+// this target against the lowest-supported SDK (currently 30).
 java_library {
     name: "NetworkStackShimsCommon",
     defaults: ["NetworkStackShimsDefaults"],
@@ -171,7 +180,7 @@ java_library {
 
 java_library {
     name: "NetworkStackApi33Shims",
-    defaults: ["NetworkStackShimsDefaults", "ConnectivityNextEnableDefaults"],
+    defaults: ["NetworkStackShimsDefaults"],
     srcs: [
         "apishim/33/**/*.java",
     ],
@@ -184,21 +193,15 @@ java_library {
         "framework-connectivity",
         "framework-connectivity-t.stubs.module_lib",
         "framework-tethering",
+        "android.net.ipsec.ike.stubs.module_lib",
     ],
-    sdk_version: module_33_version,
+    sdk_version: "module_33",
     visibility: ["//visibility:private"],
 }
 
-// Shims for APIs being added to the current development version of Android. These APIs are not
-// stable and have no defined version number. These could be called 10000, but they use the next
-// integer so if the next SDK release happens to use that integer, we don't need to rename them.
-// Jarjar rules are generated based on the stable shims, which do not contain this library. As a
-// result, no static_lib that needs jarjar should be used here. In general, static_libs should not
-// be used in this library at all; instead they can be in one of the earlier, shim libraries which
-// are part of the stable shims and scanned when generating jarjar rules.
 java_library {
     name: "NetworkStackApi34Shims",
-    defaults: ["NetworkStackShimsDefaults", "ConnectivityNextEnableDefaults"],
+    defaults: ["NetworkStackShimsDefaults"],
     srcs: [
         "apishim/34/**/*.java",
     ],
@@ -212,6 +215,37 @@ java_library {
         "framework-connectivity",
         "framework-connectivity-t.stubs.module_lib",
         "framework-tethering",
+        "android.net.ipsec.ike.stubs.module_lib"
+    ],
+    sdk_version: module_34_version,
+    visibility: ["//visibility:private"],
+}
+
+// Shims for APIs being added to the current development version of Android. These APIs are not
+// stable and have no defined version number. These could be called 10000, but they use the next
+// integer so if the next SDK release happens to use that integer, we don't need to rename them.
+// Jarjar rules are generated based on the stable shims, which do not contain this library. As a
+// result, no static_lib that needs jarjar should be used here. In general, static_libs should not
+// be used in this library at all; instead they can be in one of the earlier, shim libraries which
+// are part of the stable shims and scanned when generating jarjar rules.
+java_library {
+    name: "NetworkStackApi35Shims",
+    defaults: ["NetworkStackShimsDefaults", "ConnectivityNextEnableDefaults"],
+    srcs: [
+        "apishim/35/**/*.java",
+    ],
+    libs: [
+        "NetworkStackShimsCommon",
+        "NetworkStackApi29Shims",
+        "NetworkStackApi30Shims",
+        "NetworkStackApi31Shims",
+        "NetworkStackApi33Shims",
+        "NetworkStackApi34Shims",
+        "framework-bluetooth",
+        "framework-connectivity",
+        "framework-connectivity-t.stubs.module_lib",
+        "framework-tethering",
+        "android.net.ipsec.ike.stubs.module_lib"
     ],
     sdk_version: "module_current",
     visibility: ["//visibility:private"],
@@ -234,13 +268,13 @@ java_library {
         "NetworkStackApi31Shims",
         "NetworkStackApi33Shims",
         "NetworkStackApi34Shims",
+        "NetworkStackApi35Shims",
     ],
     visibility: [
         "//packages/modules/Connectivity/Tethering",
         "//packages/modules/Connectivity/service",
         "//packages/modules/Connectivity/service-t",
-        "//packages/modules/Connectivity/tests/cts/net",
-        "//packages/modules/Connectivity/tests/cts/hostside/app",
+        "//packages/modules/Connectivity/tests:__subpackages__",
     ],
 }
 
@@ -256,13 +290,14 @@ java_library {
         "NetworkStackApi30Shims",
         "NetworkStackApi31Shims",
         "NetworkStackApi33Shims",
+        "NetworkStackApi34Shims",
     ],
     jarjar_rules: "apishim/jarjar-rules-compat.txt",
     visibility: [
         "//packages/modules/Connectivity/Tethering",
         "//packages/modules/Connectivity/service",
         "//packages/modules/Connectivity/service-t",
-        "//packages/modules/Connectivity/tests/cts:__subpackages__",
+        "//packages/modules/Connectivity/tests:__subpackages__",
     ],
 }
 
@@ -272,6 +307,7 @@ java_defaults {
     name: "NetworkStackAndroidLibraryDefaults",
     srcs: [
         ":framework-networkstack-shared-srcs",
+        ":services-connectivity-shared-srcs",
     ],
     libs: ["unsupportedappusage"],
     static_libs: [
@@ -290,7 +326,6 @@ java_defaults {
         "net-utils-device-common-ip",
         "net-utils-device-common-netlink",
     ],
-    plugins: ["java_api_finder"],
 }
 
 // The versions of the android library containing network stack code compiled for each SDK variant.
@@ -372,7 +407,7 @@ java_genrule {
     ],
     out: ["NetworkStackJarJarRules.txt"],
     cmd: "$(location jarjar-rules-generator) " +
-        "--jars $(location :NetworkStackApiStableLib{.jar}) " +
+        "$(location :NetworkStackApiStableLib{.jar}) " +
         "--prefix com.android.networkstack " +
         "--excludes $(location jarjar-excludes.txt) " +
         "--output $(out)",
@@ -448,6 +483,7 @@ android_app {
     required: [
         "privapp_whitelist_com.android.networkstack",
     ],
+    updatable: true,
     lint: { strict_updatability_linting: true },
 }
 
@@ -470,8 +506,8 @@ cc_library_shared {
     srcs: [
         "jni/network_stack_utils_jni.cpp"
     ],
-    sdk_version: "29",
-    min_sdk_version: "29",
+    sdk_version: "30",
+    min_sdk_version: "30",
     shared_libs: [
         "liblog",
         "libnativehelper_compat_libc++",
@@ -504,7 +540,7 @@ genrule {
     tools: ["stats-log-api-gen"],
     cmd: "$(location stats-log-api-gen) --java $(out) --module network_stack" +
          " --javaPackage com.android.networkstack.metrics --javaClass NetworkStackStatsLog" +
-         " --minApiLevel 29",
+         " --minApiLevel 30",
     out: ["com/android/networkstack/metrics/NetworkStackStatsLog.java"],
 }
 
@@ -513,7 +549,7 @@ genrule {
     tools: ["stats-log-api-gen"],
     cmd: "$(location stats-log-api-gen) --java $(out) --module network_stack" +
          " --javaPackage com.android.networkstack.metrics --javaClass NetworkStackStatsLog" +
-         " --minApiLevel 29 --compileApiLevel 30",
+         " --minApiLevel 30 --compileApiLevel 30",
     out: ["com/android/networkstack/metrics/NetworkStackStatsLog.java"],
 }
 
