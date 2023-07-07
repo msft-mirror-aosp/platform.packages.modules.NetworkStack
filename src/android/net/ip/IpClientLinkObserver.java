@@ -28,6 +28,7 @@ import static com.android.net.module.util.netlink.NetlinkConstants.RTN_UNICAST;
 import static com.android.net.module.util.netlink.NetlinkConstants.RTPROT_KERNEL;
 import static com.android.net.module.util.netlink.NetlinkConstants.RTPROT_RA;
 import static com.android.net.module.util.netlink.NetlinkConstants.RT_SCOPE_UNIVERSE;
+import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_ACCEPT_IPV6_LINK_LOCAL_DNS_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_PARSE_NETLINK_EVENTS_VERSION;
 
 import android.app.AlarmManager;
@@ -45,6 +46,8 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.net.module.util.HexDump;
+import com.android.net.module.util.InetAddressUtils;
 import com.android.net.module.util.InterfaceParams;
 import com.android.net.module.util.SharedLog;
 import com.android.net.module.util.ip.NetlinkMonitor;
@@ -177,7 +180,7 @@ public class IpClientLinkObserver implements NetworkObserver {
         mContext = context;
         mInterfaceName = iface;
         mClatInterfaceName = CLAT_PREFIX + iface;
-        mTag = "NetlinkTracker/" + mInterfaceName;
+        mTag = "IpClient/" + mInterfaceName;
         mCallback = callback;
         mLinkProperties = new LinkProperties();
         mLinkProperties.setInterfaceName(mInterfaceName);
@@ -201,10 +204,16 @@ public class IpClientLinkObserver implements NetworkObserver {
         mHandler.post(mNetlinkMonitor::stop);
     }
 
+    private boolean isIpv6LinkLocalDnsAccepted() {
+        return mDependencies.isFeatureEnabled(mContext,
+                IPCLIENT_ACCEPT_IPV6_LINK_LOCAL_DNS_VERSION, true /* default value */);
+    }
+
     private void maybeLog(String operation, String iface, LinkAddress address) {
         if (DBG) {
             Log.d(mTag, operation + ": " + address + " on " + iface
-                    + " flags " + address.getFlags() + " scope " + address.getScope());
+                    + " flags " + "0x" + HexDump.toHexString(address.getFlags())
+                    + " scope " + address.getScope());
         }
     }
 
@@ -537,7 +546,10 @@ public class IpClientLinkObserver implements NetworkObserver {
             if (!mNetlinkEventParsingEnabled) return;
             final String[] addresses = new String[opt.servers.length];
             for (int i = 0; i < opt.servers.length; i++) {
-                addresses[i] = opt.servers[i].getHostAddress();
+                final Inet6Address addr = isIpv6LinkLocalDnsAccepted()
+                        ? InetAddressUtils.withScopeId(opt.servers[i], mIfindex)
+                        : opt.servers[i];
+                addresses[i] = addr.getHostAddress();
             }
             updateInterfaceDnsServerInfo(opt.header.lifetime, addresses);
         }

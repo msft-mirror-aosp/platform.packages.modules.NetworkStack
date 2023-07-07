@@ -122,7 +122,7 @@ static void network_stack_utils_attachDhcpFilter(JNIEnv *env, jclass clazz, jobj
         // Reject.
         BPF_STMT(BPF_RET | BPF_K,              0)
     };
-    static const sock_fprog filter = {
+    const sock_fprog filter = {
         sizeof(filter_code) / sizeof(filter_code[0]),
         filter_code,
     };

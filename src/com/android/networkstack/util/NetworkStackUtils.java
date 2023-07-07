@@ -17,19 +17,25 @@
 package com.android.networkstack.util;
 
 import android.content.Context;
+import android.net.IpPrefix;
+import android.net.LinkAddress;
 import android.net.MacAddress;
-import android.net.util.SocketUtils;
 import android.system.ErrnoException;
+import android.util.Log;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 
 import com.android.net.module.util.DeviceConfigUtils;
+import com.android.net.module.util.HexDump;
 
 import java.io.FileDescriptor;
 import java.io.IOException;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
+import java.net.InetAddress;
 import java.net.SocketException;
+import java.net.UnknownHostException;
 
 /**
  * Collection of utilities for the network stack.
@@ -189,14 +195,6 @@ public class NetworkStackUtils {
             "dhcp_slow_retransmission_version";
 
     /**
-     * Minimum module version at which to enable dismissal CaptivePortalLogin app in validated
-     * network feature. CaptivePortalLogin app will also use validation facilities in
-     * {@link NetworkMonitor} to perform portal validation if feature is enabled.
-     */
-    public static final String DISMISS_PORTAL_IN_VALIDATED_NETWORK =
-            "dismiss_portal_in_validated_network";
-
-    /**
      * Experiment flag to enable considering DNS probes returning private IP addresses as failed
      * when attempting to detect captive portals.
      *
@@ -221,6 +219,13 @@ public class NetworkStackUtils {
     public static final String IPCLIENT_GRATUITOUS_NA_VERSION = "ipclient_gratuitous_na_version";
 
     /**
+     * Experiment flag to send multicast NS from the global IPv6 GUA to the solicited-node
+     * multicast address based on the default router's IPv6 link-local address, which helps
+     * flush the first-hop routers' neighbor cache entry for the global IPv6 GUA.
+     */
+    public static final String IPCLIENT_MULTICAST_NS_VERSION = "ipclient_multicast_ns_version";
+
+    /**
      * Experiment flag to enable sending Gratuitous APR and Gratuitous Neighbor Advertisement for
      * all assigned IPv4 and IPv6 GUAs after completing L2 roaming.
      */
@@ -233,6 +238,14 @@ public class NetworkStackUtils {
      */
     public static final String IPCLIENT_PARSE_NETLINK_EVENTS_VERSION =
             "ipclient_parse_netlink_events_version";
+
+    /**
+     * Experiment flag to check if an on-link IPv6 link local DNS is acceptable. The default flag
+     * value is true, just add this flag for A/B testing to see if this fix works as expected via
+     * experiment rollout.
+     */
+    public static final String IPCLIENT_ACCEPT_IPV6_LINK_LOCAL_DNS_VERSION =
+            "ipclient_accept_ipv6_link_local_dns_version";
 
     /**
      * Experiment flag to disable accept_ra parameter when IPv6 provisioning loss happens due to
@@ -248,24 +261,34 @@ public class NetworkStackUtils {
             "ip_reachability_mcast_resolicit_version";
 
     /**
-     * Experiment flag to wait for IP addresses cleared completely before transition to
-     * IpClient#StoppedState from IpClient#StoppingState.
+     * Experiment flag to attempt to ignore the on-link IPv6 DNS server which fails to respond to
+     * address resolution.
      */
-    public static final String IPCLIENT_CLEAR_ADDRESSES_ON_STOP_VERSION =
-            "ipclient_clear_addresses_on_stop_version";
+    public static final String IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION =
+            "ip_reachability_ignore_incompleted_ipv6_dns_server_version";
+
+    /**
+     * Experiment flag to attempt to ignore the IPv6 default router which fails to respond to
+     * address resolution.
+     */
+    public static final String IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION =
+            "ip_reachability_ignore_incompleted_ipv6_default_router_version";
+
+    /**
+     * Experiment flag to use the RA lifetime calculation fix in aosp/2276160. It can be disabled
+     * if OEM finds additional battery usage and want to use the old buggy behavior again.
+     */
+    public static final String APF_USE_RA_LIFETIME_CALCULATION_FIX_VERSION =
+            "apf_use_ra_lifetime_calculation_fix_version";
+
+    /**
+     * Experiment flag to enable DHCPv6 Prefix Delegation(RFC8415) in IpClient.
+     */
+    public static final String IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION =
+            "ipclient_dhcpv6_prefix_delegation_version";
 
     static {
         System.loadLibrary("networkstackutilsjni");
-    }
-
-    /**
-     * Close a socket, ignoring any exception while closing.
-     */
-    public static void closeSocketQuietly(FileDescriptor fd) {
-        try {
-            SocketUtils.closeSocket(fd);
-        } catch (IOException ignored) {
-        }
     }
 
     /**
@@ -281,6 +304,77 @@ public class NetworkStackUtils {
         etherMulticast[4] = ipv6Multicast[14];
         etherMulticast[5] = ipv6Multicast[15];
         return MacAddress.fromBytes(etherMulticast);
+    }
+
+    /**
+     * Convert IPv6 unicast or anycast address to solicited node multicast address
+     * per RFC4291 section 2.7.1.
+     */
+    @Nullable
+    public static Inet6Address ipv6AddressToSolicitedNodeMulticast(
+            @NonNull final Inet6Address addr) {
+        final byte[] address = new byte[16];
+        address[0] = (byte) 0xFF;
+        address[1] = (byte) 0x02;
+        address[11] = (byte) 0x01;
+        address[12] = (byte) 0xFF;
+        address[13] = addr.getAddress()[13];
+        address[14] = addr.getAddress()[14];
+        address[15] = addr.getAddress()[15];
+        try {
+            return (Inet6Address) InetAddress.getByAddress(address);
+        } catch (UnknownHostException e) {
+            Log.e(TAG, "Invalid host IP address " + addr.getHostAddress(), e);
+            return null;
+        }
+    }
+
+    /**
+     * Check whether a link address is IPv6 global preferred unicast address.
+     */
+    public static boolean isIPv6GUA(@NonNull final LinkAddress address) {
+        return address.isIpv6() && address.isGlobalPreferred();
+    }
+
+    /**
+     * Convert 48bits MAC address to 64bits link-layer address(EUI64).
+     *     1. insert the 0xFFFE in the middle of mac address
+     *     2. flip the 7th bit(universal/local) of the first byte.
+     */
+    public static byte[] macAddressToEui64(@NonNull final MacAddress hwAddr) {
+        final byte[] eui64 = new byte[8];
+        final byte[] mac48 = hwAddr.toByteArray();
+        System.arraycopy(mac48 /* src */, 0 /* srcPos */, eui64 /* dest */, 0 /* destPos */,
+                3 /* length */);
+        eui64[3] = (byte) 0xFF;
+        eui64[4] = (byte) 0xFE;
+        System.arraycopy(mac48 /* src */, 3 /* srcPos */, eui64 /* dest */, 5 /* destPos */,
+                3 /* length */);
+        eui64[0] = (byte) (eui64[0] ^ 0x02); // flip 7th bit
+        return eui64;
+    }
+
+    /**
+     * Generate an IPv6 address based on the given prefix(/64) and stable interface
+     * identifier(EUI64).
+     */
+    public static Inet6Address createInet6AddressFromEui64(@NonNull final IpPrefix prefix,
+            @NonNull final byte[] eui64) {
+        if (prefix.getPrefixLength() != 64) {
+            Log.e(TAG, "Invalid IPv6 prefix length " + prefix.getPrefixLength());
+            return null;
+        }
+        final byte[] address = new byte[16];
+        System.arraycopy(prefix.getRawAddress() /* src */, 0 /* srcPos */, address /* dest */,
+                0 /* destPos*/, 8 /* length */);
+        System.arraycopy(eui64 /* src */, 0 /* srcPos */, address /* dest */, 8 /* destPos */,
+                eui64.length);
+        try {
+            return (Inet6Address) InetAddress.getByAddress(address);
+        } catch (UnknownHostException e) {
+            Log.e(TAG, "Invalid IPv6 address " + HexDump.toHexString(address), e);
+            return null;
+        }
     }
 
     /**
