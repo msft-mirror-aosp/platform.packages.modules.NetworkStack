@@ -25,6 +25,7 @@ import static android.system.OsConstants.AF_INET6;
 import static android.system.OsConstants.SOL_SOCKET;
 import static android.system.OsConstants.SO_SNDTIMEO;
 
+import static com.android.net.module.util.NetworkStackConstants.DNS_OVER_TLS_PORT;
 import static com.android.net.module.util.netlink.NetlinkConstants.NLMSG_DONE;
 import static com.android.net.module.util.netlink.NetlinkConstants.SOCKDIAG_MSG_HEADER_SIZE;
 import static com.android.net.module.util.netlink.NetlinkConstants.SOCK_DIAG_BY_FAMILY;
@@ -36,6 +37,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.net.INetd;
+import android.net.LinkProperties;
 import android.net.MarkMaskParcel;
 import android.net.Network;
 import android.os.AsyncTask;
@@ -48,6 +50,7 @@ import android.provider.DeviceConfig;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.system.StructTimeval;
+import android.util.ArraySet;
 import android.util.Log;
 import android.util.LongSparseArray;
 import android.util.SparseArray;
@@ -86,10 +89,8 @@ public class TcpSocketTracker {
     private static final String TAG = TcpSocketTracker.class.getSimpleName();
     private static final boolean DBG = Log.isLoggable(TAG, Log.DEBUG);
     private static final int[] ADDRESS_FAMILIES = new int[] {AF_INET6, AF_INET};
-
-    /** Cookie offset of an InetMagMessage header. */
-    private static final int IDIAG_COOKIE_OFFSET = 44;
     private static final int END_OF_PARSING = -1;
+
     /**
      *  Gather the socket info.
      *
@@ -104,6 +105,9 @@ public class TcpSocketTracker {
     private int mLatestPacketFailPercentage;
     // Number of packets received in the latest polling cycle.
     private int mLatestReceivedCount;
+    // Uids in the latest polling cycle.
+    private final ArraySet<Integer> mLatestReportedUids = new ArraySet<>();
+
     /**
      * Request to send to kernel to request tcp info.
      *
@@ -124,6 +128,14 @@ public class TcpSocketTracker {
     private final Object mDozeModeLock = new Object();
     @GuardedBy("mDozeModeLock")
     private boolean mInDozeMode = false;
+
+    // These variables are initialized when the NetworkMonitor enters DefaultState,
+    // and can only be accessed on the NetworkMonitor state machine thread after
+    // the NetworkMonitor state machine has been started.
+    private boolean mInOpportunisticMode;
+    @NonNull
+    private LinkProperties mLinkProperties;
+
     @VisibleForTesting
     protected final DeviceConfig.OnPropertiesChangedListener mConfigListener =
             new DeviceConfig.OnPropertiesChangedListener() {
@@ -210,12 +222,39 @@ public class TcpSocketTracker {
             final long time = SystemClock.elapsedRealtime();
             fd = mDependencies.connectToKernel();
 
-            final TcpStat stat = new TcpStat();
+            final ArrayList<SocketInfo> newSocketInfoList = new ArrayList<>();
             for (final int family : ADDRESS_FAMILIES) {
                 mDependencies.sendPollingRequest(fd, mSockDiagMsg.get(family));
-
-                while (parseMessage(mDependencies.recvMessage(fd), family, stat, time)) {
+                while (parseMessage(mDependencies.recvMessage(fd),
+                        family, newSocketInfoList, time)) {
                     log("Pending info exist. Attempt to read more");
+                }
+            }
+
+            // Append TcpStats based on previous and current socket info.
+            final TcpStat stat = new TcpStat();
+            mLatestReportedUids.clear();
+            for (final SocketInfo newInfo : newSocketInfoList) {
+                final TcpStat diff = calculateLatestPacketsStat(newInfo,
+                        mSocketInfos.get(newInfo.cookie));
+                mSocketInfos.put(newInfo.cookie, newInfo);
+
+                // When in Opportunistic Mode, exclude destination port 853 for private DNS to
+                // avoid misleading data stall signals if the probing is not done.
+                // In private DNS opportunistic mode, the resolver will try to establish
+                // TCP connections with the DNS servers. However, if the target DNS server
+                // does not support private DNS, this would result in no response traffic,
+                // which could trigger a false alarm of data stall.
+                // TODO: Fix the false alarms where the private DNS servers are validated by
+                //  DoH instead of DoT. In this case the DoT probing traffic should be ignored.
+                if (newInfo.dstPort == DNS_OVER_TLS_PORT && mInOpportunisticMode &&
+                        !areAllPrivateDnsServersValidated(mLinkProperties)) {
+                    continue;
+                }
+
+                if (diff != null) {
+                    mLatestReportedUids.add(newInfo.uid);
+                    stat.accumulate(diff);
                 }
             }
 
@@ -238,8 +277,14 @@ public class TcpSocketTracker {
         return false;
     }
 
+    private static boolean areAllPrivateDnsServersValidated(@NonNull LinkProperties lp) {
+        return lp.getDnsServers().size() == lp.getValidatedPrivateDnsServers().size();
+    }
+
     // Return true if there are more pending messages to read
-    private boolean parseMessage(ByteBuffer bytes, int family, TcpStat stat, long time) {
+    @VisibleForTesting
+    static boolean parseMessage(ByteBuffer bytes, int family,
+            ArrayList<SocketInfo> outputSocketInfoList, long time) {
         if (!NetlinkUtils.enoughBytesRemainForValidNlMsg(bytes)) {
             // This is unlikely to happen in real cases. Check this first for testing.
             Log.e(TAG, "Size is less than header size. Ignored.");
@@ -262,30 +307,26 @@ public class TcpSocketTracker {
                 final int nlmsgLen = getLengthAndVerifyMsgHeader(bytes, family);
                 if (nlmsgLen == END_OF_PARSING) return false;
 
-                if (isValidInetDiagMsgSize(nlmsgLen)) {
-                    // Get the socket cookie value. Composed by two Integers value.
-                    // Corresponds to inet_diag_sockid in
-                    // &lt;linux_src&gt;/include/uapi/linux/inet_diag.h
-                    bytes.position(bytes.position() + IDIAG_COOKIE_OFFSET);
-
-                    // It's stored in native with 2 int. Parse it as long for
-                    // convenience.
-                    final long cookie = bytes.getLong();
-                    log("cookie=" + cookie);
-                    // Skip the rest part of StructInetDiagMsg.
-                    bytes.position(bytes.position()
-                            + StructInetDiagMsg.STRUCT_SIZE - IDIAG_COOKIE_OFFSET
-                            - Long.BYTES);
-                    final SocketInfo info = parseSockInfo(bytes, family, nlmsgLen,
-                            time);
-                    // Update TcpStats based on previous and current socket info.
-                    stat.accumulate(
-                            calculateLatestPacketsStat(info, mSocketInfos.get(cookie)));
-                    mSocketInfos.put(cookie, info);
+                if (!isValidInetDiagMsgSize(nlmsgLen)) {
+                    throw new IllegalStateException("Invalid netlink message length: " + nlmsgLen);
                 }
+                // Get the socket cookie value and uid from inet_diag_msg struct.
+                final StructInetDiagMsg inetDiagMsg = StructInetDiagMsg.parse(bytes);
+                if (inetDiagMsg == null) {
+                    throw new IllegalStateException("Failed to parse StructInetDiagMsg");
+                }
+                final SocketInfo info = parseSockInfo(bytes, family, nlmsgLen, time,
+                        inetDiagMsg.idiag_uid, inetDiagMsg.id.cookie,
+                        inetDiagMsg.id.remSocketAddress.getPort());
+                outputSocketInfoList.add(info);
             } while (NetlinkUtils.enoughBytesRemainForValidNlMsg(bytes));
         } catch (IllegalArgumentException | BufferUnderflowException e) {
             Log.wtf(TAG, "Unexpected socket info parsing, family " + family
+                    + " buffer:" + bytes + " "
+                    + Base64.getEncoder().encodeToString(bytes.array()), e);
+            return false;
+        } catch (IllegalStateException e) {
+            Log.e(TAG, "Unexpected socket info parsing, family " + family
                     + " buffer:" + bytes + " "
                     + Base64.getEncoder().encodeToString(bytes.array()), e);
             return false;
@@ -294,7 +335,7 @@ public class TcpSocketTracker {
         return true;
     }
 
-    private int getLengthAndVerifyMsgHeader(@NonNull ByteBuffer bytes, int family) {
+    private static int getLengthAndVerifyMsgHeader(@NonNull ByteBuffer bytes, int family) {
         final StructNlMsgHdr nlmsghdr = StructNlMsgHdr.parse(bytes);
         if (nlmsghdr == null) {
             Log.e(TAG, "Badly formatted data.");
@@ -332,10 +373,10 @@ public class TcpSocketTracker {
     }
 
     /** Parse a {@code SocketInfo} from the given position of the given byte buffer. */
-    @VisibleForTesting
     @NonNull
-    SocketInfo parseSockInfo(@NonNull final ByteBuffer bytes, final int family,
-            final int nlmsgLen, final long time) {
+    private static SocketInfo parseSockInfo(@NonNull final ByteBuffer bytes, final int family,
+            final int nlmsgLen, final long time, final int uid, final long cookie,
+            final int dstPort) {
         final int remainingDataSize = bytes.position() + nlmsgLen - SOCKDIAG_MSG_HEADER_SIZE;
         TcpInfo tcpInfo = null;
         int mark = NetlinkUtils.INIT_MARK_VALUE;
@@ -355,7 +396,7 @@ public class TcpSocketTracker {
                 skipRemainingAttributesBytesAligned(bytes, dataLen);
             }
         }
-        final SocketInfo info = new SocketInfo(tcpInfo, family, mark, time);
+        final SocketInfo info = new SocketInfo(tcpInfo, family, mark, time, uid, cookie, dstPort);
         log("parseSockInfo, " + info);
         return info;
     }
@@ -374,8 +415,11 @@ public class TcpSocketTracker {
         synchronized (mDozeModeLock) {
             if (mInDozeMode) return false;
         }
-
-        return (getLatestPacketFailPercentage() >= getTcpPacketsFailRateThreshold());
+        final boolean ret = (getLatestPacketFailPercentage() >= getTcpPacketsFailRateThreshold());
+        if (ret) {
+            Log.d(TAG, "data stall suspected, uids: " + mLatestReportedUids.toString());
+        }
+        return ret;
     }
 
     /** Calculate the change between the {@param current} and {@param previous}. */
@@ -454,7 +498,7 @@ public class TcpSocketTracker {
      * @param buffer the target ByteBuffer
      * @param len the remaining length to skip.
      */
-    private void skipRemainingAttributesBytesAligned(@NonNull final ByteBuffer buffer,
+    private static void skipRemainingAttributesBytesAligned(@NonNull final ByteBuffer buffer,
             final short len) {
         // Data in {@Code RoutingAttribute} is followed after header with size {@Code NLA_ALIGNTO}
         // bytes long for each block. Next attribute will start after the padding bytes if any.
@@ -472,7 +516,7 @@ public class TcpSocketTracker {
         buffer.position(cur + NetlinkConstants.alignedLengthOf(len));
     }
 
-    private void log(final String str) {
+    private static void log(final String str) {
         if (DBG) Log.d(TAG, str);
     }
 
@@ -495,7 +539,7 @@ public class TcpSocketTracker {
      *    // Data follows
      * };
      */
-    class RoutingAttribute {
+    static class RoutingAttribute {
         public static final int HEADER_LENGTH = 4;
 
         public final short rtaLen;  // The whole valid size of the struct.
@@ -514,7 +558,7 @@ public class TcpSocketTracker {
      * Data class for keeping the socket info.
      */
     @VisibleForTesting
-    class SocketInfo {
+    static class SocketInfo {
         @Nullable
         public final TcpInfo tcpInfo;
         // One of {@code AF_INET6, AF_INET}.
@@ -523,19 +567,29 @@ public class TcpSocketTracker {
         public final int fwmark;
         // Socket information updated elapsed real time.
         public final long updateTime;
+        // Uid which associated with this Socket.
+        public final int uid;
+        // Cookie which associated with this Socket.
+        public final long cookie;
+        // Destination port number of this Socket.
+        public final int dstPort;
 
         SocketInfo(@Nullable final TcpInfo info, final int family, final int mark,
-                final long time) {
+                final long time, final int uid, final long cookie, final int dstPort) {
             tcpInfo = info;
             ipFamily = family;
             updateTime = time;
             fwmark = mark;
+            this.uid = uid;
+            this.cookie = cookie;
+            this.dstPort = dstPort;
         }
 
         @Override
         public String toString() {
-            return "SocketInfo {Type:" + ipTypeToString(ipFamily) + ", "
-                    + tcpInfo + ", mark:" + fwmark + " updated at " + updateTime + "}";
+            return "SocketInfo {Type:" + ipTypeToString(ipFamily) + ", uid:" + uid
+                    + ", cookie:" + cookie + ", " + tcpInfo + ", mark:" + fwmark
+                    + ", dstPort:" + dstPort + " updated at " + updateTime + "}";
         }
 
         private String ipTypeToString(final int type) {
@@ -581,6 +635,17 @@ public class TcpSocketTracker {
             mInDozeMode = isEnabled;
             log("Doze mode enabled=" + mInDozeMode);
         }
+    }
+
+    public void setOpportunisticMode(boolean isEnabled) {
+        if (mInOpportunisticMode == isEnabled) return;
+        mInOpportunisticMode = isEnabled;
+
+        log("Private DNS Opportunistic mode enabled=" + mInOpportunisticMode);
+    }
+
+    public void setLinkProperties(@NonNull LinkProperties lp) {
+        mLinkProperties = lp;
     }
 
     /**
