@@ -32,8 +32,9 @@ public class Dhcp6SolicitPacket extends Dhcp6Packet {
      * Generates a solicit packet with the specified parameters.
      */
     Dhcp6SolicitPacket(int transId, short secs, @NonNull final byte[] clientDuid,
-            final byte[] iapd) {
+            final byte[] iapd, boolean rapidCommit) {
         super(transId, secs, clientDuid, null /* serverDuid */, iapd);
+        mRapidCommit = rapidCommit;
     }
 
     /**
@@ -41,12 +42,15 @@ public class Dhcp6SolicitPacket extends Dhcp6Packet {
      */
     public ByteBuffer buildPacket() {
         final ByteBuffer packet = ByteBuffer.allocate(DHCP_MAX_LENGTH);
-        final int msgTypeAndTransId = (DHCP6_MESSAGE_TYPE_SOLICIT << 24) | (mTransId & 0x0FFF);
+        final int msgTypeAndTransId = (DHCP6_MESSAGE_TYPE_SOLICIT << 24) | mTransId;
         packet.putInt(msgTypeAndTransId);
 
         addTlv(packet, DHCP6_ELAPSED_TIME, mSecs);
         addTlv(packet, DHCP6_CLIENT_IDENTIFIER, mClientDuid);
         addTlv(packet, DHCP6_IA_PD, mIaPd);
+        if (mRapidCommit) {
+            addTlv(packet, DHCP6_RAPID_COMMIT);
+        }
 
         packet.flip();
         return packet;
