@@ -167,11 +167,6 @@ public class NetworkStackUtils {
     public static final String DHCP_RAPID_COMMIT_ENABLED = "dhcp_rapid_commit_enabled";
 
     /**
-     * Disable dropping DHCP packets with IPv4 MF flag set.
-     */
-    public static final String DHCP_DISABLE_DROP_MF = "dhcp_disable_drop_mf";
-
-    /**
      * Minimum module version at which to enable the DHCP INIT-REBOOT state.
      */
     public static final String DHCP_INIT_REBOOT_VERSION = "dhcp_init_reboot_version";
@@ -245,6 +240,14 @@ public class NetworkStackUtils {
             "ipclient_parse_netlink_events_version";
 
     /**
+     * Experiment flag to check if an on-link IPv6 link local DNS is acceptable. The default flag
+     * value is true, just add this flag for A/B testing to see if this fix works as expected via
+     * experiment rollout.
+     */
+    public static final String IPCLIENT_ACCEPT_IPV6_LINK_LOCAL_DNS_VERSION =
+            "ipclient_accept_ipv6_link_local_dns_version";
+
+    /**
      * Experiment flag to disable accept_ra parameter when IPv6 provisioning loss happens due to
      * the default route has gone.
      */
@@ -277,6 +280,12 @@ public class NetworkStackUtils {
      */
     public static final String APF_USE_RA_LIFETIME_CALCULATION_FIX_VERSION =
             "apf_use_ra_lifetime_calculation_fix_version";
+
+    /**
+     * Experiment flag to enable DHCPv6 Prefix Delegation(RFC8415) in IpClient.
+     */
+    public static final String IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION =
+            "ipclient_dhcpv6_prefix_delegation_version";
 
     static {
         System.loadLibrary("networkstackutilsjni");
@@ -371,8 +380,7 @@ public class NetworkStackUtils {
     /**
      * Attaches a socket filter that accepts DHCP packets to the given socket.
      */
-    public static native void attachDhcpFilter(FileDescriptor fd, boolean dropMF)
-            throws ErrnoException;
+    public static native void attachDhcpFilter(FileDescriptor fd) throws ErrnoException;
 
     /**
      * Attaches a socket filter that accepts ICMPv6 router advertisements to the given socket.
