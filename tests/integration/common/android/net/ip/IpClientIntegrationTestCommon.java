@@ -191,6 +191,7 @@ import com.android.net.module.util.SharedLog;
 import com.android.net.module.util.Struct;
 import com.android.net.module.util.ip.IpNeighborMonitor;
 import com.android.net.module.util.ip.IpNeighborMonitor.NeighborEventConsumer;
+import com.android.net.module.util.netlink.NetlinkUtils;
 import com.android.net.module.util.netlink.StructNdOptPref64;
 import com.android.net.module.util.structs.EthernetHeader;
 import com.android.net.module.util.structs.Ipv6Header;
@@ -220,6 +221,9 @@ import com.android.testutils.HandlerUtils;
 import com.android.testutils.TapPacketReader;
 import com.android.testutils.TestableNetworkAgent;
 import com.android.testutils.TestableNetworkCallback;
+
+import kotlin.Lazy;
+import kotlin.LazyKt;
 
 import org.junit.After;
 import org.junit.Before;
@@ -264,9 +268,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
-
-import kotlin.Lazy;
-import kotlin.LazyKt;
 
 /**
  * Base class for IpClient tests.
@@ -713,8 +714,13 @@ public abstract class IpClientIntegrationTestCommon {
         // more realistic.
         mIIpClient.setMulticastFilter(true);
         setDeviceConfigForMaxDtimMultiplier();
-        // Set IPv6 autoconfi timeout.
-        setDeviceConfigProperty(IpClient.CONFIG_IPV6_AUTOCONF_TIMEOUT, 500 /* default value */);
+        // Set IPv6 autoconf timeout. For signature tests, it has disabled the provisioning delay,
+        // use a small timeout value to speed up the test execution; For root tests, we have to
+        // wait a bit longer to make sure that we do see the success IPv6 provisioning, otherwise,
+        // the global IPv6 address may show up later due to DAD, so we consider that autoconf fails
+        // in this case and start DHCPv6 Prefix Delegation then.
+        final int timeout = useNetworkStackSignature() ? 500 : (int) TEST_TIMEOUT_MS;
+        setDeviceConfigProperty(IpClient.CONFIG_IPV6_AUTOCONF_TIMEOUT, timeout /* default value */);
     }
 
     protected void setUpMocks() throws Exception {
@@ -4814,7 +4820,7 @@ public abstract class IpClientIntegrationTestCommon {
 
         // Response an normal RA for IPv6 provisioning, then DHCPv6 prefix delegation
         // should not start.
-        assertNull(getNextDhcp6Packet(TEST_TIMEOUT_MS));
+        assertNull(getNextDhcp6Packet(PACKET_TIMEOUT_MS));
         verify(mCb).onProvisioningSuccess(any());
     }
 
@@ -4903,6 +4909,34 @@ public abstract class IpClientIntegrationTestCommon {
                 (byte) 64 /* prefix length */);
         mPacketReader.sendResponse(buildDhcp6Reply(packet, iapd.array(), mClientMac,
                 (Inet6Address) mClientIpAddress, false /* rapidCommit */));
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningFailure(any());
+    }
+
+    @Test
+    @SignatureRequiredTest(reason = "InterfaceParams.getByName requires CAP_NET_ADMIN")
+    public void testSendRtmDelAddressMethod() throws Exception {
+        ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
+                .withoutIPv4()
+                .build();
+        startIpClientProvisioning(config);
+
+        final LinkProperties lp = doIpv6OnlyProvisioning();
+        assertNotNull(lp);
+        assertEquals(3, lp.getLinkAddresses().size()); // IPv6 privacy, stable privacy, link-local
+
+        clearInvocations(mCb);
+
+        // Delete all global IPv6 addresses, then that will trigger onProvisioningFailure callback.
+        final InterfaceParams params = InterfaceParams.getByName(mIfaceName);
+        for (LinkAddress la : lp.getLinkAddresses()) {
+            if (la.isGlobalPreferred()) {
+                NetlinkUtils.sendRtmDelAddressRequest(params.index, (Inet6Address) la.getAddress(),
+                        (short) la.getPrefixLength());
+                verify(mCb, timeout(TEST_TIMEOUT_MS)).onLinkPropertiesChange(argThat(
+                        x -> !x.getLinkAddresses().contains(la)
+                ));
+            }
+        }
         verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningFailure(any());
     }
 }
