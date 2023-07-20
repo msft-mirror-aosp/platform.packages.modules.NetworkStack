@@ -87,6 +87,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
@@ -184,6 +185,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.mockito.Spy;
@@ -2179,16 +2181,16 @@ public class NetworkMonitorTest {
         // selecting this option through the options menu.
         nm.notifyCaptivePortalAppFinished(APP_RETURN_WANTED_AS_IS);
         // The captive portal is still closed, but the network validates since the user said so.
-        verify(mCallbacks, timeout(HANDLER_TIMEOUT_MS).atLeastOnce())
+        // One interaction is triggered when APP_RETURN_WANTED_AS_IS response is received.
+        // Another interaction is triggered when state machine gets into ValidatedState.
+        verify(mCallbacks, timeout(HANDLER_TIMEOUT_MS).times(2))
                 .notifyNetworkTestedWithExtras(matchNetworkTestResultParcelable(
                         NETWORK_VALIDATION_RESULT_VALID, 0 /* probesSucceeded */));
-        resetCallbacks();
-
         // Revalidate.
         nm.forceReevaluation(0 /* responsibleUid */);
 
         // The network should still be valid.
-        verify(mCallbacks, timeout(HANDLER_TIMEOUT_MS).atLeastOnce())
+        verify(mCallbacks, timeout(HANDLER_TIMEOUT_MS).times(3))
                 .notifyNetworkTestedWithExtras(matchNetworkTestResultParcelable(
                         NETWORK_VALIDATION_RESULT_VALID, 0 /* probesSucceeded */));
     }
@@ -2316,6 +2318,31 @@ public class NetworkMonitorTest {
         verifyNetworkTested(NETWORK_VALIDATION_RESULT_VALID, PROBES_PRIVDNS_VALID);
         verify(mCallbacks, timeout(HANDLER_TIMEOUT_MS).times(1)).notifyProbeStatusChanged(
                 eq(PROBES_PRIVDNS_VALID), eq(PROBES_PRIVDNS_VALID));
+    }
+
+    @Test
+    public void testDataStall_setOpportunisticMode() {
+        setDataStallEvaluationType(DATA_STALL_EVALUATION_TYPE_TCP);
+        doReturn(true).when(mTstDependencies).isTcpInfoParsingSupported();
+        WrappedNetworkMonitor wnm = makeCellNotMeteredNetworkMonitor();
+        InOrder inOrder = inOrder(mTst);
+        // Initialized with default value.
+        inOrder.verify(mTst).setOpportunisticMode(false);
+
+        // Strict mode.
+        wnm.notifyPrivateDnsSettingsChanged(new PrivateDnsConfig("dns.google", new InetAddress[0]));
+        HandlerUtils.waitForIdle(wnm.getHandler(), HANDLER_TIMEOUT_MS);
+        inOrder.verify(mTst).setOpportunisticMode(false);
+
+        // Opportunistic mode.
+        wnm.notifyPrivateDnsSettingsChanged(new PrivateDnsConfig(true /* useTls */));
+        HandlerUtils.waitForIdle(wnm.getHandler(), HANDLER_TIMEOUT_MS);
+        inOrder.verify(mTst).setOpportunisticMode(true);
+
+        // Off mode.
+        wnm.notifyPrivateDnsSettingsChanged(new PrivateDnsConfig(false /* useTls */));
+        HandlerUtils.waitForIdle(wnm.getHandler(), HANDLER_TIMEOUT_MS);
+        inOrder.verify(mTst).setOpportunisticMode(false);
     }
 
     @Test
