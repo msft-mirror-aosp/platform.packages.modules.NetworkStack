@@ -17,7 +17,6 @@
 package android.net.dhcp6;
 
 import static android.net.dhcp6.Dhcp6Packet.PrefixDelegation;
-import static android.net.util.NetworkConstants.RFC7421_PREFIX_LENGTH;
 import static android.system.OsConstants.AF_INET6;
 import static android.system.OsConstants.IPPROTO_UDP;
 import static android.system.OsConstants.RT_SCOPE_UNIVERSE;
@@ -28,6 +27,7 @@ import static com.android.net.module.util.NetworkStackConstants.ALL_DHCP_RELAY_A
 import static com.android.net.module.util.NetworkStackConstants.DHCP6_CLIENT_PORT;
 import static com.android.net.module.util.NetworkStackConstants.DHCP6_SERVER_PORT;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ANY;
+import static com.android.net.module.util.NetworkStackConstants.RFC7421_PREFIX_LENGTH;
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_MANAGETEMPADDR;
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_NOPREFIXROUTE;
 import static com.android.networkstack.util.NetworkStackUtils.createInet6AddressFromEui64;
@@ -292,37 +292,35 @@ public class Dhcp6Client extends StateMachine {
         mTransStartMillis = SystemClock.elapsedRealtime();
     }
 
-    private short getHundredthsOfSec() {
-        return (short) ((SystemClock.elapsedRealtime() - mTransStartMillis) / 10);
+    private long getElapsedTimeMs() {
+        return SystemClock.elapsedRealtime() - mTransStartMillis;
     }
 
     @SuppressWarnings("ByteBufferBackingArray")
     private boolean sendSolicitPacket(final ByteBuffer iapd) {
         final ByteBuffer packet = Dhcp6Packet.buildSolicitPacket(mTransId,
-                getHundredthsOfSec() /* elapsed time */, iapd.array(), mClientDuid,
-                true /* rapidCommit */);
+                getElapsedTimeMs(), iapd.array(), mClientDuid, true /* rapidCommit */);
         return transmitPacket(packet, "solicit");
     }
 
     @SuppressWarnings("ByteBufferBackingArray")
     private boolean sendRequestPacket(final ByteBuffer iapd) {
-        final ByteBuffer packet = Dhcp6Packet.buildRequestPacket(mTransId,
-                getHundredthsOfSec() /* elapsed time */, iapd.array(), mClientDuid,
-                mServerDuid);
+        final ByteBuffer packet = Dhcp6Packet.buildRequestPacket(mTransId, getElapsedTimeMs(),
+                iapd.array(), mClientDuid, mServerDuid);
         return transmitPacket(packet, "request");
     }
 
     @SuppressWarnings("ByteBufferBackingArray")
     private boolean sendRenewPacket(final ByteBuffer iapd) {
-        final ByteBuffer packet = Dhcp6Packet.buildRenewPacket(mTransId,
-                getHundredthsOfSec() /* elapsed time*/, iapd.array(), mClientDuid, mServerDuid);
+        final ByteBuffer packet = Dhcp6Packet.buildRenewPacket(mTransId, getElapsedTimeMs(),
+                iapd.array(), mClientDuid, mServerDuid);
         return transmitPacket(packet, "renew");
     }
 
     @SuppressWarnings("ByteBufferBackingArray")
     private boolean sendRebindPacket(final ByteBuffer iapd) {
-        final ByteBuffer packet = Dhcp6Packet.buildRebindPacket(mTransId,
-                getHundredthsOfSec() /* elapsed time */, iapd.array(), mClientDuid);
+        final ByteBuffer packet = Dhcp6Packet.buildRebindPacket(mTransId, getElapsedTimeMs(),
+                iapd.array(), mClientDuid);
         return transmitPacket(packet, "rebind");
     }
 
@@ -632,7 +630,7 @@ public class Dhcp6Client extends StateMachine {
         @Override
         protected void handlePacket(byte[] recvbuf, int length) {
             try {
-                final Dhcp6Packet packet = Dhcp6Packet.decodePacket(recvbuf, length);
+                final Dhcp6Packet packet = Dhcp6Packet.decode(recvbuf, length);
                 if (DBG) Log.d(TAG, "Received packet: " + packet);
                 sendMessage(CMD_RECEIVED_PACKET, packet);
             } catch (Dhcp6Packet.ParseException e) {

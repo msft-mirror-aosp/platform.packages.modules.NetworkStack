@@ -27,7 +27,6 @@ import static android.net.ip.IIpClient.PROV_IPV6_SLAAC;
 import static android.net.ip.IIpClientCallbacks.DTIM_MULTIPLIER_RESET;
 import static android.net.ip.IpReachabilityMonitor.INVALID_REACHABILITY_LOSS_TYPE;
 import static android.net.ip.IpReachabilityMonitor.nudEventTypeToInt;
-import static android.net.util.NetworkConstants.RFC7421_PREFIX_LENGTH;
 import static android.net.util.SocketUtils.makePacketSocketAddress;
 import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
 import static android.system.OsConstants.AF_PACKET;
@@ -39,6 +38,7 @@ import static android.system.OsConstants.SOCK_RAW;
 import static com.android.net.module.util.NetworkStackConstants.ARP_REPLY;
 import static com.android.net.module.util.NetworkStackConstants.ETHER_BROADCAST;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ALL_ROUTERS_MULTICAST;
+import static com.android.net.module.util.NetworkStackConstants.RFC7421_PREFIX_LENGTH;
 import static com.android.net.module.util.NetworkStackConstants.VENDOR_SPECIFIC_IE_ID;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DISABLE_ACCEPT_RA_VERSION;
@@ -2814,11 +2814,10 @@ public class IpClient extends StateMachine {
 
             // Delete the global IPv6 address based on delegated prefix from interface.
             for (LinkAddress la : mLinkProperties.getLinkAddresses()) {
-                if (!la.isIpv6()) continue;
-                final Inet6Address address = (Inet6Address) la.getAddress();
-                if (la.isIpv6() && prefix.contains(address)) {
-                    NetlinkUtils.sendRtmDelAddressRequest(mInterfaceParams.index, address,
-                            (short) la.getPrefixLength());
+                final InetAddress address = la.getAddress();
+                if (prefix.contains(address)) {
+                    NetlinkUtils.sendRtmDelAddressRequest(mInterfaceParams.index,
+                            (Inet6Address) address, (short) la.getPrefixLength());
                 }
             }
         }
