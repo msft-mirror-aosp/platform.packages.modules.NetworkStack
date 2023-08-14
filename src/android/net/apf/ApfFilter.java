@@ -322,6 +322,8 @@ public class ApfFilter {
 
     private static final int ICMP6_TYPE_OFFSET = ETH_HEADER_LEN + IPV6_HEADER_LEN;
 
+    private static final int IPPROTO_HOPOPTS = 0;
+
     // NOTE: this must be added to the IPv4 header length in IPV4_HEADER_SIZE_MEMORY_SLOT
     private static final int UDP_DESTINATION_PORT_OFFSET = ETH_HEADER_LEN + 2;
     private static final int UDP_HEADER_LEN = 8;
@@ -535,7 +537,7 @@ public class ApfFilter {
             socket = Os.socket(AF_PACKET, SOCK_RAW, ETH_P_IPV6);
             SocketAddress addr = makePacketSocketAddress(ETH_P_IPV6, mInterfaceParams.index);
             Os.bind(socket, addr);
-            NetworkStackUtils.attachRaFilter(socket, mApfCapabilities.apfPacketFormat);
+            NetworkStackUtils.attachRaFilter(socket);
         } catch(SocketException|ErrnoException e) {
             Log.e(TAG, "Error starting filter", e);
             return;
@@ -1486,6 +1488,8 @@ public class ApfFilter {
     private void generateIPv6FilterLocked(ApfGenerator gen) throws IllegalInstructionException {
         // Here's a basic summary of what the IPv6 filter program does:
         //
+        // if there is a hop-by-hop option present (e.g. MLD query)
+        //   pass
         // if we're dropping multicast
         //   if it's not IPCMv6 or it's ICMPv6 but we're in doze mode:
         //     if it's multicast:
@@ -1499,6 +1503,10 @@ public class ApfFilter {
         //   drop
 
         gen.addLoad8(Register.R0, IPV6_NEXT_HEADER_OFFSET);
+
+        // MLD packets set the router-alert hop-by-hop option.
+        // TODO: be smarter about not blindly passing every packet with HBH options.
+        gen.addJumpIfR0Equals(IPPROTO_HOPOPTS, mCountAndPassLabel);
 
         // Drop multicast if the multicast filter is enabled.
         if (mMulticastFilter) {
@@ -1594,7 +1602,9 @@ public class ApfFilter {
         // Here's a basic summary of what the mDNS filter program does:
         //
         // if it is a multicast mDNS packet
-        //    if QDCOUNT > 1 and the first QNAME is in the allowlist
+        //    if QDCOUNT != 1
+        //       pass
+        //    else if the QNAME is in the allowlist
         //       pass
         //    else:
         //       drop
@@ -1645,11 +1655,11 @@ public class ApfFilter {
         gen.addLoad16Indexed(Register.R0, UDP_DESTINATION_PORT_OFFSET);
         gen.addJumpIfR0NotEquals(MDNS_PORT, skipMdnsFilter);
 
-        // Only do the QNAME check if the QDCOUNT is more than 0.
-        // If there is more than one query (QDCOUNT > 1), we only matches the first QNAME.
         gen.addLoad16Indexed(Register.R0, MDNS_QDCOUNT_OFFSET);
-        gen.addJumpIfR0Equals(0, mDnsDropPacket);
+        // If QDCOUNT != 1, pass the packet
+        gen.addJumpIfR0NotEquals(1, mDnsAcceptPacket);
 
+        // If QDCOUNT == 1, matches the QNAME with allowlist.
         // Load offset for the first QNAME.
         gen.addLoadImmediate(Register.R0, MDNS_QNAME_OFFSET);
         gen.addAddR1();
