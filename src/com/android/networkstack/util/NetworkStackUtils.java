@@ -248,12 +248,6 @@ public class NetworkStackUtils {
             "ipclient_accept_ipv6_link_local_dns_version";
 
     /**
-     * Experiment flag to disable accept_ra parameter when IPv6 provisioning loss happens due to
-     * the default route has gone.
-     */
-    public static final String IPCLIENT_DISABLE_ACCEPT_RA_VERSION = "ipclient_disable_accept_ra";
-
-    /**
      * Experiment flag to enable "mcast_resolicit" neighbor parameter in IpReachabilityMonitor,
      * set it to 3 by default.
      */
@@ -385,9 +379,8 @@ public class NetworkStackUtils {
     /**
      * Attaches a socket filter that accepts ICMPv6 router advertisements to the given socket.
      * @param fd the socket's {@link FileDescriptor}.
-     * @param packetType the hardware address type, one of ARPHRD_*.
      */
-    public static native void attachRaFilter(FileDescriptor fd, int packetType)
+    public static native void attachRaFilter(FileDescriptor fd)
             throws SocketException;
 
     /**

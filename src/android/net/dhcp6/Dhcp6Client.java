@@ -17,7 +17,6 @@
 package android.net.dhcp6;
 
 import static android.net.dhcp6.Dhcp6Packet.PrefixDelegation;
-import static android.net.util.NetworkConstants.RFC7421_PREFIX_LENGTH;
 import static android.system.OsConstants.AF_INET6;
 import static android.system.OsConstants.IPPROTO_UDP;
 import static android.system.OsConstants.RT_SCOPE_UNIVERSE;
@@ -28,6 +27,7 @@ import static com.android.net.module.util.NetworkStackConstants.ALL_DHCP_RELAY_A
 import static com.android.net.module.util.NetworkStackConstants.DHCP6_CLIENT_PORT;
 import static com.android.net.module.util.NetworkStackConstants.DHCP6_SERVER_PORT;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ANY;
+import static com.android.net.module.util.NetworkStackConstants.RFC7421_PREFIX_LENGTH;
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_MANAGETEMPADDR;
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_NOPREFIXROUTE;
 import static com.android.networkstack.util.NetworkStackUtils.createInet6AddressFromEui64;
@@ -107,8 +107,11 @@ public class Dhcp6Client extends StateMachine {
     private static final int FIRST_TIMEOUT_MS  =   1 * SECONDS;
     private static final int MAX_TIMEOUT_MS    = 512 * SECONDS;
 
+    // Per rfc8415#section-12, the IAID MUST be consistent across restarts.
+    // Since currently only one IAID is supported, a well-known value can be used (0).
+    private static final int IAID = 0;
+
     private int mTransId;
-    private int mIaId;
     private long mTransStartMillis;
     @Nullable private PrefixDelegation mAdvertise;
     @Nullable private PrefixDelegation mReply;
@@ -292,42 +295,40 @@ public class Dhcp6Client extends StateMachine {
         mTransStartMillis = SystemClock.elapsedRealtime();
     }
 
-    private short getHundredthsOfSec() {
-        return (short) ((SystemClock.elapsedRealtime() - mTransStartMillis) / 10);
+    private long getElapsedTimeMs() {
+        return SystemClock.elapsedRealtime() - mTransStartMillis;
     }
 
     @SuppressWarnings("ByteBufferBackingArray")
     private boolean sendSolicitPacket(final ByteBuffer iapd) {
         final ByteBuffer packet = Dhcp6Packet.buildSolicitPacket(mTransId,
-                getHundredthsOfSec() /* elapsed time */, iapd.array(), mClientDuid,
-                true /* rapidCommit */);
+                getElapsedTimeMs(), iapd.array(), mClientDuid, true /* rapidCommit */);
         return transmitPacket(packet, "solicit");
     }
 
     @SuppressWarnings("ByteBufferBackingArray")
     private boolean sendRequestPacket(final ByteBuffer iapd) {
-        final ByteBuffer packet = Dhcp6Packet.buildRequestPacket(mTransId,
-                getHundredthsOfSec() /* elapsed time */, iapd.array(), mClientDuid,
-                mServerDuid);
+        final ByteBuffer packet = Dhcp6Packet.buildRequestPacket(mTransId, getElapsedTimeMs(),
+                iapd.array(), mClientDuid, mServerDuid);
         return transmitPacket(packet, "request");
     }
 
     @SuppressWarnings("ByteBufferBackingArray")
     private boolean sendRenewPacket(final ByteBuffer iapd) {
-        final ByteBuffer packet = Dhcp6Packet.buildRenewPacket(mTransId,
-                getHundredthsOfSec() /* elapsed time*/, iapd.array(), mClientDuid, mServerDuid);
+        final ByteBuffer packet = Dhcp6Packet.buildRenewPacket(mTransId, getElapsedTimeMs(),
+                iapd.array(), mClientDuid, mServerDuid);
         return transmitPacket(packet, "renew");
     }
 
     @SuppressWarnings("ByteBufferBackingArray")
     private boolean sendRebindPacket(final ByteBuffer iapd) {
-        final ByteBuffer packet = Dhcp6Packet.buildRebindPacket(mTransId,
-                getHundredthsOfSec() /* elapsed time */, iapd.array(), mClientDuid);
+        final ByteBuffer packet = Dhcp6Packet.buildRebindPacket(mTransId, getElapsedTimeMs(),
+                iapd.array(), mClientDuid);
         return transmitPacket(packet, "rebind");
     }
 
     private ByteBuffer buildEmptyIaPdOption() {
-        return Dhcp6Packet.buildIaPdOption(mIaId, 0 /* t1 */, 0 /* t2 */, 0 /* preferred */,
+        return Dhcp6Packet.buildIaPdOption(IAID, 0 /* t1 */, 0 /* t2 */, 0 /* preferred */,
                 0 /* valid */, new byte[16] /* empty prefix */, (byte) RFC7421_PREFIX_LENGTH);
     }
 
@@ -400,7 +401,6 @@ public class Dhcp6Client extends StateMachine {
         public void enter() {
             super.enter();
             startNewTransaction();
-            mIaId = mRandom.nextInt();
         }
 
         protected boolean sendPacket() {
@@ -412,7 +412,7 @@ public class Dhcp6Client extends StateMachine {
             if (!packet.isValid(mTransId, mClientDuid)) return;
             if (packet instanceof Dhcp6AdvertisePacket) {
                 mAdvertise = packet.mPrefixDelegation;
-                if (mAdvertise != null && mAdvertise.iaid == mIaId) {
+                if (mAdvertise != null && mAdvertise.iaid == IAID) {
                     Log.d(TAG, "Get prefix delegation option from Advertise: " + mAdvertise);
                     mServerDuid = packet.mServerDuid;
                     transitionTo(mRequestState);
@@ -424,7 +424,7 @@ public class Dhcp6Client extends StateMachine {
                     return;
                 }
                 final PrefixDelegation pd = packet.mPrefixDelegation;
-                if (pd != null && pd.iaid == mIaId) {
+                if (pd != null && pd.iaid == IAID) {
                     Log.d(TAG, "Get prefix delegation option from RapidCommit Reply: " + pd);
                     mReply = pd;
                     mServerDuid = packet.mServerDuid;
@@ -447,7 +447,7 @@ public class Dhcp6Client extends StateMachine {
             if (!(packet instanceof Dhcp6ReplyPacket)) return;
             if (!packet.isValid(mTransId, mClientDuid)) return;
             final PrefixDelegation pd = packet.mPrefixDelegation;
-            if (pd != null && pd.iaid == mIaId) {
+            if (pd != null && pd.iaid == IAID) {
                 Log.d(TAG, "Get prefix delegation option from Reply: " + pd);
                 mReply = pd;
                 transitionTo(mBoundState);
@@ -563,7 +563,7 @@ public class Dhcp6Client extends StateMachine {
             if (!packet.isValid(mTransId, mClientDuid)) return;
             final PrefixDelegation pd = packet.mPrefixDelegation;
             if (pd != null) {
-                if (pd.iaid != mIaId
+                if (pd.iaid != IAID
                         || !(Arrays.equals(pd.ipo.prefix, mReply.ipo.prefix)
                                 && pd.ipo.prefixLen == mReply.ipo.prefixLen)) {
                     Log.i(TAG, "Renewal prefix " + HexDump.toHexString(pd.ipo.prefix)
@@ -632,7 +632,7 @@ public class Dhcp6Client extends StateMachine {
         @Override
         protected void handlePacket(byte[] recvbuf, int length) {
             try {
-                final Dhcp6Packet packet = Dhcp6Packet.decodePacket(recvbuf, length);
+                final Dhcp6Packet packet = Dhcp6Packet.decode(recvbuf, length);
                 if (DBG) Log.d(TAG, "Received packet: " + packet);
                 sendMessage(CMD_RECEIVED_PACKET, packet);
             } catch (Dhcp6Packet.ParseException e) {

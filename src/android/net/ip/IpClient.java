@@ -27,7 +27,6 @@ import static android.net.ip.IIpClient.PROV_IPV6_SLAAC;
 import static android.net.ip.IIpClientCallbacks.DTIM_MULTIPLIER_RESET;
 import static android.net.ip.IpReachabilityMonitor.INVALID_REACHABILITY_LOSS_TYPE;
 import static android.net.ip.IpReachabilityMonitor.nudEventTypeToInt;
-import static android.net.util.NetworkConstants.RFC7421_PREFIX_LENGTH;
 import static android.net.util.SocketUtils.makePacketSocketAddress;
 import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
 import static android.system.OsConstants.AF_PACKET;
@@ -39,9 +38,9 @@ import static android.system.OsConstants.SOCK_RAW;
 import static com.android.net.module.util.NetworkStackConstants.ARP_REPLY;
 import static com.android.net.module.util.NetworkStackConstants.ETHER_BROADCAST;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ALL_ROUTERS_MULTICAST;
+import static com.android.net.module.util.NetworkStackConstants.RFC7421_PREFIX_LENGTH;
 import static com.android.net.module.util.NetworkStackConstants.VENDOR_SPECIFIC_IE_ID;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION;
-import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DISABLE_ACCEPT_RA_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_GRATUITOUS_NA_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_MULTICAST_NS_VERSION;
@@ -116,6 +115,7 @@ import com.android.net.module.util.DeviceConfigUtils;
 import com.android.net.module.util.InterfaceParams;
 import com.android.net.module.util.SharedLog;
 import com.android.net.module.util.SocketUtils;
+import com.android.net.module.util.arp.ArpPacket;
 import com.android.net.module.util.ip.InterfaceController;
 import com.android.net.module.util.netlink.NetlinkUtils;
 import com.android.networkstack.R;
@@ -123,7 +123,6 @@ import com.android.networkstack.apishim.NetworkInformationShimImpl;
 import com.android.networkstack.apishim.SocketUtilsShimImpl;
 import com.android.networkstack.apishim.common.NetworkInformationShim;
 import com.android.networkstack.apishim.common.ShimUtils;
-import com.android.networkstack.arp.ArpPacket;
 import com.android.networkstack.metrics.IpProvisioningMetrics;
 import com.android.networkstack.metrics.NetworkQuirkMetrics;
 import com.android.networkstack.packets.NeighborAdvertisement;
@@ -473,6 +472,10 @@ public class IpClient extends StateMachine {
     }
 
     public static final String DUMP_ARG_CONFIRM = "confirm";
+
+    // Sysctl parameter strings.
+    private static final String ACCEPT_RA = "accept_ra";
+    private static final String DAD_TRANSMITS = "dad_transmits";
 
     // Below constants are picked up by MessageUtils and exempt from ProGuard optimization.
     private static final int CMD_TERMINATE_AFTER_STOP             = 1;
@@ -1061,11 +1064,6 @@ public class IpClient extends StateMachine {
         return bssid;
     }
 
-    private boolean shouldDisableAcceptRaOnProvisioningLoss() {
-        return mDependencies.isFeatureEnabled(mContext, IPCLIENT_DISABLE_ACCEPT_RA_VERSION,
-                true /* defaultEnabled */);
-    }
-
     @Override
     protected void onQuitting() {
         mCallback.onQuit();
@@ -1442,12 +1440,13 @@ public class IpClient extends StateMachine {
         return config.isProvisionedBy(lp.getLinkAddresses(), lp.getRoutes());
     }
 
-    private void setIpv6AcceptRa(int acceptRa) {
+    // Set "/proc/sys/net/ipv6/conf/${iface}/${name}" with the given specific value.
+    private void setIpv6Sysctl(@NonNull final String name, int value) {
         try {
-            mNetd.setProcSysNet(INetd.IPV6, INetd.CONF, mInterfaceParams.name, "accept_ra",
-                    Integer.toString(acceptRa));
+            mNetd.setProcSysNet(INetd.IPV6, INetd.CONF, mInterfaceParams.name,
+                    name, Integer.toString(value));
         } catch (Exception e) {
-            Log.e(mTag, "Failed to set accept_ra to " + acceptRa + ": " + e);
+            Log.e(mTag, "Failed to set " + name + " to  + " + value + ": " + e);
         }
     }
 
@@ -1458,15 +1457,6 @@ public class IpClient extends StateMachine {
         } catch (RemoteException | ServiceSpecificException e) {
             logError("Couldn't read dad_transmits on " + mInterfaceName, e);
             return null;
-        }
-    }
-
-    private void setIpv6DadTransmits(int dadTransmits) {
-        try {
-            mNetd.setProcSysNet(INetd.IPV6, INetd.CONF, mInterfaceParams.name,
-                    "dad_transmits", Integer.toString(dadTransmits));
-        } catch (Exception e) {
-            Log.e(mTag, "Failed to set dad_transmits to " + dadTransmits + ": " + e);
         }
     }
 
@@ -1564,19 +1554,12 @@ public class IpClient extends StateMachine {
             // local address left on the interface, so applications will be able to reconnect
             // immediately over IPv4 and keep IPv6 link-local capable.
             if (newLp.isIpv4Provisioned()) {
-                if (shouldDisableAcceptRaOnProvisioningLoss()) {
-                    restartIpv6WithAcceptRaDisabled();
-                } else {
-                    mInterfaceCtrl.disableIPv6();
-                }
+                restartIpv6WithAcceptRaDisabled();
                 mNetworkQuirkMetrics.setEvent(NetworkQuirkEvent.QE_IPV6_PROVISIONING_ROUTER_LOST);
                 mNetworkQuirkMetrics.statsWrite();
                 mHasDisabledIpv6OrAcceptRaOnProvLoss = true;
                 delta = PROV_CHANGE_STILL_PROVISIONED;
-                mLog.log(shouldDisableAcceptRaOnProvisioningLoss()
-                        ? "Disabled accept_ra parameter "
-                        : "Disabled IPv6 stack completely "
-                        + "when the IPv6 default router has gone");
+                mLog.log("Disabled accept_ra parameter on loss of IPv6 default router");
             } else {
                 delta = PROV_CHANGE_LOST_PROVISIONING;
             }
@@ -2120,12 +2103,12 @@ public class IpClient extends StateMachine {
     }
 
     private boolean startIPv6(int acceptRa) {
-        setIpv6AcceptRa(acceptRa);
+        setIpv6Sysctl(ACCEPT_RA, acceptRa);
         if (shouldDisableDad()) {
             final Integer dadTransmits = getIpv6DadTransmits();
             if (dadTransmits != null) {
                 mDadTransmits = dadTransmits;
-                setIpv6DadTransmits(0 /* dad_transmits */);
+                setIpv6Sysctl(DAD_TRANSMITS, 0 /* dad_transmits */);
             }
         }
         return mInterfaceCtrl.setIPv6PrivacyExtensions(true)
@@ -2232,7 +2215,7 @@ public class IpClient extends StateMachine {
     private void maybeRestoreDadTransmits() {
         if (mDadTransmits == null) return;
 
-        setIpv6DadTransmits(mDadTransmits);
+        setIpv6Sysctl(DAD_TRANSMITS, mDadTransmits);
         mDadTransmits = null;
     }
 
@@ -2814,11 +2797,10 @@ public class IpClient extends StateMachine {
 
             // Delete the global IPv6 address based on delegated prefix from interface.
             for (LinkAddress la : mLinkProperties.getLinkAddresses()) {
-                if (!la.isIpv6()) continue;
-                final Inet6Address address = (Inet6Address) la.getAddress();
-                if (la.isIpv6() && prefix.contains(address)) {
-                    NetlinkUtils.sendRtmDelAddressRequest(mInterfaceParams.index, address,
-                            (short) la.getPrefixLength());
+                final InetAddress address = la.getAddress();
+                if (prefix.contains(address)) {
+                    NetlinkUtils.sendRtmDelAddressRequest(mInterfaceParams.index,
+                            (Inet6Address) address, (short) la.getPrefixLength());
                 }
             }
         }
