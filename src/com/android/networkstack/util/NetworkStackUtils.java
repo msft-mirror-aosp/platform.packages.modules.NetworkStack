@@ -248,12 +248,6 @@ public class NetworkStackUtils {
             "ipclient_accept_ipv6_link_local_dns_version";
 
     /**
-     * Experiment flag to disable accept_ra parameter when IPv6 provisioning loss happens due to
-     * the default route has gone.
-     */
-    public static final String IPCLIENT_DISABLE_ACCEPT_RA_VERSION = "ipclient_disable_accept_ra";
-
-    /**
      * Experiment flag to enable "mcast_resolicit" neighbor parameter in IpReachabilityMonitor,
      * set it to 3 by default.
      */
@@ -273,13 +267,6 @@ public class NetworkStackUtils {
      */
     public static final String IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION =
             "ip_reachability_ignore_incompleted_ipv6_default_router_version";
-
-    /**
-     * Experiment flag to use the RA lifetime calculation fix in aosp/2276160. It can be disabled
-     * if OEM finds additional battery usage and want to use the old buggy behavior again.
-     */
-    public static final String APF_USE_RA_LIFETIME_CALCULATION_FIX_VERSION =
-            "apf_use_ra_lifetime_calculation_fix_version";
 
     /**
      * Experiment flag to enable DHCPv6 Prefix Delegation(RFC8415) in IpClient.
