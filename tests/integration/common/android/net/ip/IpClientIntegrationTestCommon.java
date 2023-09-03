@@ -505,8 +505,8 @@ public abstract class IpClientIntegrationTestCommon {
 
         @Override
         public Dhcp6Client makeDhcp6Client(Context context, StateMachine controller,
-                InterfaceParams ifParams) {
-            mDhcp6Client = Dhcp6Client.makeDhcp6Client(context, controller, ifParams);
+                InterfaceParams ifParams, Dhcp6Client.Dependencies deps) {
+            mDhcp6Client = Dhcp6Client.makeDhcp6Client(context, controller, ifParams, deps);
             return mDhcp6Client;
         }
 
@@ -523,6 +523,17 @@ public abstract class IpClientIntegrationTestCommon {
         public boolean isFeatureEnabled(final Context context, final String name,
                 final boolean defaultEnabled) {
             return IpClientIntegrationTestCommon.this.isFeatureEnabled(name, defaultEnabled);
+        }
+
+        @Override
+        public Dhcp6Client.Dependencies getDhcp6ClientDependencies() {
+            return new Dhcp6Client.Dependencies() {
+                @Override
+                public int getDeviceConfigPropertyInt(String name, int defaultValue) {
+                    return Dependencies.this.getDeviceConfigPropertyInt(name,
+                            0 /* default value */);
+                }
+            };
         }
 
         @Override
@@ -3148,8 +3159,8 @@ public abstract class IpClientIntegrationTestCommon {
         return false;
     }
 
-    @Test @SignatureRequiredTest(reason = "signature perms are required due to mocked callabck")
-    public void testIgnoreIpv6ProvisioningLoss_disableAcceptRa() throws Exception {
+    @Test
+    public void testIgnoreIpv6ProvisioningLoss_disableAcceptRaDefrtr() throws Exception {
         doDualStackProvisioning();
 
         final CompletableFuture<LinkProperties> lpFuture = new CompletableFuture<>();
@@ -3183,11 +3194,18 @@ public abstract class IpClientIntegrationTestCommon {
         assertTrue(hasRouteTo(lp, IPV4_ANY_ADDRESS_PREFIX)); // IPv4 default route
         assertTrue(lp.getAddresses().get(1).isLinkLocalAddress());
 
-        reset(mCb);
+        clearInvocations(mCb);
 
-        // Send an RA to verify that global IPv6 addresses won't be configured on the interface.
+        // Send an RA to verify that device gains the IPv6 provisioning without default route and
+        // off-link DNS server.
         sendBasicRouterAdvertisement(false /* waitForRs */);
-        verify(mCb, timeout(TEST_TIMEOUT_MS).times(0)).onLinkPropertiesChange(any());
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onLinkPropertiesChange(argThat(
+                x -> x.hasGlobalIpv6Address()
+                        // IPv4, IPv6 link local, privacy and stable privacy
+                        && x.getLinkAddresses().size() == 4
+                        && !x.hasIpv6DefaultRoute()
+                        && x.getDnsServers().size() == 1
+                        && x.getDnsServers().get(0).equals(SERVER_ADDR)));
     }
 
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
@@ -4307,6 +4325,25 @@ public abstract class IpClientIntegrationTestCommon {
                         || newLp.hasIpv6DefaultRoute()
                         || newLp.hasGlobalIpv6Address()
         ));
+    }
+
+    @Test
+    public void testIPv6LinkLocalOnly_verifyAcceptRaDefrtr() throws Exception {
+        ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
+                .withoutIPv4()
+                .withIpv6LinkLocalOnly()
+                .withRandomMacAddress()
+                .build();
+        startIpClientProvisioning(config);
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningSuccess(any());
+
+        clearInvocations(mCb);
+
+        // accept_ra is set to 0 and accept_ra_defrtr is set to 1 in IPv6 link-local only mode,
+        // send another RA to tap interface, to verify that we should not see any IPv6 provisioning
+        // although accept_ra_defrtr is set to 1.
+        sendBasicRouterAdvertisement(false /* waitForRs */);
+        verify(mCb, never()).onLinkPropertiesChange(argThat(x -> x.isIpv6Provisioned()));
     }
 
     @Test
