@@ -34,6 +34,7 @@ import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo
 import com.android.testutils.DevSdkIgnoreRunner
 import com.android.testutils.PacketBridge
 import com.android.testutils.RecorderCallback.CallbackEntry.LinkPropertiesChanged
+import com.android.testutils.SkipPresubmit
 import com.android.testutils.TestDnsServer
 import com.android.testutils.TestHttpServer
 import com.android.testutils.TestableNetworkCallback
@@ -97,7 +98,7 @@ class NetworkStatsIntegrationTest {
     private val packetBridge = runAsShell(MANAGE_TEST_NETWORKS) {
         PacketBridge(context, INTERNAL_V6ADDR, EXTERNAL_V6ADDR, REMOTE_V6ADDR.address)
     }
-    private val cm = context.getSystemService(ConnectivityManager::class.java)
+    private val cm = context.getSystemService(ConnectivityManager::class.java)!!
 
     // Set up DNS server for testing server and DNS64.
     private val fakeDns = TestDnsServer(
@@ -128,7 +129,7 @@ class NetworkStatsIntegrationTest {
     // network stats being counted, which can only be achieved when they are marked as TYPE_TEST.
     // If the tethering module does not support TYPE_TEST stats, then these tests will need
     // to be skipped.
-    fun shouldRunTests() = cm.getNetworkInfo(packetBridge.internalNetwork).type == TYPE_TEST
+    fun shouldRunTests() = cm.getNetworkInfo(packetBridge.internalNetwork)!!.type == TYPE_TEST
 
     @After
     fun tearDown() {
@@ -138,7 +139,7 @@ class NetworkStatsIntegrationTest {
     }
 
     private fun waitFor464XlatReady(network: Network): String {
-        val iface = cm.getLinkProperties(network).interfaceName
+        val iface = cm.getLinkProperties(network)!!.interfaceName!!
 
         // Make a network request to listen to the specific test network.
         val nr = NetworkRequest.Builder()
@@ -151,14 +152,14 @@ class NetworkStatsIntegrationTest {
 
         // Wait for the stacked address to be available.
         testCb.eventuallyExpect<LinkPropertiesChanged> {
-            it.lp.stackedLinks?.getOrNull(0)?.linkAddresses?.getOrNull(0) != null
+            it.lp.stackedLinks.getOrNull(0)?.linkAddresses?.getOrNull(0) != null
         }
 
         return iface
     }
 
     private val Network.mtu: Int get() {
-        val lp = cm.getLinkProperties(this)
+        val lp = cm.getLinkProperties(this)!!
         val mtuStacked = if (lp.stackedLinks[0]?.mtu != 0) lp.stackedLinks[0].mtu else DEFAULT_MTU
         val mtuInterface = if (lp.mtu != 0) lp.mtu else DEFAULT_MTU
         return mtuInterface.coerceAtMost(mtuStacked)
@@ -178,6 +179,7 @@ class NetworkStatsIntegrationTest {
      * While the packets are being forwarded to the external interface, the servers will see
      * the packets originated from the mocked v6 address, and destined to a local v6 address.
      */
+    @SkipPresubmit(reason = "Out of SLO flakiness")
     @Test
     fun test464XlatTcpStats() {
         // Wait for 464Xlat to be ready.
@@ -406,7 +408,7 @@ class NetworkStatsIntegrationTest {
             tag: Int,
             queryApi: (nsm: NetworkStatsManager, template: NetworkTemplate) -> NetworkStats
         ): BareStats {
-            val nsm = context.getSystemService(NetworkStatsManager::class.java)
+            val nsm = context.getSystemService(NetworkStatsManager::class.java)!!
             nsm.forceUpdate()
             val testTemplate = NetworkTemplate.Builder(MATCH_TEST)
                 .setWifiNetworkKeys(setOf(iface)).build()

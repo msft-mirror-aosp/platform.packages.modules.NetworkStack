@@ -17,7 +17,6 @@
 package android.net.apf;
 
 import static android.net.util.SocketUtils.makePacketSocketAddress;
-import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
 import static android.system.OsConstants.AF_PACKET;
 import static android.system.OsConstants.ARPHRD_ETHER;
 import static android.system.OsConstants.ETH_P_ARP;
@@ -34,7 +33,6 @@ import static com.android.net.module.util.NetworkStackConstants.ICMPV6_NEIGHBOR_
 import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ROUTER_ADVERTISEMENT;
 import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ROUTER_SOLICITATION;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_LEN;
-import static com.android.networkstack.util.NetworkStackUtils.APF_USE_RA_LIFETIME_CALCULATION_FIX_VERSION;
 
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -67,7 +65,6 @@ import com.android.internal.util.HexDump;
 import com.android.internal.util.IndentingPrintWriter;
 import com.android.net.module.util.CollectionUtils;
 import com.android.net.module.util.ConnectivityUtils;
-import com.android.net.module.util.DeviceConfigUtils;
 import com.android.net.module.util.InterfaceParams;
 import com.android.net.module.util.SocketUtils;
 import com.android.networkstack.util.NetworkStackUtils;
@@ -322,6 +319,8 @@ public class ApfFilter {
 
     private static final int ICMP6_TYPE_OFFSET = ETH_HEADER_LEN + IPV6_HEADER_LEN;
 
+    private static final int IPPROTO_HOPOPTS = 0;
+
     // NOTE: this must be added to the IPv4 header length in IPV4_HEADER_SIZE_MEMORY_SLOT
     private static final int UDP_DESTINATION_PORT_OFFSET = ETH_HEADER_LEN + 2;
     private static final int UDP_HEADER_LEN = 8;
@@ -388,9 +387,6 @@ public class ApfFilter {
     // Ignore non-zero RDNSS lifetimes below this value.
     private final int mMinRdnssLifetimeSec;
 
-    // Flag to use the RA lifetime calculation fix in aosp/2276160.
-    private final boolean mUseLifetimeCalculationFix;
-
     // Detects doze mode state transitions.
     private final BroadcastReceiver mDeviceIdleReceiver = new BroadcastReceiver() {
         @Override
@@ -413,37 +409,15 @@ public class ApfFilter {
     @GuardedBy("this")
     private int mIPv4PrefixLength;
 
-    /**
-     * Dependencies for the ApfFilter. Useful to be mocked in tests.
-     */
-    public static class Dependencies {
-        /**
-         * Return whether a feature guarded by a feature flag is enabled.
-         * @see NetworkStackUtils#isFeatureEnabled(Context, String, String)
-         */
-        public boolean isFeatureEnabled(final Context context, final String name,
-                boolean defaultEnabled) {
-            return DeviceConfigUtils.isFeatureEnabled(context, NAMESPACE_CONNECTIVITY, name,
-                    defaultEnabled);
-        }
-    }
-
-    public ApfFilter(Context context, ApfConfiguration config, InterfaceParams ifParams,
-            IpClientCallbacksWrapper ipClientCallback, IpConnectivityLog log) {
-        this(context, config, ifParams, ipClientCallback, log, new Dependencies());
-    }
-
     @VisibleForTesting
     public ApfFilter(Context context, ApfConfiguration config, InterfaceParams ifParams,
-            IpClientCallbacksWrapper ipClientCallback, IpConnectivityLog log, Dependencies deps) {
+            IpClientCallbacksWrapper ipClientCallback, IpConnectivityLog log) {
         mApfCapabilities = config.apfCapabilities;
         mIpClientCallback = ipClientCallback;
         mInterfaceParams = ifParams;
         mMulticastFilter = config.multicastFilter;
         mDrop802_3Frames = config.ieee802_3Filter;
         mMinRdnssLifetimeSec = config.minRdnssLifetimeSec;
-        mUseLifetimeCalculationFix = deps.isFeatureEnabled(context,
-                APF_USE_RA_LIFETIME_CALCULATION_FIX_VERSION, true /* defaultEnabled */);
         mContext = context;
 
         if (mApfCapabilities.hasDataAccess()) {
@@ -535,7 +509,7 @@ public class ApfFilter {
             socket = Os.socket(AF_PACKET, SOCK_RAW, ETH_P_IPV6);
             SocketAddress addr = makePacketSocketAddress(ETH_P_IPV6, mInterfaceParams.index);
             Os.bind(socket, addr);
-            NetworkStackUtils.attachRaFilter(socket, mApfCapabilities.apfPacketFormat);
+            NetworkStackUtils.attachRaFilter(socket);
         } catch(SocketException|ErrnoException e) {
             Log.e(TAG, "Error starting filter", e);
             return;
@@ -954,17 +928,8 @@ public class ApfFilter {
         // Filter for a fraction of the lifetime and adjust for the age of the RA.
         @GuardedBy("ApfFilter.this")
         int filterLifetime() {
-            // Use a flag from device config to toggle on/off the use of lifetime calculation fix
-            // in aosp/2276160. The old buggy behavior drops more RAs in some circumstances which
-            // probably use less battery. We can change it immediately if any OEM complains about
-            // additional battery usage after the fix.
-            if (mUseLifetimeCalculationFix) {
-                return (int) (mMinLifetime / FRACTION_OF_LIFETIME_TO_FILTER)
-                        - (int) (mProgramBaseTime - mLastSeen);
-            } else {
-                // The old buggy formula, always filter a fraction of the remaining lifetime.
-                return (int) (currentLifetime() / FRACTION_OF_LIFETIME_TO_FILTER);
-            }
+            return (int) (mMinLifetime / FRACTION_OF_LIFETIME_TO_FILTER)
+                    - (int) (mProgramBaseTime - mLastSeen);
         }
 
         @GuardedBy("ApfFilter.this")
@@ -1486,6 +1451,8 @@ public class ApfFilter {
     private void generateIPv6FilterLocked(ApfGenerator gen) throws IllegalInstructionException {
         // Here's a basic summary of what the IPv6 filter program does:
         //
+        // if there is a hop-by-hop option present (e.g. MLD query)
+        //   pass
         // if we're dropping multicast
         //   if it's not IPCMv6 or it's ICMPv6 but we're in doze mode:
         //     if it's multicast:
@@ -1499,6 +1466,10 @@ public class ApfFilter {
         //   drop
 
         gen.addLoad8(Register.R0, IPV6_NEXT_HEADER_OFFSET);
+
+        // MLD packets set the router-alert hop-by-hop option.
+        // TODO: be smarter about not blindly passing every packet with HBH options.
+        gen.addJumpIfR0Equals(IPPROTO_HOPOPTS, mCountAndPassLabel);
 
         // Drop multicast if the multicast filter is enabled.
         if (mMulticastFilter) {
