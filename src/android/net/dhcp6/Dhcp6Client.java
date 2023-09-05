@@ -17,6 +17,7 @@
 package android.net.dhcp6;
 
 import static android.net.dhcp6.Dhcp6Packet.PrefixDelegation;
+import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
 import static android.system.OsConstants.AF_INET6;
 import static android.system.OsConstants.IFA_F_NODAD;
 import static android.system.OsConstants.IPPROTO_UDP;
@@ -32,6 +33,7 @@ import static com.android.net.module.util.NetworkStackConstants.RFC7421_PREFIX_L
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_MANAGETEMPADDR;
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_NOPREFIXROUTE;
 import static com.android.networkstack.util.NetworkStackUtils.createInet6AddressFromEui64;
+import static com.android.networkstack.util.NetworkStackUtils.macAddressToEui64;
 
 import android.content.Context;
 import android.net.IpPrefix;
@@ -52,6 +54,7 @@ import com.android.internal.util.HexDump;
 import com.android.internal.util.State;
 import com.android.internal.util.StateMachine;
 import com.android.internal.util.WakeupMessage;
+import com.android.net.module.util.DeviceConfigUtils;
 import com.android.net.module.util.InterfaceParams;
 import com.android.net.module.util.PacketReader;
 import com.android.net.module.util.netlink.NetlinkUtils;
@@ -119,6 +122,7 @@ public class Dhcp6Client extends StateMachine {
     @Nullable private byte[] mServerDuid;
 
     // State variables.
+    @NonNull private final Dependencies mDependencies;
     @NonNull private final Context mContext;
     @NonNull private final Random mRandom;
     @NonNull private final StateMachine mController;
@@ -140,15 +144,30 @@ public class Dhcp6Client extends StateMachine {
     private State mRenewState = new RenewState();
     private State mRebindState = new RebindState();
 
+    /**
+     * Encapsulates Dhcp6Client depencencies that's used for unit testing and
+     * integration testing.
+     */
+    public static class Dependencies {
+        /**
+         * Read an integer DeviceConfig property.
+         */
+        public int getDeviceConfigPropertyInt(String name, int defaultValue) {
+            return DeviceConfigUtils.getDeviceConfigPropertyInt(NAMESPACE_CONNECTIVITY, name,
+                    defaultValue);
+        }
+    }
+
     private WakeupMessage makeWakeupMessage(String cmdName, int cmd) {
         cmdName = Dhcp6Client.class.getSimpleName() + "." + mIface.name + "." + cmdName;
         return new WakeupMessage(mContext, getHandler(), cmdName, cmd);
     }
 
     private Dhcp6Client(@NonNull final Context context, @NonNull final StateMachine controller,
-            @NonNull final InterfaceParams iface) {
+            @NonNull final InterfaceParams iface, @NonNull final Dependencies deps) {
         super(TAG, controller.getHandler());
 
+        mDependencies = deps;
         mContext = context;
         mController = controller;
         mIface = iface;
@@ -182,8 +201,9 @@ public class Dhcp6Client extends StateMachine {
      * Make a Dhcp6Client instance.
      */
     public static Dhcp6Client makeDhcp6Client(@NonNull final Context context,
-            @NonNull final StateMachine controller, @NonNull final InterfaceParams ifParams) {
-        final Dhcp6Client client = new Dhcp6Client(context, controller, ifParams);
+            @NonNull final StateMachine controller, @NonNull final InterfaceParams ifParams,
+            @NonNull final Dependencies deps) {
+        final Dhcp6Client client = new Dhcp6Client(context, controller, ifParams, deps);
         client.start();
         return client;
     }
@@ -521,7 +541,7 @@ public class Dhcp6Client extends StateMachine {
             // We don't need to remember IPv6 addresses that need to extend the lifetime every
             // time it enters BoundState.
             final Inet6Address address = createInet6AddressFromEui64(prefix,
-                    mIface.macAddr.toByteArray());
+                    macAddressToEui64(mIface.macAddr));
             final int flags = IFA_F_NOPREFIXROUTE | IFA_F_MANAGETEMPADDR | IFA_F_NODAD;
             final long now = SystemClock.elapsedRealtime();
             final long deprecationTime = now + mReply.ipo.preferred;

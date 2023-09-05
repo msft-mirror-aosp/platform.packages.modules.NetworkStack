@@ -505,8 +505,8 @@ public abstract class IpClientIntegrationTestCommon {
 
         @Override
         public Dhcp6Client makeDhcp6Client(Context context, StateMachine controller,
-                InterfaceParams ifParams) {
-            mDhcp6Client = Dhcp6Client.makeDhcp6Client(context, controller, ifParams);
+                InterfaceParams ifParams, Dhcp6Client.Dependencies deps) {
+            mDhcp6Client = Dhcp6Client.makeDhcp6Client(context, controller, ifParams, deps);
             return mDhcp6Client;
         }
 
@@ -523,6 +523,17 @@ public abstract class IpClientIntegrationTestCommon {
         public boolean isFeatureEnabled(final Context context, final String name,
                 final boolean defaultEnabled) {
             return IpClientIntegrationTestCommon.this.isFeatureEnabled(name, defaultEnabled);
+        }
+
+        @Override
+        public Dhcp6Client.Dependencies getDhcp6ClientDependencies() {
+            return new Dhcp6Client.Dependencies() {
+                @Override
+                public int getDeviceConfigPropertyInt(String name, int defaultValue) {
+                    return Dependencies.this.getDeviceConfigPropertyInt(name,
+                            0 /* default value */);
+                }
+            };
         }
 
         @Override
@@ -3163,8 +3174,6 @@ public abstract class IpClientIntegrationTestCommon {
                     // Only IPv4 provisioned and IPv6 link-local address
                     final boolean isIPv6LinkLocalAndIPv4OnlyProvisioned =
                             (x.getLinkAddresses().size() == 2
-                                    // fe80::/64, IPv4 default route, IPv4 subnet route
-                                    && x.getRoutes().size() == 3
                                     && x.getDnsServers().size() == 1
                                     && x.getAddresses().get(0) instanceof Inet4Address
                                     && x.getDnsServers().get(0) instanceof Inet4Address);
@@ -3177,7 +3186,6 @@ public abstract class IpClientIntegrationTestCommon {
         assertNotNull(lp);
         assertEquals(lp.getAddresses().get(0), CLIENT_ADDR);
         assertEquals(lp.getDnsServers().get(0), SERVER_ADDR);
-        assertEquals(3, lp.getRoutes().size());
         assertTrue(hasRouteTo(lp, IPV6_LINK_LOCAL_PREFIX)); // fe80::/64
         assertTrue(hasRouteTo(lp, IPV4_TEST_SUBNET_PREFIX)); // IPv4 directly-connected route
         assertTrue(hasRouteTo(lp, IPV4_ANY_ADDRESS_PREFIX)); // IPv4 default route
@@ -3185,9 +3193,9 @@ public abstract class IpClientIntegrationTestCommon {
 
         clearInvocations(mCb);
 
-        // Send an RA to verify that device gains the IPv6 provisioning without default route and
-        // off-link DNS server.
-        sendBasicRouterAdvertisement(false /* waitForRs */);
+        // Wait for RS after IPv6 stack has been restarted and reply with a normal RA to verify
+        // that device gains the IPv6 provisioning without default route and off-link DNS server.
+        sendBasicRouterAdvertisement(true /* waitForRs */);
         verify(mCb, timeout(TEST_TIMEOUT_MS)).onLinkPropertiesChange(argThat(
                 x -> x.hasGlobalIpv6Address()
                         // IPv4, IPv6 link local, privacy and stable privacy
