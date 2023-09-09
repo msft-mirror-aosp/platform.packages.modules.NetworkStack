@@ -34,7 +34,6 @@ import static android.system.OsConstants.ETH_P_ARP;
 import static android.system.OsConstants.ETH_P_IPV6;
 import static android.system.OsConstants.SOCK_NONBLOCK;
 import static android.system.OsConstants.SOCK_RAW;
-
 import static com.android.net.module.util.NetworkStackConstants.ARP_REPLY;
 import static com.android.net.module.util.NetworkStackConstants.ETHER_BROADCAST;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ALL_ROUTERS_MULTICAST;
@@ -780,12 +779,11 @@ public class IpClient extends StateMachine {
 
         /**
          * Return whether a feature guarded by a feature flag is enabled.
-         * @see NetworkStackUtils#isFeatureEnabled(Context, String, String)
+         * @see DeviceConfigUtils#isNetworkStackFeatureEnabled(Context, String, boolean)
          */
         public boolean isFeatureEnabled(final Context context, final String name,
                 boolean defaultEnabled) {
-            return DeviceConfigUtils.isFeatureEnabled(context, NAMESPACE_CONNECTIVITY, name,
-                    defaultEnabled);
+            return DeviceConfigUtils.isNetworkStackFeatureEnabled(context, name, defaultEnabled);
         }
 
         /**
@@ -796,6 +794,15 @@ public class IpClient extends StateMachine {
         public ApfFilter maybeCreateApfFilter(Context context, ApfFilter.ApfConfiguration config,
                 InterfaceParams ifParams, IpClientCallbacksWrapper cb) {
             return ApfFilter.maybeCreate(context, config, ifParams, cb);
+        }
+
+        /**
+         * Check whether one specific experimental feature in NetworkStack module from
+         * {@link DeviceConfig} is not disabled.
+         * @see DeviceConfigUtils#isNetworkStackFeatureNotChickenedOut(String)
+         */
+        public boolean isNetworkStackFeatureNotChickenedOut(final String name) {
+            return DeviceConfigUtils.isNetworkStackFeatureNotChickenedOut(name);
         }
     }
 
@@ -1451,10 +1458,10 @@ public class IpClient extends StateMachine {
     // Set "/proc/sys/net/ipv6/conf/${iface}/${name}" with the given specific value.
     private void setIpv6Sysctl(@NonNull final String name, int value) {
         try {
-            mNetd.setProcSysNet(INetd.IPV6, INetd.CONF, mInterfaceParams.name,
+            mNetd.setProcSysNet(INetd.IPV6, INetd.CONF, mInterfaceName,
                     name, Integer.toString(value));
         } catch (Exception e) {
-            Log.e(mTag, "Failed to set " + name + " to  + " + value + ": " + e);
+            Log.e(mTag, "Failed to set " + name + " to " + value + ": " + e);
         }
     }
 
@@ -2186,9 +2193,16 @@ public class IpClient extends StateMachine {
         //     - disableIpv6() will clear autoconf IPv6 routes as well, and
         //     - we don't get IPv4 routes from netlink
         // so we neither react to nor need to wait for changes in either.
-
         mInterfaceCtrl.disableIPv6();
         mInterfaceCtrl.clearAllAddresses();
+
+        // Reset IPv6 sysctls to their initial state. It's better to restore
+        // sysctls after IPv6 stack is disabled, which prevents a potential
+        // race where receiving an RA between restoring accept_ra and disabling
+        // IPv6 stack, although it's unlikely.
+        setIpv6Sysctl(ACCEPT_RA, 2);
+        setIpv6Sysctl(ACCEPT_RA_DEFRTR, 1);
+        maybeRestoreDadTransmits();
     }
 
     private void maybeSaveNetworkToIpMemoryStore() {
@@ -2407,8 +2421,6 @@ public class IpClient extends StateMachine {
 
             // Restore the interface MTU to initial value if it has changed.
             maybeRestoreInterfaceMtu();
-            // Reset number of dad_transmits to default value if changed.
-            maybeRestoreDadTransmits();
             // Reset DTIM multiplier to default value if changed.
             if (mMaxDtimMultiplier != DTIM_MULTIPLIER_RESET) {
                 mCallback.setMaxDtimMultiplier(DTIM_MULTIPLIER_RESET);
@@ -2920,10 +2932,17 @@ public class IpClient extends StateMachine {
                     break;
 
                 case EVENT_IPV6_AUTOCONF_TIMEOUT:
-                    if (mLinkProperties.isIpv6Provisioned()) break;
-                    Log.d(mTag, "Fail to get IPv6 address via autoconf, "
-                            + "start DHCPv6 Prefix Delegation");
-                    startDhcp6PrefixDelegation();
+                    // Only enable DHCPv6 PD on networks that support IPv6 but not autoconf. The
+                    // right way to do it is to use the P flag, once it's defined. For now, assume
+                    // that the network doesn't support autoconf if it provides an IPv6 default
+                    // route but no addresses via an RA.
+                    // TODO: leverage the P flag in RA to determine if starting DHCPv6 PD or not,
+                    // which is more clear and straightforward.
+                    if (!hasIpv6Address(mLinkProperties)
+                            && mLinkProperties.hasIpv6DefaultRoute()) {
+                        Log.d(TAG, "Network supports IPv6 but not autoconf, starting DHCPv6 PD");
+                        startDhcp6PrefixDelegation();
+                    }
                     break;
 
                 case DhcpClient.CMD_PRE_DHCP_ACTION:
@@ -3072,16 +3091,28 @@ public class IpClient extends StateMachine {
         mCallback.setMaxDtimMultiplier(multiplier);
     }
 
+    /**
+     * Check if current LinkProperties has either global IPv6 address or ULA (i.e. non IPv6
+     * link-local addres).
+     *
+     * This function can be used to derive the DTIM multiplier per current network situation or
+     * decide if we should start DHCPv6 Prefix Delegation when no IPv6 addresses are available
+     * after autoconf timeout(5s).
+     */
+    private static boolean hasIpv6Address(@NonNull final LinkProperties lp) {
+        return CollectionUtils.any(lp.getLinkAddresses(),
+                la -> {
+                    final InetAddress address = la.getAddress();
+                    return (address instanceof Inet6Address) && !address.isLinkLocalAddress();
+                });
+    }
+
     private int deriveDtimMultiplier() {
         final boolean hasIpv4Addr = mLinkProperties.hasIpv4Address();
         // For a host in the network that has only ULA and link-local but no GUA, consider
         // that it also has IPv6 connectivity. LinkProperties#isIpv6Provisioned only returns
         // true when it has a GUA, so we cannot use it for IPv6-only network case.
-        final boolean hasIpv6Addr = CollectionUtils.any(mLinkProperties.getLinkAddresses(),
-                la -> {
-                    final InetAddress address = la.getAddress();
-                    return (address instanceof Inet6Address) && !address.isLinkLocalAddress();
-                });
+        final boolean hasIpv6Addr = hasIpv6Address(mLinkProperties);
 
         final int multiplier;
         if (!mMulticastFiltering) {
