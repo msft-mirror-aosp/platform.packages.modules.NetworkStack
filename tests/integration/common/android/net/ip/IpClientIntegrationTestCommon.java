@@ -17,6 +17,8 @@
 package android.net.ip;
 
 import static android.Manifest.permission.MANAGE_TEST_NETWORKS;
+import static android.Manifest.permission.READ_DEVICE_CONFIG;
+import static android.Manifest.permission.WRITE_DEVICE_CONFIG;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_ROAMING;
@@ -48,7 +50,6 @@ import static android.system.OsConstants.IFA_F_TEMPORARY;
 import static android.system.OsConstants.IPPROTO_ICMPV6;
 import static android.system.OsConstants.IPPROTO_IPV6;
 import static android.system.OsConstants.IPPROTO_UDP;
-
 import static com.android.net.module.util.Inet4AddressUtils.getBroadcastAddress;
 import static com.android.net.module.util.Inet4AddressUtils.getPrefixMaskAsInet4Address;
 import static com.android.net.module.util.NetworkStackConstants.ALL_DHCP_RELAY_AGENTS_AND_SERVERS;
@@ -77,9 +78,7 @@ import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_ON_LINK
 import static com.android.testutils.MiscAsserts.assertThrows;
 import static com.android.testutils.ParcelUtils.parcelingRoundTrip;
 import static com.android.testutils.TestPermissionUtil.runAsShell;
-
 import static junit.framework.Assert.fail;
-
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -114,6 +113,7 @@ import static org.mockito.Mockito.when;
 import android.app.AlarmManager;
 import android.app.AlarmManager.OnAlarmListener;
 import android.app.Instrumentation;
+import android.app.UiAutomation;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.res.Resources;
@@ -169,9 +169,11 @@ import android.os.PowerManager;
 import android.os.RemoteException;
 import android.os.SystemClock;
 import android.os.SystemProperties;
+import android.provider.DeviceConfig;
 import android.stats.connectivity.NudEventType;
 import android.system.ErrnoException;
 import android.system.Os;
+import android.util.ArrayMap;
 
 import androidx.annotation.NonNull;
 import androidx.test.InstrumentationRegistry;
@@ -620,8 +622,6 @@ public abstract class IpClientIntegrationTestCommon {
 
     protected abstract void setFeatureEnabled(String name, boolean enabled);
 
-    protected abstract void setDeviceConfigProperty(String name, int value);
-
     protected abstract boolean isFeatureEnabled(String name, boolean defaultEnabled);
 
     protected abstract boolean useNetworkStackSignature();
@@ -641,6 +641,33 @@ public abstract class IpClientIntegrationTestCommon {
             fail("Device running root tests doesn't support TestNetworkStackServiceClient.");
         }
         return !useNetworkStackSignature() && mIsSignatureRequiredTest;
+    }
+
+    private ArrayMap<String, String> mOriginalPropertyValues = new ArrayMap<>();
+
+    protected void setDeviceConfigProperty(String name, String value) {
+        final UiAutomation am = InstrumentationRegistry.getInstrumentation().getUiAutomation();
+        am.adoptShellPermissionIdentity(READ_DEVICE_CONFIG, WRITE_DEVICE_CONFIG);
+        try {
+            // Do not use computeIfAbsent as it would overwrite null values,
+            // property originally unset.
+            if (!mOriginalPropertyValues.containsKey(name)) {
+                mOriginalPropertyValues.put(name,
+                        DeviceConfig.getProperty(DeviceConfig.NAMESPACE_CONNECTIVITY, name));
+            }
+            DeviceConfig.setProperty(DeviceConfig.NAMESPACE_CONNECTIVITY, name, value,
+                    false /* makeDefault */);
+        } finally {
+            am.dropShellPermissionIdentity();
+        }
+    }
+
+    protected void setDeviceConfigProperty(String name, int value) {
+        setDeviceConfigProperty(name, Integer.toString(value));
+    }
+
+    private void setFeatureChickenedOut(String name, boolean chickenedOut) {
+        setDeviceConfigProperty(name, chickenedOut ? "1" : "0");
     }
 
     protected void setDhcpFeatures(final boolean isDhcpLeaseCacheEnabled,
@@ -690,8 +717,12 @@ public abstract class IpClientIntegrationTestCommon {
         // in IpClientLinkObserver will use mIsNetlinkEventParseEnabled to decide the proper
         // bindGroups, otherwise, the parameterized value got from ArrayMap(integration test) is
         // always false.
-        setFeatureEnabled(NetworkStackUtils.IPCLIENT_PARSE_NETLINK_EVENTS_VERSION,
-                mIsNetlinkEventParseEnabled /* default value */);
+        //
+        // Set feature kill switch flag with the parameterized value to keep running test cases on
+        // both code paths. Once we clean up the old code path (i.e.when the parameterized variable
+        // is false), then we can also delete this code.
+        setFeatureChickenedOut(NetworkStackUtils.IPCLIENT_PARSE_NETLINK_EVENTS_FORCE_DISABLE,
+                !mIsNetlinkEventParseEnabled);
 
         // Enable DHCPv6 Prefix Delegation.
         setFeatureEnabled(NetworkStackUtils.IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION,
@@ -790,6 +821,22 @@ public abstract class IpClientIntegrationTestCommon {
         teardownTapInterface();
         mIIpClient.shutdown();
         awaitIpClientShutdown();
+    }
+
+    @After
+    public void tearDownDeviceConfigProperties() {
+        if (testSkipped()) return;
+        final UiAutomation am = InstrumentationRegistry.getInstrumentation().getUiAutomation();
+        am.adoptShellPermissionIdentity(READ_DEVICE_CONFIG, WRITE_DEVICE_CONFIG);
+        try {
+            for (String key : mOriginalPropertyValues.keySet()) {
+                if (key == null) continue;
+                DeviceConfig.setProperty(DeviceConfig.NAMESPACE_CONNECTIVITY, key,
+                        mOriginalPropertyValues.get(key), false /* makeDefault */);
+            }
+        } finally {
+            am.dropShellPermissionIdentity();
+        }
     }
 
     private void setUpTapInterface() throws Exception {
@@ -3174,8 +3221,6 @@ public abstract class IpClientIntegrationTestCommon {
                     // Only IPv4 provisioned and IPv6 link-local address
                     final boolean isIPv6LinkLocalAndIPv4OnlyProvisioned =
                             (x.getLinkAddresses().size() == 2
-                                    // fe80::/64, IPv4 default route, IPv4 subnet route
-                                    && x.getRoutes().size() == 3
                                     && x.getDnsServers().size() == 1
                                     && x.getAddresses().get(0) instanceof Inet4Address
                                     && x.getDnsServers().get(0) instanceof Inet4Address);
@@ -3188,7 +3233,6 @@ public abstract class IpClientIntegrationTestCommon {
         assertNotNull(lp);
         assertEquals(lp.getAddresses().get(0), CLIENT_ADDR);
         assertEquals(lp.getDnsServers().get(0), SERVER_ADDR);
-        assertEquals(3, lp.getRoutes().size());
         assertTrue(hasRouteTo(lp, IPV6_LINK_LOCAL_PREFIX)); // fe80::/64
         assertTrue(hasRouteTo(lp, IPV4_TEST_SUBNET_PREFIX)); // IPv4 directly-connected route
         assertTrue(hasRouteTo(lp, IPV4_ANY_ADDRESS_PREFIX)); // IPv4 default route
@@ -3196,9 +3240,9 @@ public abstract class IpClientIntegrationTestCommon {
 
         clearInvocations(mCb);
 
-        // Send an RA to verify that device gains the IPv6 provisioning without default route and
-        // off-link DNS server.
-        sendBasicRouterAdvertisement(false /* waitForRs */);
+        // Wait for RS after IPv6 stack has been restarted and reply with a normal RA to verify
+        // that device gains the IPv6 provisioning without default route and off-link DNS server.
+        sendBasicRouterAdvertisement(true /* waitForRs */);
         verify(mCb, timeout(TEST_TIMEOUT_MS)).onLinkPropertiesChange(argThat(
                 x -> x.hasGlobalIpv6Address()
                         // IPv4, IPv6 link local, privacy and stable privacy
@@ -4804,25 +4848,68 @@ public abstract class IpClientIntegrationTestCommon {
         verify(mCb, never()).onProvisioningSuccess(any());
     }
 
-    @Test
-    public void testDhcp6Pd_notStart() throws Exception {
-        final ByteBuffer pio = buildPioOption(3600, 1800, "2001:db8:1::/64");
-        final ByteBuffer rdnss = buildRdnssOption(3600, "2001:4860:4860::64");
-        final ByteBuffer slla = buildSllaOption();
-        final ByteBuffer ra = buildRaPacket(pio, rdnss, slla);
+    private void runDhcp6PdNotStartInDualStackTest(final String prefix, final String dnsServer)
+            throws Exception {
+        final List<ByteBuffer> options = new ArrayList<>();
+        if (prefix != null) {
+            options.add(buildPioOption(3600, 1800, prefix));
+        }
+        if (dnsServer != null) {
+            options.add(buildRdnssOption(3600, dnsServer));
+        }
+        options.add(buildSllaOption());
+        final ByteBuffer ra = buildRaPacket(options.toArray(new ByteBuffer[options.size()]));
 
         ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
-                .withoutIPv4()
                 .build();
+        setDhcpFeatures(false /* isDhcpLeaseCacheEnabled */, true /* isRapidCommitEnabled */,
+                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
         startIpClientProvisioning(config);
 
         waitForRouterSolicitation();
         mPacketReader.sendResponse(ra);
 
-        // Response an normal RA for IPv6 provisioning, then DHCPv6 prefix delegation
-        // should not start.
+        // Start IPv4 provisioning and wait until entire provisioning completes.
+        handleDhcpPackets(true /* isSuccessLease */, TEST_LEASE_DURATION_S,
+                true /* shouldReplyRapidCommitAck */, TEST_DEFAULT_MTU, null /* serverSentUrl */);
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningSuccess(any());
+    }
+
+    @Test
+    public void testDhcp6Pd_notStartWithGlobalPio() throws Exception {
+        runDhcp6PdNotStartInDualStackTest("2001:db8:1::/64" /* prefix */,
+                "2001:4860:4860::64" /* dnsServer */);
+        // Reply with a normal RA with global prefix and an off-link DNS for IPv6 provisioning,
+        // DHCPv6 prefix delegation should not start.
         assertNull(getNextDhcp6Packet(PACKET_TIMEOUT_MS));
-        verify(mCb).onProvisioningSuccess(any());
+    }
+
+    @Test
+    public void testDhcp6Pd_notStartWithUlaPioAndDns() throws Exception {
+        runDhcp6PdNotStartInDualStackTest("fd7c:9df8:7f39:dc89::/64" /* prefix */,
+                "fd7c:9df8:7f39:dc89::1"  /* dnsServer */);
+        // Reply with a normal RA even with ULA prefix and on-link ULA DNS for IPv6 provisioning,
+        // DHCPv6 prefix delegation should not start.
+        assertNull(getNextDhcp6Packet(PACKET_TIMEOUT_MS));
+    }
+
+    @Test
+    public void testDhcp6Pd_notStartWithUlaPioAndOffLinkDns() throws Exception {
+        runDhcp6PdNotStartInDualStackTest("fd7c:9df8:7f39:dc89::/64" /* prefix */,
+                "2001:4860:4860::64"  /* dnsServer */);
+        // Reply with a normal RA even with ULA prefix and off-link DNS for IPv6 provisioning,
+        // DHCPv6 prefix delegation should not start.
+        assertNull(getNextDhcp6Packet(PACKET_TIMEOUT_MS));
+    }
+
+    @Test
+    public void testDhcp6Pd_startWithNoNonIpv6LinkLocalAddresses() throws Exception {
+        runDhcp6PdNotStartInDualStackTest(null /* prefix */,
+                "2001:4860:4860::64"  /* dnsServer */);
+        // Reply with a normal RA with only RDNSS but no PIO for IPv6 provisioning,
+        // DHCPv6 prefix delegation should start.
+        final Dhcp6Packet packet = getNextDhcp6Packet(PACKET_TIMEOUT_MS);
+        assertTrue(packet instanceof Dhcp6SolicitPacket);
     }
 
     @Test
@@ -4942,5 +5029,35 @@ public abstract class IpClientIntegrationTestCommon {
             }
         }
         verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningFailure(any());
+    }
+
+    @Test
+    @SignatureRequiredTest(reason = "requires mocked netd to read/write IPv6 sysctl")
+    public void testIpv6SysctlsRestAfterStoppingIpClient() throws Exception {
+        ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
+                .withoutIPv4()
+                .build();
+        // dad_transmits has been set to 0 in disableIpv6ProvisioningDelays, re-enable
+        // dad_transmits for testing, production code will restore all IPv6 sysctls at
+        // StoppedState#enter anyway, read this parameter value after IpClient shutdown
+        // to check if that's default value 1.
+        mNetd.setProcSysNet(INetd.IPV6, INetd.CONF, mIfaceName, "dad_transmits", "1");
+        startIpClientProvisioning(config);
+        verify(mNetd, timeout(TEST_TIMEOUT_MS)).interfaceSetEnableIPv6(mIfaceName, true);
+        doIpv6OnlyProvisioning();
+
+        // Shutdown IpClient and check if the IPv6 sysctls: accept_ra, accept_ra_defrtr and
+        // dad_transmits have been reset to the default values.
+        mIpc.shutdown();
+        awaitIpClientShutdown();
+        final int dadTransmits = Integer.parseUnsignedInt(
+                mNetd.getProcSysNet(INetd.IPV6, INetd.CONF, mIfaceName, "dad_transmits"));
+        assertEquals(1, dadTransmits);
+        final int acceptRa = Integer.parseUnsignedInt(
+                mNetd.getProcSysNet(INetd.IPV6, INetd.CONF, mIfaceName, "accept_ra"));
+        assertEquals(2, acceptRa);
+        final int acceptRaDefRtr = Integer.parseUnsignedInt(
+                mNetd.getProcSysNet(INetd.IPV6, INetd.CONF, mIfaceName, "accept_ra_defrtr"));
+        assertEquals(1, acceptRaDefRtr);
     }
 }
