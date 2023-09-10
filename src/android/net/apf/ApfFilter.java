@@ -589,10 +589,16 @@ public class ApfFilter {
         private static final int ICMP6_PREFIX_OPTION_PREFERRED_LIFETIME_OFFSET = 8;
         private static final int ICMP6_PREFIX_OPTION_PREFERRED_LIFETIME_LEN = 4;
 
+        // From RFC4861: mtu size option
+        private static final int ICMP6_MTU_OPTION_TYPE = 5;
         // From RFC6106: Recursive DNS Server option
         private static final int ICMP6_RDNSS_OPTION_TYPE = 25;
         // From RFC6106: DNS Search List option
         private static final int ICMP6_DNSSL_OPTION_TYPE = 31;
+        // From RFC8910: Captive-Portal option
+        private static final int ICMP6_CAPTIVE_PORTAL_OPTION_TYPE = 37;
+        // From RFC8781: PREF64 option
+        private static final int ICMP6_PREF64_OPTION_TYPE = 38;
 
         // From RFC4191: Route Information option
         private static final int ICMP6_ROUTE_INFO_OPTION_TYPE = 24;
@@ -607,7 +613,7 @@ public class ApfFilter {
         private final ArrayList<PacketSection> mPacketSections = new ArrayList<>();
 
         // Minimum lifetime in packet
-        long mMinLifetime;
+        int mMinLifetime;
         // When the packet was last captured, in seconds since Unix Epoch
         long mLastSeen;
 
@@ -728,9 +734,28 @@ public class ApfFilter {
             // check to prevent doing so in the presence of bugs or malformed or
             // truncated packets.
             if (length == 0) return;
+
+            // we need to add a MATCH section 'from, length, MATCH, 0, 0'
+            int from = mPacket.position();
+
+            // if possible try to increase the length of the previous match section
+            int lastIdx = mPacketSections.size() - 1;
+            if (lastIdx >= 0) {  // there had to be a previous section
+                PacketSection prev = mPacketSections.get(lastIdx);
+                if (prev.type == PacketSection.Type.MATCH) {  // of type match
+                    if (prev.option == 0 && prev.lifetime == 0) {  // technically guaranteed
+                        if (prev.start + prev.length == from) {  // ending where we start
+                            from -= prev.length;
+                            length += prev.length;
+                            mPacketSections.remove(lastIdx);
+                        }
+                    }
+                }
+            }
+
             mPacketSections.add(
-                    new PacketSection(mPacket.position(), length, PacketSection.Type.MATCH, 0, 0));
-            mPacket.position(mPacket.position() + length);
+                    new PacketSection(from, length, PacketSection.Type.MATCH, 0, 0));
+            mPacket.position(from + length);
         }
 
         /**
@@ -874,10 +899,12 @@ public class ApfFilter {
                         lifetime = add4ByteLifetimeOption(optionType, optionLength);
                         builder.updateRouteInfoLifetime(lifetime);
                         break;
-                    case ICMP6_DNSSL_OPTION_TYPE:
-                        lifetime = add4ByteLifetimeOption(optionType, optionLength);
-                        builder.updateDnsslLifetime(lifetime);
+                    case ICMP6_MTU_OPTION_TYPE:
+                    case ICMP6_PREF64_OPTION_TYPE:
+                        addMatchSection(optionLength);
                         break;
+                    case ICMP6_CAPTIVE_PORTAL_OPTION_TYPE: // unlikely to ever change.
+                    case ICMP6_DNSSL_OPTION_TYPE: // currently unsupported in userspace.
                     default:
                         // RFC4861 section 4.2 dictates we ignore unknown options for forwards
                         // compatibility.
@@ -907,11 +934,15 @@ public class ApfFilter {
 
         // What is the minimum of all lifetimes within {@code packet} in seconds?
         // Precondition: matches(packet, length) already returned true.
-        long minLifetime() {
-            long minLifetime = Long.MAX_VALUE;
+        int minLifetime() {
+            // While technically most lifetimes in the RA are u32s, as far as the RA filter is
+            // concerned, INT_MAX is still a *much* longer lifetime than any filter would ever
+            // reasonably be active for.
+            // Clamp minLifetime at INT_MAX.
+            int minLifetime = Integer.MAX_VALUE;
             for (PacketSection section : mPacketSections) {
                 if (isRelevantLifetime(section)) {
-                    minLifetime = Math.min(minLifetime, section.lifetime);
+                    minLifetime = (int) Math.min(minLifetime, section.lifetime);
                 }
             }
             return minLifetime;
@@ -932,8 +963,9 @@ public class ApfFilter {
         // Filter for a fraction of the lifetime and adjust for the age of the RA.
         @GuardedBy("ApfFilter.this")
         int filterLifetime() {
-            return (int) (mMinLifetime / FRACTION_OF_LIFETIME_TO_FILTER)
-                    - (int) (mProgramBaseTime - mLastSeen);
+            final int filterLifetime = (int) ((mMinLifetime / FRACTION_OF_LIFETIME_TO_FILTER)
+                    - (mProgramBaseTime - mLastSeen));
+            return Math.max(0, filterLifetime);
         }
 
         @GuardedBy("ApfFilter.this")

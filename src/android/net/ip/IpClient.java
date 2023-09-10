@@ -779,12 +779,11 @@ public class IpClient extends StateMachine {
 
         /**
          * Return whether a feature guarded by a feature flag is enabled.
-         * @see NetworkStackUtils#isFeatureEnabled(Context, String, String)
+         * @see DeviceConfigUtils#isNetworkStackFeatureEnabled(Context, String, boolean)
          */
         public boolean isFeatureEnabled(final Context context, final String name,
                 boolean defaultEnabled) {
-            return DeviceConfigUtils.isFeatureEnabled(context, NAMESPACE_CONNECTIVITY, name,
-                    defaultEnabled);
+            return DeviceConfigUtils.isNetworkStackFeatureEnabled(context, name, defaultEnabled);
         }
 
         /**
@@ -1459,10 +1458,10 @@ public class IpClient extends StateMachine {
     // Set "/proc/sys/net/ipv6/conf/${iface}/${name}" with the given specific value.
     private void setIpv6Sysctl(@NonNull final String name, int value) {
         try {
-            mNetd.setProcSysNet(INetd.IPV6, INetd.CONF, mInterfaceParams.name,
+            mNetd.setProcSysNet(INetd.IPV6, INetd.CONF, mInterfaceName,
                     name, Integer.toString(value));
         } catch (Exception e) {
-            Log.e(mTag, "Failed to set " + name + " to  + " + value + ": " + e);
+            Log.e(mTag, "Failed to set " + name + " to " + value + ": " + e);
         }
     }
 
@@ -2194,9 +2193,16 @@ public class IpClient extends StateMachine {
         //     - disableIpv6() will clear autoconf IPv6 routes as well, and
         //     - we don't get IPv4 routes from netlink
         // so we neither react to nor need to wait for changes in either.
-
         mInterfaceCtrl.disableIPv6();
         mInterfaceCtrl.clearAllAddresses();
+
+        // Reset IPv6 sysctls to their initial state. It's better to restore
+        // sysctls after IPv6 stack is disabled, which prevents a potential
+        // race where receiving an RA between restoring accept_ra and disabling
+        // IPv6 stack, although it's unlikely.
+        setIpv6Sysctl(ACCEPT_RA, 2);
+        setIpv6Sysctl(ACCEPT_RA_DEFRTR, 1);
+        maybeRestoreDadTransmits();
     }
 
     private void maybeSaveNetworkToIpMemoryStore() {
@@ -2415,8 +2421,6 @@ public class IpClient extends StateMachine {
 
             // Restore the interface MTU to initial value if it has changed.
             maybeRestoreInterfaceMtu();
-            // Reset number of dad_transmits to default value if changed.
-            maybeRestoreDadTransmits();
             // Reset DTIM multiplier to default value if changed.
             if (mMaxDtimMultiplier != DTIM_MULTIPLIER_RESET) {
                 mCallback.setMaxDtimMultiplier(DTIM_MULTIPLIER_RESET);
