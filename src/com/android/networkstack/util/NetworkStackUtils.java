@@ -276,6 +276,12 @@ public class NetworkStackUtils {
     public static final String IPCLIENT_PARSE_NETLINK_EVENTS_FORCE_DISABLE =
             "ipclient_parse_netlink_events_force_disable";
 
+    /**
+     * Kill switch flag to disable the feature of skipping Tcp socket info polling when light
+     * doze mode is enabled.
+     */
+    public static final String SKIP_TCP_POLL_IN_LIGHT_DOZE = "skip_tcp_poll_in_light_doze_mode";
+
     static {
         System.loadLibrary("networkstackutilsjni");
     }
