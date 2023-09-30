@@ -249,7 +249,7 @@ public class Dhcp6Packet {
      * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
      */
     @VisibleForTesting
-    static Dhcp6Packet decodePacket(@NonNull final ByteBuffer packet) throws ParseException {
+    static Dhcp6Packet decode(@NonNull final ByteBuffer packet) throws ParseException {
         int elapsedTime = 0;
         byte[] iapd = null;
         byte[] serverDuid = null;
@@ -379,10 +379,10 @@ public class Dhcp6Packet {
     /**
      * Parse a packet from an array of bytes, stopping at the given length.
      */
-    public static Dhcp6Packet decodePacket(@NonNull final byte[] packet, int length)
+    public static Dhcp6Packet decode(@NonNull final byte[] packet, int length)
             throws ParseException {
         final ByteBuffer buffer = ByteBuffer.wrap(packet, 0, length).order(ByteOrder.BIG_ENDIAN);
-        return decodePacket(buffer);
+        return decode(buffer);
     }
 
     /**
@@ -425,7 +425,9 @@ public class Dhcp6Packet {
             Log.e(TAG, "IA_PD option with invalid T1 " + t1 + " or T2 " + t2);
             return false;
         }
-        if (t1 > t2) {
+
+        // Generally, t1 must be smaller or equal to t2 (except when t2 is 0).
+        if (t2 != 0 && t1 > t2) {
             Log.e(TAG, "IA_PD option with T1 " + t1 + " greater than T2 " + t2);
             return false;
         }
@@ -441,8 +443,10 @@ public class Dhcp6Packet {
                     + " greater than valid lifetime " + valid);
             return false;
         }
-        if (preferred < t2) {
-            Log.e(TAG, "preferred lifetime " + preferred + " is samller than T2 " + t2);
+
+        // If t2 is 0, ignore it.
+        if (t2 != 0 && preferred < t2) {
+            Log.e(TAG, "preferred lifetime " + preferred + " is smaller than T2 " + t2);
             return false;
         }
         return true;
