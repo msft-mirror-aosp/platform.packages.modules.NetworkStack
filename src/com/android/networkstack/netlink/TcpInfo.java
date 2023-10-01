@@ -19,8 +19,7 @@ import android.util.Log;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-
-import com.android.internal.annotations.VisibleForTesting;
+import androidx.annotation.VisibleForTesting;
 
 import java.nio.BufferOverflowException;
 import java.nio.BufferUnderflowException;
@@ -97,10 +96,35 @@ public class TcpInfo {
     static final int SEGS_IN_OFFSET = getFieldOffset(Field.SEGS_IN);
     @VisibleForTesting
     static final int SEGS_OUT_OFFSET = getFieldOffset(Field.SEGS_OUT);
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    static final int TOTAL_RETRANS_OFFSET = getFieldOffset(Field.TOTAL_RETRANS);
+    /**
+     * This counts individual incoming packets that appeared on the wire, including:
+     * SYN, SYN-ACK, pure ACKs, data segments (after segmentation offload into small <=mtu
+     * packets), FIN, FIN-ACK, and any retransmits.
+     *
+     * This field is read from the tcpi_segs_in field from {@code struct tcp_info}
+     * in bionic/libc/kernel/uapi/linux/tcp.h. Also see [tcpEStatsPerfSegsIn] in the RFC4898.
+     */
     final int mSegsIn;
+    /**
+     * This counts individual outgoing packets that have been sent to the network, including:
+     * SYN, SYN-ACK, pure ACKs, data segments (after segmentation offload into small <=mtu
+     * packets), FIN, FIN-ACK, and any retransmits.
+     *
+     * This field is read from the tcpi_segs_out field from {@code struct tcp_info}
+     * in bionic/libc/kernel/uapi/linux/tcp.h. Also see [tcpEStatsPerfSegsOut] in the RFC4898.
+     */
     final int mSegsOut;
-    final int mLost;
-    final int mRetransmits;
+    /**
+     * This counts individual accumulated retransmitted packets that have been sent to the network,
+     * including any retransmits for SYN, SYN-ACK, pure ACKs, data segments (after segmentation
+     * offload into small <=mtu packets), FIN and FIN-ACK.
+     *
+     * This field is read from the tcpi_total_retrans field from {@code struct tcp_info}
+     * in bionic/libc/kernel/uapi/linux/tcp.h.
+     */
+    final int mTotalRetrans;
 
     private static int getFieldOffset(@NonNull final Field needle) {
         int offset = 0;
@@ -120,20 +144,18 @@ public class TcpInfo {
         final int start = bytes.position();
         mSegsIn = bytes.getInt(start + SEGS_IN_OFFSET);
         mSegsOut = bytes.getInt(start + SEGS_OUT_OFFSET);
-        mLost = bytes.getInt(start + LOST_OFFSET);
-        mRetransmits = bytes.get(start + RETRANSMITS_OFFSET);
+        mTotalRetrans = bytes.get(start + TOTAL_RETRANS_OFFSET);
         // tcp_info structure grows over time as new fields are added. Jump to the end of the
         // structure, as unknown fields might remain at the end of the structure if the tcp_info
         // struct was expanded.
         bytes.position(Math.min(infolen + start, bytes.limit()));
     }
 
-    @VisibleForTesting
-    TcpInfo(int retransmits, int lost, int segsOut, int segsIn) {
-        mRetransmits = retransmits;
-        mLost = lost;
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    TcpInfo(int segsOut, int segsIn, int totalRetrans) {
         mSegsOut = segsOut;
         mSegsIn = segsIn;
+        mTotalRetrans = totalRetrans;
     }
 
     /** Parse a TcpInfo from a giving ByteBuffer with a specific length. */
@@ -180,17 +202,17 @@ public class TcpInfo {
         TcpInfo other = (TcpInfo) obj;
 
         return mSegsIn == other.mSegsIn && mSegsOut == other.mSegsOut
-            && mRetransmits == other.mRetransmits && mLost == other.mLost;
+                && mTotalRetrans == other.mTotalRetrans;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(mLost, mRetransmits, mSegsIn, mSegsOut);
+        return Objects.hash(mSegsIn, mSegsOut, mTotalRetrans);
     }
 
     @Override
     public String toString() {
-        return "TcpInfo{lost=" + mLost + ", retransmit=" + mRetransmits + ", received=" + mSegsIn
-                + ", sent=" + mSegsOut + "}";
+        return "TcpInfo{received=" + mSegsIn + ", sent=" + mSegsOut
+                + ", totalRetrans=" + mTotalRetrans + "}";
     }
 }
