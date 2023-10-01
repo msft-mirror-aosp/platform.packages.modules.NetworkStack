@@ -34,6 +34,7 @@ import static android.system.OsConstants.ETH_P_ARP;
 import static android.system.OsConstants.ETH_P_IPV6;
 import static android.system.OsConstants.SOCK_NONBLOCK;
 import static android.system.OsConstants.SOCK_RAW;
+
 import static com.android.net.module.util.NetworkStackConstants.ARP_REPLY;
 import static com.android.net.module.util.NetworkStackConstants.ETHER_BROADCAST;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ALL_ROUTERS_MULTICAST;
@@ -65,8 +66,10 @@ import android.net.ProxyInfo;
 import android.net.RouteInfo;
 import android.net.TcpKeepalivePacketDataParcelable;
 import android.net.Uri;
+import android.net.apf.AndroidPacketFilter;
 import android.net.apf.ApfCapabilities;
 import android.net.apf.ApfFilter;
+import android.net.apf.LegacyApfFilter;
 import android.net.dhcp.DhcpClient;
 import android.net.dhcp.DhcpPacket;
 import android.net.dhcp6.Dhcp6Client;
@@ -672,7 +675,7 @@ public class IpClient extends StateMachine {
     private DhcpResults mDhcpResults;
     private String mTcpBufferSizes;
     private ProxyInfo mHttpProxy;
-    private ApfFilter mApfFilter;
+    private AndroidPacketFilter mApfFilter;
     private String mL2Key; // The L2 key for this network, for writing into the memory store
     private String mCluster; // The cluster for this network, for writing into the memory store
     private boolean mMulticastFiltering;
@@ -803,18 +806,25 @@ public class IpClient extends StateMachine {
          * APF programs.
          * @see ApfFilter#maybeCreate
          */
-        public ApfFilter maybeCreateApfFilter(Context context, ApfFilter.ApfConfiguration config,
-                InterfaceParams ifParams, IpClientCallbacksWrapper cb) {
-            return ApfFilter.maybeCreate(context, config, ifParams, cb);
+        public AndroidPacketFilter maybeCreateApfFilter(Context context,
+                ApfFilter.ApfConfiguration config, InterfaceParams ifParams,
+                IpClientCallbacksWrapper cb) {
+            if (isNetworkStackFeatureNotChickenedOut(context,
+                    NetworkStackUtils.APF_NEW_RA_FILTER_FORCE_DISABLE)) {
+                return ApfFilter.maybeCreate(context, config, ifParams, cb);
+            } else {
+                return LegacyApfFilter.maybeCreate(context, config, ifParams, cb);
+            }
         }
 
         /**
          * Check whether one specific experimental feature in NetworkStack module from
          * {@link DeviceConfig} is not disabled.
-         * @see DeviceConfigUtils#isNetworkStackFeatureNotChickenedOut(String)
+         * @see DeviceConfigUtils#isNetworkStackFeatureNotChickenedOut(Context, String)
          */
-        public boolean isNetworkStackFeatureNotChickenedOut(final String name) {
-            return DeviceConfigUtils.isNetworkStackFeatureNotChickenedOut(name);
+        public boolean isNetworkStackFeatureNotChickenedOut(final Context context,
+                final String name) {
+            return DeviceConfigUtils.isNetworkStackFeatureNotChickenedOut(context, name);
         }
 
         /**
@@ -1275,7 +1285,7 @@ public class IpClient extends StateMachine {
         }
 
         // Thread-unsafe access to mApfFilter but just used for debugging.
-        final ApfFilter apfFilter = mApfFilter;
+        final AndroidPacketFilter apfFilter = mApfFilter;
         final android.net.shared.ProvisioningConfiguration provisioningConfig = mConfiguration;
         final ApfCapabilities apfCapabilities = (provisioningConfig != null)
                 ? provisioningConfig.mApfCapabilities : null;
@@ -2152,7 +2162,7 @@ public class IpClient extends StateMachine {
         }
         // Check chickened out flag first before reading IPv6 sysctl, which can prevent from
         // triggering a potential kernel bug about the sysctl.
-        if (mDependencies.isNetworkStackFeatureNotChickenedOut(
+        if (mDependencies.isNetworkStackFeatureNotChickenedOut(mContext,
                 IPCLIENT_IGNORE_LOW_RA_LIFETIME_FORCE_DISABLE)
                 && mDependencies.hasIpv6Sysctl(mInterfaceName, ACCEPT_RA_MIN_LFT)) {
             setIpv6Sysctl(ACCEPT_RA_MIN_LFT, mAcceptRaMinLft);
@@ -2234,7 +2244,7 @@ public class IpClient extends StateMachine {
         setIpv6Sysctl(ACCEPT_RA, 2);
         setIpv6Sysctl(ACCEPT_RA_DEFRTR, 1);
         maybeRestoreDadTransmits();
-        if (mDependencies.isNetworkStackFeatureNotChickenedOut(
+        if (mDependencies.isNetworkStackFeatureNotChickenedOut(mContext,
                 IPCLIENT_IGNORE_LOW_RA_LIFETIME_FORCE_DISABLE)
                 && mDependencies.hasIpv6Sysctl(mInterfaceName, ACCEPT_RA_MIN_LFT)) {
             setIpv6Sysctl(ACCEPT_RA_MIN_LFT, 0 /* sysctl default */);
@@ -2326,7 +2336,7 @@ public class IpClient extends StateMachine {
     }
 
     @Nullable
-    private ApfFilter maybeCreateApfFilter(final ApfCapabilities apfCapabilities) {
+    private AndroidPacketFilter maybeCreateApfFilter(final ApfCapabilities apfCapabilities) {
         ApfFilter.ApfConfiguration apfConfig = new ApfFilter.ApfConfiguration();
         apfConfig.apfCapabilities = apfCapabilities;
         apfConfig.multicastFilter = mMulticastFiltering;
@@ -3065,6 +3075,7 @@ public class IpClient extends StateMachine {
 
                         case Dhcp6Client.DHCP6_PD_PREFIX_EXPIRED:
                         case Dhcp6Client.DHCP6_PD_PREFIX_CHANGED:
+                        case Dhcp6Client.DHCP6_PD_PREFIX_MSG_EXCHANGE_TERMINATED:
                             clearIpv6PrefixDelegationAddresses();
                             mPrefixDelegation = null;
                             handleLinkPropertiesUpdate(SEND_CALLBACKS);
