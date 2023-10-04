@@ -13,20 +13,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package android.net.apf;
 
-package com.android.networkstack.apishim;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
-import android.os.Build;
-
-import androidx.annotation.RequiresApi;
-
-import com.android.networkstack.apishim.common.NsdShim;
+import org.junit.runner.RunWith;
 
 /**
- * Implementation of {@link NsdShim}.
+ * Tests for APF program generator and interpreter version 4.
  */
-// TODO: when available in all active branches: @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
-@RequiresApi(Build.VERSION_CODES.CUR_DEVELOPMENT)
-public class NsdShimImpl extends com.android.networkstack.apishim.api34.NsdShimImpl {
-    // Inherit everything from API34 shim
+@RunWith(AndroidJUnit4.class)
+@SmallTest
+public class ApfV4Test extends ApfTest {
+    @Override
+    protected int getApfVersionToTest() {
+        return 4;
+    }
 }

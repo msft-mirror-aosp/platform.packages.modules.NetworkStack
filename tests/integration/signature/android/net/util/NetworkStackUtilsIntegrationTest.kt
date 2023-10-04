@@ -33,6 +33,7 @@ import android.system.OsConstants.AF_PACKET
 import android.system.OsConstants.ARPHRD_ETHER
 import android.system.OsConstants.ETH_P_IPV6
 import android.system.OsConstants.IPPROTO_UDP
+import android.system.OsConstants.SOCK_CLOEXEC
 import android.system.OsConstants.SOCK_DGRAM
 import android.system.OsConstants.SOCK_NONBLOCK
 import android.system.OsConstants.SOCK_RAW
@@ -161,7 +162,7 @@ class NetworkStackUtilsIntegrationTest {
 
     @Test
     fun testAttachRaFilter() {
-        val socket = Os.socket(AF_PACKET, SOCK_RAW, ETH_P_IPV6)
+        val socket = Os.socket(AF_PACKET, SOCK_RAW or SOCK_CLOEXEC, 0)
         val ifParams = InterfaceParams.getByName(iface.interfaceName)
                 ?: fail("Could not obtain interface params for ${iface.interfaceName}")
         val socketAddr = SocketUtils.makePacketSocketAddress(ETH_P_IPV6, ifParams.index)
@@ -176,7 +177,7 @@ class NetworkStackUtilsIntegrationTest {
         echo.rewind()
         assertNextPacketEquals(socket, echo.readAsArray(), "ICMPv6 echo")
 
-        NetworkStackUtils.attachRaFilter(socket, ARPHRD_ETHER)
+        NetworkStackUtils.attachRaFilter(socket)
         // Send another echo, then an RA. After setting the filter expect only the RA.
         echo.rewind()
         reader.sendResponse(echo)
