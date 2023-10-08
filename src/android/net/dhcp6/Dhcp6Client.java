@@ -16,6 +16,7 @@
 
 package android.net.dhcp6;
 
+import static android.net.dhcp6.Dhcp6Packet.IAID;
 import static android.net.dhcp6.Dhcp6Packet.PrefixDelegation;
 import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
 import static android.system.OsConstants.AF_INET6;
@@ -67,6 +68,7 @@ import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Random;
+import java.util.function.IntSupplier;
 
 /**
  * A DHCPv6 client.
@@ -108,19 +110,17 @@ public class Dhcp6Client extends StateMachine {
 
     // Transmission and Retransmission parameters in milliseconds.
     private static final int SECONDS            = 1000;
-    private static final long SOL_TIMEOUT       =    1 * SECONDS;
-    private static final long SOL_MAX_RT        = 3600 * SECONDS;
-    private static final long REQ_TIMEOUT       =    1 * SECONDS;
-    private static final long REQ_MAX_RT        =   30 * SECONDS;
+    private static final int SOL_TIMEOUT        =    1 * SECONDS;
+    private static final int SOL_MAX_RT         = 3600 * SECONDS;
+    private static final int REQ_TIMEOUT        =    1 * SECONDS;
+    private static final int REQ_MAX_RT         =   30 * SECONDS;
     private static final int REQ_MAX_RC         =   10;
-    private static final long REN_TIMEOUT       =   10 * SECONDS;
-    private static final long REN_MAX_RT        =  600 * SECONDS;
-    private static final long REB_TIMEOUT       =   10 * SECONDS;
-    private static final long REB_MAX_RT        =  600 * SECONDS;
+    private static final int REN_TIMEOUT        =   10 * SECONDS;
+    private static final int REN_MAX_RT         =  600 * SECONDS;
+    private static final int REB_TIMEOUT        =   10 * SECONDS;
+    private static final int REB_MAX_RT         =  600 * SECONDS;
 
-    // Per rfc8415#section-12, the IAID MUST be consistent across restarts.
-    // Since currently only one IAID is supported, a well-known value can be used (0).
-    private static final int IAID = 0;
+    private int mSolMaxRtMs = SOL_MAX_RT;
 
     @Nullable private PrefixDelegation mAdvertise;
     @Nullable private PrefixDelegation mReply;
@@ -241,24 +241,26 @@ public class Dhcp6Client extends StateMachine {
     abstract class MessageExchangeState extends State {
         private int mTransId = 0;
         private long mTransStartMs = 0;
+        private long mMaxRetransTimeMs = 0;
 
         private long mRetransTimeout = -1;
         private int mRetransCount = 0;
         private final long mInitialDelayMs;
         private final long mInitialRetransTimeMs;
-        private final long mMaxRetransTimeMs;
         private final int mMaxRetransCount;
+        private final IntSupplier mMaxRetransTimeSupplier;
 
-        MessageExchangeState(final long delay, final long irt, final long mrt, final int mrc) {
+        MessageExchangeState(final int delay, final int irt, final int mrc, final IntSupplier mrt) {
             mInitialDelayMs = delay;
             mInitialRetransTimeMs = irt;
-            mMaxRetransTimeMs = mrt;
             mMaxRetransCount = mrc;
+            mMaxRetransTimeSupplier = mrt;
         }
 
         @Override
         public void enter() {
             super.enter();
+            mMaxRetransTimeMs = mMaxRetransTimeSupplier.getAsInt();
             // Every message exchange generates a new transaction id.
             mTransId = mRandom.nextInt() & 0xffffff;
             sendMessageDelayed(CMD_KICK, mInitialDelayMs);
@@ -311,6 +313,7 @@ public class Dhcp6Client extends StateMachine {
             mKickAlarm.cancel();
             mRetransTimeout = -1;
             mRetransCount = 0;
+            mMaxRetransTimeMs = 0;
         }
 
         protected abstract boolean sendPacket(int transId, long elapsedTimeMs);
@@ -421,6 +424,7 @@ public class Dhcp6Client extends StateMachine {
         mAdvertise = null;
         mReply = null;
         mServerDuid = null;
+        mSolMaxRtMs = SOL_MAX_RT;
     }
 
     @SuppressWarnings("ByteBufferBackingArray")
@@ -524,9 +528,8 @@ public class Dhcp6Client extends StateMachine {
         SolicitState() {
             // First Solicit message should be delayed by a random amount of time between 0
             // and SOL_MAX_DELAY(1s).
-            // TODO: request SOL_MAX_RT option from server.
-            super((long) (new Random().nextDouble() * SECONDS) /* delay */, SOL_TIMEOUT /* IRT */,
-                    SOL_MAX_RT /* MRT */, 0 /* MRC */);
+            super((int) (new Random().nextDouble() * SECONDS) /* delay */, SOL_TIMEOUT /* IRT */,
+                    0 /* MRC */, () -> mSolMaxRtMs /* MRT */);
         }
 
         @Override
@@ -542,26 +545,24 @@ public class Dhcp6Client extends StateMachine {
         // TODO: support multiple prefixes.
         @Override
         protected void receivePacket(Dhcp6Packet packet) {
+            final PrefixDelegation pd = packet.mPrefixDelegation;
             if (packet instanceof Dhcp6AdvertisePacket) {
-                mAdvertise = packet.mPrefixDelegation;
-                if (mAdvertise != null && mAdvertise.iaid == IAID) {
-                    Log.d(TAG, "Get prefix delegation option from Advertise: " + mAdvertise);
-                    mServerDuid = packet.mServerDuid;
-                    transitionTo(mRequestState);
-                }
+                Log.d(TAG, "Get prefix delegation option from Advertise: " + pd);
+                mAdvertise = pd;
+                mServerDuid = packet.mServerDuid;
+                mSolMaxRtMs = packet.getSolMaxRtMs().orElse(mSolMaxRtMs);
+                transitionTo(mRequestState);
             } else if (packet instanceof Dhcp6ReplyPacket) {
                 if (!packet.mRapidCommit) {
-                    Log.e(TAG, "Server responded to SOLICIT with REPLY without rapid commit option"
+                    Log.e(TAG, "Server responded to Solicit with Reply without rapid commit option"
                             + ", ignoring");
                     return;
                 }
-                final PrefixDelegation pd = packet.mPrefixDelegation;
-                if (pd != null && pd.iaid == IAID) {
-                    Log.d(TAG, "Get prefix delegation option from RapidCommit Reply: " + pd);
-                    mReply = pd;
-                    mServerDuid = packet.mServerDuid;
-                    transitionTo(mBoundState);
-                }
+                Log.d(TAG, "Get prefix delegation option from RapidCommit Reply: " + pd);
+                mReply = pd;
+                mServerDuid = packet.mServerDuid;
+                mSolMaxRtMs = packet.getSolMaxRtMs().orElse(mSolMaxRtMs);
+                transitionTo(mBoundState);
             }
         }
     }
@@ -572,8 +573,8 @@ public class Dhcp6Client extends StateMachine {
      */
     class RequestState extends MessageExchangeState {
         RequestState() {
-            super((long) 0 /* delay */, REQ_TIMEOUT /* IRT */, REQ_MAX_RT /* MRT */,
-                    REQ_MAX_RC /* MRC */);
+            super(0 /* delay */, REQ_TIMEOUT /* IRT */, REQ_MAX_RC /* MRC */,
+                    () -> REQ_MAX_RT /* MRT */);
         }
 
         @Override
@@ -585,11 +586,10 @@ public class Dhcp6Client extends StateMachine {
         protected void receivePacket(Dhcp6Packet packet) {
             if (!(packet instanceof Dhcp6ReplyPacket)) return;
             final PrefixDelegation pd = packet.mPrefixDelegation;
-            if (pd != null && pd.iaid == IAID) {
-                Log.d(TAG, "Get prefix delegation option from Reply: " + pd);
-                mReply = pd;
-                transitionTo(mBoundState);
-            }
+            Log.d(TAG, "Get prefix delegation option from Reply: " + pd);
+            mReply = pd;
+            mSolMaxRtMs = packet.getSolMaxRtMs().orElse(mSolMaxRtMs);
+            transitionTo(mBoundState);
         }
 
         @Override
@@ -636,10 +636,6 @@ public class Dhcp6Client extends StateMachine {
 
             // TODO: roll back to SOLICIT state after a delay if something wrong happens
             // instead of returning directly.
-            if (!Dhcp6Packet.hasValidPrefixDelegation(mReply)) {
-                Log.e(TAG, "Invalid prefix delegatioin " + mReply);
-                return;
-            }
             // Configure the IPv6 addresses based on the delegated prefix on the interface.
             // We've checked that delegated prefix is valid upon receiving the response
             // from DHCPv6 server, and the server may assign a prefix with length less
@@ -695,8 +691,8 @@ public class Dhcp6Client extends StateMachine {
     }
 
     abstract class ReacquireState extends MessageExchangeState {
-        ReacquireState(final long irt, final long mrt) {
-            super(0 /* delay */, irt, mrt, 0 /* MRC */);
+        ReacquireState(final int irt, final int mrt) {
+            super(0 /* delay */, irt, 0 /* MRC */, () -> mrt /* MRT */);
         }
 
         @Override
@@ -708,27 +704,24 @@ public class Dhcp6Client extends StateMachine {
         protected void receivePacket(Dhcp6Packet packet) {
             if (!(packet instanceof Dhcp6ReplyPacket)) return;
             final PrefixDelegation pd = packet.mPrefixDelegation;
-            if (pd != null) {
-                if (pd.iaid != IAID
-                        || !(Arrays.equals(pd.ipo.prefix, mReply.ipo.prefix)
-                                && pd.ipo.prefixLen == mReply.ipo.prefixLen)) {
-                    Log.i(TAG, "Renewal prefix " + HexDump.toHexString(pd.ipo.prefix)
-                            + " does not match current prefix "
-                            + HexDump.toHexString(mReply.ipo.prefix));
-                    notifyPrefixDelegation(DHCP6_PD_PREFIX_CHANGED, null);
-                    transitionTo(mSolicitState);
-                    return;
-                }
-                mReply = pd;
-                mServerDuid = packet.mServerDuid;
-                // Once the delegated prefix gets refreshed successfully we have to extend the
-                // preferred lifetime and valid lifetime of global IPv6 addresses, otherwise
-                // these addresses will become depreacated finally and then provisioning failure
-                // happens. So we transit to mBoundState to update the address with refreshed
-                // preferred and valid lifetime via sending RTM_NEWADDR message, going back to
-                // Bound state after a success update.
-                transitionTo(mBoundState);
+            if (!(Arrays.equals(pd.ipo.prefix, mReply.ipo.prefix)
+                    && pd.ipo.prefixLen == mReply.ipo.prefixLen)) {
+                Log.i(TAG, "Renewal prefix " + HexDump.toHexString(pd.ipo.prefix)
+                        + " does not match current prefix "
+                        + HexDump.toHexString(mReply.ipo.prefix));
+                notifyPrefixDelegation(DHCP6_PD_PREFIX_CHANGED, null);
+                transitionTo(mSolicitState);
+                return;
             }
+            mReply = pd;
+            mServerDuid = packet.mServerDuid;
+            // Once the delegated prefix gets refreshed successfully we have to extend the
+            // preferred lifetime and valid lifetime of global IPv6 addresses, otherwise
+            // these addresses will become depreacated finally and then provisioning failure
+            // happens. So we transit to mBoundState to update the address with refreshed
+            // preferred and valid lifetime via sending RTM_NEWADDR message, going back to
+            // Bound state after a success update.
+            transitionTo(mBoundState);
         }
     }
 

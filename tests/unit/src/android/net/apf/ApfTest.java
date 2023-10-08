@@ -18,6 +18,10 @@ package android.net.apf;
 
 import static android.net.apf.ApfGenerator.Register.R0;
 import static android.net.apf.ApfGenerator.Register.R1;
+import static android.net.apf.ApfJniUtils.apfSimulate;
+import static android.net.apf.ApfJniUtils.compareBpfApf;
+import static android.net.apf.ApfJniUtils.compileToBpf;
+import static android.net.apf.ApfJniUtils.dropsAllPackets;
 import static android.system.OsConstants.AF_UNIX;
 import static android.system.OsConstants.ARPHRD_ETHER;
 import static android.system.OsConstants.ETH_P_ARP;
@@ -35,9 +39,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
 
 import android.content.Context;
 import android.net.InetAddresses;
@@ -51,10 +53,7 @@ import android.net.apf.ApfFilter.ApfConfiguration;
 import android.net.apf.ApfGenerator.IllegalInstructionException;
 import android.net.ip.IIpClientCallbacks;
 import android.net.ip.IpClient.IpClientCallbacksWrapper;
-import android.net.metrics.IpConnectivityLog;
-import android.net.metrics.RaEvent;
 import android.os.ConditionVariable;
-import android.os.Parcelable;
 import android.os.SystemClock;
 import android.system.ErrnoException;
 import android.system.Os;
@@ -64,6 +63,7 @@ import android.util.Log;
 import android.util.Pair;
 
 import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.SmallTest;
 
 import com.android.internal.util.HexDump;
 import com.android.net.module.util.DnsPacket;
@@ -81,7 +81,8 @@ import libcore.io.Streams;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
-import org.mockito.ArgumentCaptor;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
@@ -105,25 +106,28 @@ import java.util.Random;
 
 /**
  * Tests for APF program generator and interpreter.
+ *
+ * The test cases will be executed by both APFv4 and APFv6 interpreter.
  */
-public abstract class ApfTest {
+@RunWith(Parameterized.class)
+@SmallTest
+public class ApfTest {
     private static final int TIMEOUT_MS = 500;
     private static final int MIN_APF_VERSION = 2;
 
-    @Mock IpConnectivityLog mLog;
+    // Indicates which apf interpreter to run.
+    @Parameterized.Parameter()
+    public int mApfVersion;
+
+    @Parameterized.Parameters
+    public static Iterable<? extends Object> data() {
+        return Arrays.asList(4, 6);
+    }
+
     @Mock Context mContext;
-
-    /**
-     * Specify which interpreter version to test.
-     */
-    protected abstract int getApfVersionToTest();
-
     @Before
     public void setUp() throws Exception {
         MockitoAnnotations.initMocks(this);
-        // Load up native shared library containing APF interpreter exposed via JNI.
-        System.loadLibrary("networkstacktestsjni");
-        ApfTest.setApfVersion(getApfVersionToTest());
     }
 
     private static final String TAG = "ApfTest";
@@ -186,12 +190,14 @@ public abstract class ApfTest {
         final String msg = "Unexpected APF verdict. To debug:\n"
                 + "  apf_run --program " + HexDump.toHexString(program)
                 + " --packet " + HexDump.toHexString(packet) + " --trace | less\n  ";
-        assertReturnCodesEqual(msg, expected, apfSimulate(program, packet, null, filterAge));
+        assertReturnCodesEqual(msg, expected,
+                apfSimulate(mApfVersion, program, packet, null, filterAge));
     }
 
     private void assertVerdict(String msg, int expected, byte[] program, byte[] packet,
             int filterAge) {
-        assertReturnCodesEqual(msg, expected, apfSimulate(program, packet, null, filterAge));
+        assertReturnCodesEqual(msg, expected,
+                apfSimulate(mApfVersion, program, packet, null, filterAge));
     }
 
     private void assertVerdict(int expected, byte[] program, byte[] packet) {
@@ -226,7 +232,8 @@ public abstract class ApfTest {
     private void assertDataMemoryContents(
             int expected, byte[] program, byte[] packet, byte[] data, byte[] expected_data)
             throws IllegalInstructionException, Exception {
-        assertReturnCodesEqual(expected, apfSimulate(program, packet, data, 0 /* filterAge */));
+        assertReturnCodesEqual(expected,
+                apfSimulate(mApfVersion, program, packet, data, 0 /* filterAge */));
 
         // assertArrayEquals() would only print one byte, making debugging difficult.
         if (!Arrays.equals(expected_data, data)) {
@@ -239,7 +246,7 @@ public abstract class ApfTest {
 
     private void assertVerdict(int expected, ApfGenerator gen, byte[] packet, int filterAge)
             throws IllegalInstructionException {
-        assertReturnCodesEqual(expected, apfSimulate(gen.generate(), packet, null,
+        assertReturnCodesEqual(expected, apfSimulate(mApfVersion, gen.generate(), packet, null,
               filterAge));
     }
 
@@ -926,7 +933,7 @@ public abstract class ApfTest {
         for (String tcpdump_filter : tcpdump_filters) {
             byte[] apf_program = Bpf2Apf.convert(compileToBpf(tcpdump_filter));
             assertTrue("Failed to match for filter: " + tcpdump_filter,
-                    compareBpfApf(tcpdump_filter, pcap_filename, apf_program));
+                    compareBpfApf(mApfVersion, tcpdump_filter, pcap_filename, apf_program));
         }
     }
 
@@ -948,13 +955,13 @@ public abstract class ApfTest {
         config.apfCapabilities = MOCK_APF_PCAP_CAPABILITIES;
         config.multicastFilter = DROP_MULTICAST;
         config.ieee802_3Filter = DROP_802_3_FRAMES;
-        TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback, mLog);
+        TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback);
         apfFilter.setLinkProperties(lp);
         byte[] program = ipClientCallback.getApfProgram();
         byte[] data = new byte[ApfFilter.Counter.totalSize()];
         final boolean result;
 
-        result = dropsAllPackets(program, data, pcapFilename);
+        result = dropsAllPackets(mApfVersion, program, data, pcapFilename);
         Log.i(TAG, "testApfFilterPcapFile(): Data counters: " + HexDump.toHexString(data, false));
 
         assertTrue("Failed to drop all packets by filter. \nAPF counters:" +
@@ -997,8 +1004,8 @@ public abstract class ApfTest {
         private long mCurrentTimeMs = SystemClock.elapsedRealtime();
 
         public TestApfFilter(Context context, ApfConfiguration config,
-                IpClientCallbacksWrapper ipClientCallback, IpConnectivityLog log) throws Exception {
-            super(context, config, InterfaceParams.getByName("lo"), ipClientCallback, log);
+                IpClientCallbacksWrapper ipClientCallback) throws Exception {
+            super(context, config, InterfaceParams.getByName("lo"), ipClientCallback);
         }
 
         // Pretend an RA packet has been received and show it to ApfFilter.
@@ -1179,7 +1186,7 @@ public abstract class ApfTest {
         LinkAddress link = new LinkAddress(InetAddress.getByAddress(MOCK_IPV4_ADDR), 19);
         LinkProperties lp = new LinkProperties();
         lp.addLinkAddress(link);
-        TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback, mLog);
+        TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback);
         apfFilter.setLinkProperties(lp);
         return apfFilter;
     }
@@ -1217,7 +1224,7 @@ public abstract class ApfTest {
 
         ApfConfiguration config = getDefaultConfig();
         config.multicastFilter = DROP_MULTICAST;
-        TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback, mLog);
+        TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback);
         apfFilter.setLinkProperties(lp);
 
         byte[] program = ipClientCallback.getApfProgram();
@@ -1269,7 +1276,7 @@ public abstract class ApfTest {
     public void testApfFilterIPv6() throws Exception {
         MockIpClientCallback ipClientCallback = new MockIpClientCallback();
         ApfConfiguration config = getDefaultConfig();
-        TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback, mLog);
+        TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback);
         byte[] program = ipClientCallback.getApfProgram();
 
         // Verify empty IPv6 packet is passed
@@ -1524,7 +1531,7 @@ public abstract class ApfTest {
         lp.addLinkAddress(link);
 
         ApfConfiguration config = getDefaultConfig();
-        TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback, mLog);
+        TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback);
         apfFilter.setLinkProperties(lp);
 
         // Construct IPv4 mDNS packet
@@ -1761,7 +1768,7 @@ public abstract class ApfTest {
 
         ApfConfiguration config = getDefaultConfig();
         config.ieee802_3Filter = DROP_802_3_FRAMES;
-        TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback, mLog);
+        TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback);
         apfFilter.setLinkProperties(lp);
 
         byte[] program = ipClientCallback.getApfProgram();
@@ -1822,7 +1829,7 @@ public abstract class ApfTest {
         apfFilter.shutdown();
         config.multicastFilter = DROP_MULTICAST;
         config.ieee802_3Filter = DROP_802_3_FRAMES;
-        apfFilter = new TestApfFilter(mContext, config, ipClientCallback, mLog);
+        apfFilter = new TestApfFilter(mContext, config, ipClientCallback);
         apfFilter.setLinkProperties(lp);
         program = ipClientCallback.getApfProgram();
         assertDrop(program, mcastv4packet.array());
@@ -2007,7 +2014,7 @@ public abstract class ApfTest {
         ApfConfiguration config = getDefaultConfig();
         config.multicastFilter = DROP_MULTICAST;
         config.ieee802_3Filter = DROP_802_3_FRAMES;
-        TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback, mLog);
+        TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback);
 
         // Verify initially ARP request filter is off, and GARP filter is on.
         verifyArpFilter(ipClientCallback.getApfProgram(), PASS);
@@ -2067,7 +2074,7 @@ public abstract class ApfTest {
         final ApfConfiguration config = getDefaultConfig();
         config.multicastFilter = DROP_MULTICAST;
         config.ieee802_3Filter = DROP_802_3_FRAMES;
-        final TestApfFilter apfFilter = new TestApfFilter(mContext, config, cb, mLog);
+        final TestApfFilter apfFilter = new TestApfFilter(mContext, config, cb);
         byte[] program;
         final int srcPort = 12345;
         final int dstPort = 54321;
@@ -2260,7 +2267,7 @@ public abstract class ApfTest {
         final ApfConfiguration config = getDefaultConfig();
         config.multicastFilter = DROP_MULTICAST;
         config.ieee802_3Filter = DROP_802_3_FRAMES;
-        final TestApfFilter apfFilter = new TestApfFilter(mContext, config, cb, mLog);
+        final TestApfFilter apfFilter = new TestApfFilter(mContext, config, cb);
         byte[] program;
         final int srcPort = 1024;
         final int dstPort = 4500;
@@ -2500,7 +2507,7 @@ public abstract class ApfTest {
     public void testRaToString() throws Exception {
         MockIpClientCallback cb = new MockIpClientCallback();
         ApfConfiguration config = getDefaultConfig();
-        TestApfFilter apfFilter = new TestApfFilter(mContext, config, cb, mLog);
+        TestApfFilter apfFilter = new TestApfFilter(mContext, config, cb);
 
         byte[] packet = buildLargeRa();
         ApfFilter.Ra ra = apfFilter.new Ra(packet, packet.length);
@@ -2559,36 +2566,6 @@ public abstract class ApfTest {
         verifyRaLifetime(program, packet, lifetime);
     }
 
-    private void verifyRaEvent(RaEvent expected) {
-        ArgumentCaptor<IpConnectivityLog.Event> captor =
-                ArgumentCaptor.forClass(IpConnectivityLog.Event.class);
-        verify(mLog, atLeastOnce()).log(captor.capture());
-        RaEvent got = lastRaEvent(captor.getAllValues());
-        if (!raEventEquals(expected, got)) {
-            assertEquals(expected, got);  // fail for printing an assertion error message.
-        }
-    }
-
-    private RaEvent lastRaEvent(List<IpConnectivityLog.Event> events) {
-        RaEvent got = null;
-        for (Parcelable ev : events) {
-            if (ev instanceof RaEvent) {
-                got = (RaEvent) ev;
-            }
-        }
-        return got;
-    }
-
-    private boolean raEventEquals(RaEvent ev1, RaEvent ev2) {
-        return (ev1 != null) && (ev2 != null)
-                && (ev1.routerLifetime == ev2.routerLifetime)
-                && (ev1.prefixValidLifetime == ev2.prefixValidLifetime)
-                && (ev1.prefixPreferredLifetime == ev2.prefixPreferredLifetime)
-                && (ev1.routeInfoLifetime == ev2.routeInfoLifetime)
-                && (ev1.rdnssLifetime == ev2.rdnssLifetime)
-                && (ev1.dnsslLifetime == ev2.dnsslLifetime);
-    }
-
     private void assertInvalidRa(TestApfFilter apfFilter, MockIpClientCallback ipClientCallback,
             ByteBuffer packet) throws IOException, ErrnoException {
         ipClientCallback.resetApfProgramWait();
@@ -2602,7 +2579,7 @@ public abstract class ApfTest {
         ApfConfiguration config = getDefaultConfig();
         config.multicastFilter = DROP_MULTICAST;
         config.ieee802_3Filter = DROP_802_3_FRAMES;
-        TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback, mLog);
+        TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback);
         byte[] program = ipClientCallback.getApfProgram();
 
         final int ROUTER_LIFETIME = 1000;
@@ -2619,7 +2596,6 @@ public abstract class ApfTest {
         assertPass(program, basePacket.array());
 
         verifyRaLifetime(apfFilter, ipClientCallback, basePacket, ROUTER_LIFETIME);
-        verifyRaEvent(new RaEvent(ROUTER_LIFETIME, -1, -1, -1, -1, -1));
 
         ra = new RaPacketBuilder(ROUTER_LIFETIME);
         // Check that changes are ignored in every byte of the flow label.
@@ -2641,14 +2617,11 @@ public abstract class ApfTest {
         ByteBuffer prefixOptionPacket = ByteBuffer.wrap(ra.build());
         verifyRaLifetime(
                 apfFilter, ipClientCallback, prefixOptionPacket, PREFIX_PREFERRED_LIFETIME);
-        verifyRaEvent(new RaEvent(
-                ROUTER_LIFETIME, PREFIX_VALID_LIFETIME, PREFIX_PREFERRED_LIFETIME, -1, -1, -1));
 
         ra = new RaPacketBuilder(ROUTER_LIFETIME);
         ra.addRdnssOption(RDNSS_LIFETIME, "2001:4860:4860::8888", "2001:4860:4860::8844");
         ByteBuffer rdnssOptionPacket = ByteBuffer.wrap(ra.build());
         verifyRaLifetime(apfFilter, ipClientCallback, rdnssOptionPacket, RDNSS_LIFETIME);
-        verifyRaEvent(new RaEvent(ROUTER_LIFETIME, -1, -1, -1, RDNSS_LIFETIME, -1));
 
         final int lowLifetime = 60;
         ra = new RaPacketBuilder(ROUTER_LIFETIME);
@@ -2656,13 +2629,11 @@ public abstract class ApfTest {
         ByteBuffer lowLifetimeRdnssOptionPacket = ByteBuffer.wrap(ra.build());
         verifyRaLifetime(apfFilter, ipClientCallback, lowLifetimeRdnssOptionPacket,
                 ROUTER_LIFETIME);
-        verifyRaEvent(new RaEvent(ROUTER_LIFETIME, -1, -1, -1, lowLifetime, -1));
 
         ra = new RaPacketBuilder(ROUTER_LIFETIME);
         ra.addRioOption(ROUTE_LIFETIME, "64:ff9b::/96");
         ByteBuffer routeInfoOptionPacket = ByteBuffer.wrap(ra.build());
         verifyRaLifetime(apfFilter, ipClientCallback, routeInfoOptionPacket, ROUTE_LIFETIME);
-        verifyRaEvent(new RaEvent(ROUTER_LIFETIME, -1, -1, ROUTE_LIFETIME, -1, -1));
 
         // Check that RIOs differing only in the first 4 bytes are different.
         ra = new RaPacketBuilder(ROUTER_LIFETIME);
@@ -2675,11 +2646,9 @@ public abstract class ApfTest {
         ra.addDnsslOption(DNSSL_LIFETIME, "test.example.com", "one.more.example.com");
         ByteBuffer dnsslOptionPacket = ByteBuffer.wrap(ra.build());
         verifyRaLifetime(apfFilter, ipClientCallback, dnsslOptionPacket, ROUTER_LIFETIME);
-        verifyRaEvent(new RaEvent(ROUTER_LIFETIME, -1, -1, -1, -1, -1));
 
         ByteBuffer largeRaPacket = ByteBuffer.wrap(buildLargeRa());
         verifyRaLifetime(apfFilter, ipClientCallback, largeRaPacket, 300);
-        verifyRaEvent(new RaEvent(1800, 600, 300, 1200, 7200, -1));
 
         // Verify that current program filters all the RAs (note: ApfFilter.MAX_RAS == 10).
         program = ipClientCallback.getApfProgram();
@@ -2701,7 +2670,7 @@ public abstract class ApfTest {
         final ApfConfiguration config = getDefaultConfig();
         config.multicastFilter = DROP_MULTICAST;
         config.ieee802_3Filter = DROP_802_3_FRAMES;
-        final TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback, mLog);
+        final TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback);
         byte[] program = ipClientCallback.getApfProgram();
         final int RA_REACHABLE_TIME = 1800;
         final int RA_RETRANSMISSION_TIMER = 1234;
@@ -2743,7 +2712,7 @@ public abstract class ApfTest {
         final ApfConfiguration config = getDefaultConfig();
         config.multicastFilter = DROP_MULTICAST;
         config.ieee802_3Filter = DROP_802_3_FRAMES;
-        final TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback, mLog);
+        final TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback);
         byte[] program = ipClientCallback.getApfProgram();
 
         final int routerLifetime = 1000;
@@ -2812,7 +2781,7 @@ public abstract class ApfTest {
         ApfConfiguration config = getDefaultConfig();
         config.multicastFilter = DROP_MULTICAST;
         config.ieee802_3Filter = DROP_802_3_FRAMES;
-        TestApfFilter apfFilter = new TestApfFilter(mContext, config, cb, mLog);
+        TestApfFilter apfFilter = new TestApfFilter(mContext, config, cb);
         for (int i = 0; i < 1000; i++) {
             byte[] packet = new byte[r.nextInt(maxRandomPacketSize + 1)];
             r.nextBytes(packet);
@@ -2833,7 +2802,7 @@ public abstract class ApfTest {
         ApfConfiguration config = getDefaultConfig();
         config.multicastFilter = DROP_MULTICAST;
         config.ieee802_3Filter = DROP_802_3_FRAMES;
-        TestApfFilter apfFilter = new TestApfFilter(mContext, config, cb, mLog);
+        TestApfFilter apfFilter = new TestApfFilter(mContext, config, cb);
         for (int i = 0; i < 1000; i++) {
             byte[] packet = new byte[r.nextInt(maxRandomPacketSize + 1)];
             r.nextBytes(packet);
@@ -2849,7 +2818,7 @@ public abstract class ApfTest {
     public void testMatchedRaUpdatesLifetime() throws Exception {
         final MockIpClientCallback ipClientCallback = new MockIpClientCallback();
         final TestApfFilter apfFilter = new TestApfFilter(mContext, getDefaultConfig(),
-                ipClientCallback, mLog);
+                ipClientCallback);
 
         // Create an RA and build an APF program
         byte[] ra = new RaPacketBuilder(1800 /* router lifetime */).build();
@@ -2869,41 +2838,6 @@ public abstract class ApfTest {
         // assert program was updated and new lifetimes were taken into account.
         assertDrop(program, ra);
     }
-
-    /**
-     * Call the APF interpreter to run {@code program} on {@code packet} with persistent memory
-     * segment {@data} pretending the filter was installed {@code filter_age} seconds ago.
-     */
-    private native static int apfSimulate(byte[] program, byte[] packet, byte[] data,
-        int filter_age);
-
-    /**
-     * Compile a tcpdump human-readable filter (e.g. "icmp" or "tcp port 54") into a BPF
-     * prorgam and return a human-readable dump of the BPF program identical to "tcpdump -d".
-     */
-    private native static String compileToBpf(String filter);
-
-    /**
-     * Open packet capture file {@code pcap_filename} and filter the packets using tcpdump
-     * human-readable filter (e.g. "icmp" or "tcp port 54") compiled to a BPF program and
-     * at the same time using APF program {@code apf_program}.  Return {@code true} if
-     * both APF and BPF programs filter out exactly the same packets.
-     */
-    private native static boolean compareBpfApf(String filter, String pcap_filename,
-            byte[] apf_program);
-
-
-    /**
-     * Set the APF interpreter version that used to run the program.
-     */
-    public static native void setApfVersion(int version);
-
-    /**
-     * Open packet capture file {@code pcapFilename} and run it through APF filter. Then
-     * checks whether all the packets are dropped and populates data[] {@code data} with
-     * the APF counters.
-     */
-    private native static boolean dropsAllPackets(byte[] program, byte[] data, String pcapFilename);
 
     @Test
     public void testBroadcastAddress() throws Exception {
