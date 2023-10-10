@@ -33,6 +33,7 @@ import android.system.OsConstants.AF_PACKET
 import android.system.OsConstants.ARPHRD_ETHER
 import android.system.OsConstants.ETH_P_IPV6
 import android.system.OsConstants.IPPROTO_UDP
+import android.system.OsConstants.SOCK_CLOEXEC
 import android.system.OsConstants.SOCK_DGRAM
 import android.system.OsConstants.SOCK_NONBLOCK
 import android.system.OsConstants.SOCK_RAW
@@ -159,9 +160,8 @@ class NetworkStackUtilsIntegrationTest {
         assertArrayEquals("Sent packet != original packet", originalPacket, sentDhcpPacket)
     }
 
-    @Test
-    fun testAttachRaFilter() {
-        val socket = Os.socket(AF_PACKET, SOCK_RAW, ETH_P_IPV6)
+    private fun doTestAttachRaFilter(generic: Boolean) {
+        val socket = Os.socket(AF_PACKET, SOCK_RAW or SOCK_CLOEXEC, 0)
         val ifParams = InterfaceParams.getByName(iface.interfaceName)
                 ?: fail("Could not obtain interface params for ${iface.interfaceName}")
         val socketAddr = SocketUtils.makePacketSocketAddress(ETH_P_IPV6, ifParams.index)
@@ -176,7 +176,11 @@ class NetworkStackUtilsIntegrationTest {
         echo.rewind()
         assertNextPacketEquals(socket, echo.readAsArray(), "ICMPv6 echo")
 
-        NetworkStackUtils.attachRaFilter(socket, ARPHRD_ETHER)
+        if (generic) {
+            NetworkStackUtils.attachControlPacketFilter(socket)
+        } else {
+            NetworkStackUtils.attachRaFilter(socket)
+        }
         // Send another echo, then an RA. After setting the filter expect only the RA.
         echo.rewind()
         reader.sendResponse(echo)
@@ -190,6 +194,16 @@ class NetworkStackUtilsIntegrationTest {
         ra.rewind()
 
         assertNextPacketEquals(socket, ra.readAsArray(), "ICMPv6 RA")
+    }
+
+    @Test
+    fun testAttachRaFilter() {
+        doTestAttachRaFilter(false)
+    }
+
+    @Test
+    fun testRaViaAttachControlPacketFilter() {
+        doTestAttachRaFilter(true)
     }
 
     private fun assertNextPacketEquals(socket: FileDescriptor, expected: ByteArray, descr: String) {
@@ -293,12 +307,15 @@ class NetworkStackUtilsIntegrationTest {
         packet.putShort(checksumOffset, IpUtils.ipChecksum(packet, ETHER_HEADER_LEN))
     }
 
-    @Test
-    fun testDhcpResponseWithMfBitDropped() {
+    private fun doTestDhcpResponseWithMfBitDropped(generic: Boolean) {
         val ifindex = InterfaceParams.getByName(iface.interfaceName).index
         val packetSock = Os.socket(AF_PACKET, SOCK_RAW or SOCK_NONBLOCK, /*protocol=*/0)
         try {
-            NetworkStackUtils.attachDhcpFilter(packetSock)
+            if (generic) {
+                NetworkStackUtils.attachControlPacketFilter(packetSock)
+            } else {
+                NetworkStackUtils.attachDhcpFilter(packetSock)
+            }
             val addr = SocketUtils.makePacketSocketAddress(OsConstants.ETH_P_IP, ifindex)
             Os.bind(packetSock, addr)
             val packet = DhcpPacket.buildNakPacket(DhcpPacket.ENCAP_L2, 42,
@@ -318,6 +335,16 @@ class NetworkStackUtilsIntegrationTest {
         } finally {
             Os.close(packetSock)
         }
+    }
+
+    @Test
+    fun testDhcpResponseWithMfBitDropped() {
+        doTestDhcpResponseWithMfBitDropped(false)
+    }
+
+    @Test
+    fun testGenericDhcpResponseWithMfBitDropped() {
+        doTestDhcpResponseWithMfBitDropped(true)
     }
 }
 

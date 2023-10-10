@@ -34,6 +34,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.OptionalInt;
 
 /**
  * Defines basic data and operations needed to build and use packets for the
@@ -76,11 +77,16 @@ public class Dhcp6Packet {
     protected final byte[] mServerDuid;
 
     /**
+     * DHCPv6 Optional Type: Option Request Option.
+     */
+    public static final byte DHCP6_OPTION_REQUEST_OPTION = 6;
+
+    /**
      * DHCPv6 Optional Type: Elapsed time.
      * This time is expressed in hundredths of a second.
      */
     public static final byte DHCP6_ELAPSED_TIME = 8;
-    protected final short mSecs;
+    protected final int mElapsedTime;
 
     /**
      * DHCPv6 Optional Type: Status Code.
@@ -114,6 +120,12 @@ public class Dhcp6Packet {
     protected PrefixDelegation mPrefixDelegation;
 
     /**
+     * DHCPv6 Optional Type: SOL_MAX_RT.
+     */
+    public static final byte DHCP6_SOL_MAX_RT = 82;
+    private OptionalInt mSolMaxRt;
+
+    /**
      * The transaction identifier used in this particular DHCPv6 negotiation
      */
     protected final int mTransId;
@@ -122,11 +134,14 @@ public class Dhcp6Packet {
      * The unique identifier for IA_NA, IA_TA, IA_PD used in this particular DHCPv6 negotiation
      */
     protected int mIaId;
+    // Per rfc8415#section-12, the IAID MUST be consistent across restarts.
+    // Since currently only one IAID is supported, a well-known value can be used (0).
+    public static final int IAID = 0;
 
-    Dhcp6Packet(int transId, short secs, @NonNull final byte[] clientDuid, final byte[] serverDuid,
-            @NonNull final byte[] iapd) {
+    Dhcp6Packet(int transId, int elapsedTime, @NonNull final byte[] clientDuid,
+            final byte[] serverDuid, @NonNull final byte[] iapd) {
         mTransId = transId;
-        mSecs = secs;
+        mElapsedTime = elapsedTime;
         mClientDuid = clientDuid;
         mServerDuid = serverDuid;
         mIaPd = iapd;
@@ -162,6 +177,13 @@ public class Dhcp6Packet {
     }
 
     /**
+     * Returns the SOL_MAX_RT option value in milliseconds.
+     */
+    public OptionalInt getSolMaxRtMs() {
+        return mSolMaxRt;
+    }
+
+    /**
      * A class to take DHCPv6 IA_PD option allocated from server.
      * https://www.rfc-editor.org/rfc/rfc8415.html#section-21.21
      */
@@ -176,6 +198,51 @@ public class Dhcp6Packet {
             this.t1 = t1;
             this.t2 = t2;
             this.ipo = ipo;
+        }
+
+        /**
+         * Check whether or not the delegated prefix in DHCPv6 packet is valid.
+         *
+         * TODO: ensure that the prefix has a reasonable lifetime, and the timers aren't too short.
+         */
+        public boolean isValid() {
+            if (iaid != IAID) {
+                Log.w(TAG, "IA_ID doesn't match, expected: " + IAID + ", actual: " + iaid);
+                return false;
+            }
+            if (ipo.prefixLen > 64) {
+                Log.e(TAG, "IA_PD option with prefix length " + ipo.prefixLen + " longer than 64");
+                return false;
+            }
+            if (t1 < 0 || t2 < 0) {
+                Log.e(TAG, "IA_PD option with invalid T1 " + t1 + " or T2 " + t2);
+                return false;
+            }
+
+            // Generally, t1 must be smaller or equal to t2 (except when t2 is 0).
+            if (t2 != 0 && t1 > t2) {
+                Log.e(TAG, "IA_PD option with T1 " + t1 + " greater than T2 " + t2);
+                return false;
+            }
+            final long preferred = ipo.preferred;
+            final long valid = ipo.valid;
+            if (preferred < 0 || valid < 0) {
+                Log.e(TAG, "IA_PD option with invalid lifetime, preferred lifetime " + preferred
+                        + ", valid lifetime " + valid);
+                return false;
+            }
+            if (preferred > valid) {
+                Log.e(TAG, "IA_PD option with preferred lifetime " + preferred
+                        + " greater than valid lifetime " + valid);
+                return false;
+            }
+
+            // If t2 is 0, ignore it.
+            if (t2 != 0 && preferred < t2) {
+                Log.e(TAG, "preferred lifetime " + preferred + " is smaller than T2 " + t2);
+                return false;
+            }
+            return true;
         }
 
         @Override
@@ -249,14 +316,15 @@ public class Dhcp6Packet {
      * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
      */
     @VisibleForTesting
-    static Dhcp6Packet decodePacket(@NonNull final ByteBuffer packet) throws ParseException {
-        short secs = 0;
+    static Dhcp6Packet decode(@NonNull final ByteBuffer packet) throws ParseException {
+        int elapsedTime = 0;
         byte[] iapd = null;
         byte[] serverDuid = null;
         byte[] clientDuid = null;
         short statusCode = STATUS_SUCCESS;
         String statusMsg = null;
         boolean rapidCommit = false;
+        int solMaxRt = 0;
 
         packet.order(ByteOrder.BIG_ENDIAN);
 
@@ -308,12 +376,16 @@ public class Dhcp6Packet {
                         break;
                     case DHCP6_ELAPSED_TIME:
                         expectedLen = 2;
-                        secs = packet.getShort();
+                        elapsedTime = (int) (packet.getShort() & 0xFFFF);
                         break;
                     case DHCP6_STATUS_CODE:
                         expectedLen = optionLen;
                         statusCode = packet.getShort();
                         statusMsg = readAsciiString(packet, expectedLen - 2, false /* isNullOk */);
+                        break;
+                    case DHCP6_SOL_MAX_RT:
+                        expectedLen = 4;
+                        solMaxRt = packet.getInt();
                         break;
                     default:
                         expectedLen = optionLen;
@@ -335,23 +407,26 @@ public class Dhcp6Packet {
 
         switch(messageType) {
             case DHCP6_MESSAGE_TYPE_SOLICIT:
-                newPacket = new Dhcp6SolicitPacket(transId, secs, clientDuid, iapd, rapidCommit);
+                newPacket = new Dhcp6SolicitPacket(transId, elapsedTime, clientDuid, iapd,
+                        rapidCommit);
                 break;
             case DHCP6_MESSAGE_TYPE_ADVERTISE:
                 newPacket = new Dhcp6AdvertisePacket(transId, clientDuid, serverDuid, iapd);
                 break;
             case DHCP6_MESSAGE_TYPE_REQUEST:
-                newPacket = new Dhcp6RequestPacket(transId, secs, clientDuid, serverDuid, iapd);
+                newPacket = new Dhcp6RequestPacket(transId, elapsedTime, clientDuid, serverDuid,
+                        iapd);
                 break;
             case DHCP6_MESSAGE_TYPE_REPLY:
                 newPacket = new Dhcp6ReplyPacket(transId, clientDuid, serverDuid, iapd,
                         rapidCommit);
                 break;
             case DHCP6_MESSAGE_TYPE_RENEW:
-                newPacket = new Dhcp6RenewPacket(transId, secs, clientDuid, serverDuid, iapd);
+                newPacket = new Dhcp6RenewPacket(transId, elapsedTime, clientDuid, serverDuid,
+                        iapd);
                 break;
             case DHCP6_MESSAGE_TYPE_REBIND:
-                newPacket = new Dhcp6RebindPacket(transId, secs, clientDuid, iapd);
+                newPacket = new Dhcp6RebindPacket(transId, elapsedTime, clientDuid, iapd);
                 break;
             default:
                 throw new ParseException("Unimplemented DHCP6 message type %d" + messageType);
@@ -369,6 +444,10 @@ public class Dhcp6Packet {
         newPacket.mStatusCode = statusCode;
         newPacket.mStatusMsg = statusMsg;
         newPacket.mRapidCommit = rapidCommit;
+        newPacket.mSolMaxRt =
+                (solMaxRt >= 60 && solMaxRt <= 86400)
+                        ? OptionalInt.of(solMaxRt * 1000)
+                        : OptionalInt.empty();
 
         return newPacket;
     }
@@ -376,10 +455,10 @@ public class Dhcp6Packet {
     /**
      * Parse a packet from an array of bytes, stopping at the given length.
      */
-    public static Dhcp6Packet decodePacket(@NonNull final byte[] packet, int length)
+    public static Dhcp6Packet decode(@NonNull final byte[] packet, int length)
             throws ParseException {
         final ByteBuffer buffer = ByteBuffer.wrap(packet, 0, length).order(ByteOrder.BIG_ENDIAN);
-        return decodePacket(buffer);
+        return decode(buffer);
     }
 
     /**
@@ -399,49 +478,15 @@ public class Dhcp6Packet {
             Log.e(TAG, "Unexpected transaction ID " + mTransId + ", expected " + transId);
             return false;
         }
-        return true;
-    }
-
-    /**
-     * Check whether or not the delegated prefix in DHCPv6 packet is valid.
-     *
-     * TODO: ensure that the prefix has a reasonable lifetime, and the timers aren't too short.
-     */
-    public static boolean hasValidPrefixDelegation(@NonNull final PrefixDelegation pd) {
-        if (pd == null) {
-            Log.e(TAG, "DHCPv6 packet without IA_PD option, ignoring");
+        if (mPrefixDelegation == null) {
+            Log.e(TAG, "DHCPv6 message without IA_PD option, ignoring");
             return false;
         }
-        if (pd.ipo.prefixLen > 64) {
-            Log.e(TAG, "IA_PD option with prefix length " + pd.ipo.prefixLen + " longer than 64");
+        if (!mPrefixDelegation.isValid()) {
+            Log.e(TAG, "DHCPv6 message takes invalid IA_PD option, ignoring");
             return false;
         }
-        final long t1 = pd.t1;
-        final long t2 = pd.t2;
-        if (t1 < 0 || t2 < 0) {
-            Log.e(TAG, "IA_PD option with invalid T1 " + t1 + " or T2 " + t2);
-            return false;
-        }
-        if (t1 > t2) {
-            Log.e(TAG, "IA_PD option with T1 " + t1 + " greater than T2 " + t2);
-            return false;
-        }
-        final long preferred = pd.ipo.preferred;
-        final long valid = pd.ipo.valid;
-        if (preferred < 0 || valid < 0) {
-            Log.e(TAG, "IA_PD option with invalid lifetime, preferred lifetime " + preferred
-                    + ", valid lifetime " + valid);
-            return false;
-        }
-        if (preferred > valid) {
-            Log.e(TAG, "IA_PD option with preferred lifetime " + preferred
-                    + " greater than valid lifetime " + valid);
-            return false;
-        }
-        if (preferred < t2) {
-            Log.e(TAG, "preferred lifetime " + preferred + " is samller than T2 " + t2);
-            return false;
-        }
+        //TODO: check if the status code is success or not.
         return true;
     }
 
@@ -524,10 +569,11 @@ public class Dhcp6Packet {
     /**
      * Builds a DHCPv6 SOLICIT packet from the required specified parameters.
      */
-    public static ByteBuffer buildSolicitPacket(int transId, short secs, @NonNull final byte[] iapd,
-            @NonNull final byte[] clientDuid, boolean rapidCommit) {
+    public static ByteBuffer buildSolicitPacket(int transId, long millisecs,
+            @NonNull final byte[] iapd, @NonNull final byte[] clientDuid, boolean rapidCommit) {
         final Dhcp6SolicitPacket pkt =
-                new Dhcp6SolicitPacket(transId, secs, clientDuid, iapd, rapidCommit);
+                new Dhcp6SolicitPacket(transId, (int) (millisecs / 10) /* elapsed time */,
+                        clientDuid, iapd, rapidCommit);
         return pkt.buildPacket();
     }
 
@@ -555,29 +601,34 @@ public class Dhcp6Packet {
     /**
      * Builds a DHCPv6 REQUEST packet from the required specified parameters.
      */
-    public static ByteBuffer buildRequestPacket(int transId, short secs, @NonNull final byte[] iapd,
-            @NonNull final byte[] clientDuid, @NonNull final byte[] serverDuid) {
+    public static ByteBuffer buildRequestPacket(int transId, long millisecs,
+            @NonNull final byte[] iapd, @NonNull final byte[] clientDuid,
+            @NonNull final byte[] serverDuid) {
         final Dhcp6RequestPacket pkt =
-                new Dhcp6RequestPacket(transId, secs, clientDuid, serverDuid, iapd);
+                new Dhcp6RequestPacket(transId, (int) (millisecs / 10) /* elapsed time */,
+                        clientDuid, serverDuid, iapd);
         return pkt.buildPacket();
     }
 
     /**
      * Builds a DHCPv6 RENEW packet from the required specified parameters.
      */
-    public static ByteBuffer buildRenewPacket(int transId, short secs, @NonNull final byte[] iapd,
-            @NonNull final byte[] clientDuid, @NonNull final byte[] serverDuid) {
+    public static ByteBuffer buildRenewPacket(int transId, long millisecs,
+            @NonNull final byte[] iapd, @NonNull final byte[] clientDuid,
+            @NonNull final byte[] serverDuid) {
         final Dhcp6RenewPacket pkt =
-                new Dhcp6RenewPacket(transId, secs, clientDuid, serverDuid, iapd);
+                new Dhcp6RenewPacket(transId, (int) (millisecs / 10) /* elapsed time */, clientDuid,
+                        serverDuid, iapd);
         return pkt.buildPacket();
     }
 
     /**
      * Builds a DHCPv6 REBIND packet from the required specified parameters.
      */
-    public static ByteBuffer buildRebindPacket(int transId, short secs, @NonNull final byte[] iapd,
-            @NonNull final byte[] clientDuid) {
-        final Dhcp6RebindPacket pkt = new Dhcp6RebindPacket(transId, secs, clientDuid, iapd);
+    public static ByteBuffer buildRebindPacket(int transId, long millisecs,
+            @NonNull final byte[] iapd, @NonNull final byte[] clientDuid) {
+        final Dhcp6RebindPacket pkt = new Dhcp6RebindPacket(transId,
+                (int) (millisecs / 10) /* elapsed time */, clientDuid, iapd);
         return pkt.buildPacket();
     }
 }
