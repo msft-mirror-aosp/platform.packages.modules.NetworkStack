@@ -553,6 +553,14 @@ public class NetworkMonitorTest {
         }).when(mCleartextDnsNetwork).openConnection(any());
         initHttpConnection(mHttpConnection);
         initHttpConnection(mHttpsConnection);
+        initHttpConnection(mFallbackConnection);
+        initHttpConnection(mOtherHttpConnection1);
+        initHttpConnection(mOtherHttpsConnection1);
+        initHttpConnection(mOtherHttpsConnection2);
+        initHttpConnection(mOtherFallbackConnection);
+        initHttpConnection(mTestOverriddenUrlConnection);
+        initHttpConnection(mCapportApiConnection);
+        initHttpConnection(mSpeedTestConnection);
 
         mFakeDns = new FakeDns();
         mFakeDns.startMocking();
@@ -603,10 +611,6 @@ public class NetworkMonitorTest {
                 0, mCreatedNetworkMonitors.size());
         assertEquals("BroadcastReceiver still registered after disconnect",
                 0, mRegisteredReceivers.size());
-        if (mTstDependencies.isTcpInfoParsingSupported()) {
-            verify(mTstDependencies, times(networkMonitors.length))
-                    .removeDeviceConfigChangedListener(any());
-        }
     }
 
     private void initHttpConnection(HttpURLConnection connection) {
@@ -614,11 +618,13 @@ public class NetworkMonitorTest {
         // Explicitly set the HttpURLConnection methods so that these will not interact with real
         // methods to prevent threading issue in the test.
         doReturn(new HashMap<>()).when(connection).getHeaderFields();
+        doReturn(null).when(connection).getHeaderField(eq("location"));
         doNothing().when(connection).setInstanceFollowRedirects(anyBoolean());
         doNothing().when(connection).setConnectTimeout(anyInt());
         doNothing().when(connection).setReadTimeout(anyInt());
         doNothing().when(connection).setRequestProperty(any(), any());
         doNothing().when(connection).setUseCaches(anyBoolean());
+        doNothing().when(connection).disconnect();
     }
 
     private void initCallbacks(int interfaceVersion) throws Exception {
@@ -707,7 +713,6 @@ public class NetworkMonitorTest {
         setNetworkCapabilities(nm, nc);
         HandlerUtils.waitForIdle(nm.getHandler(), HANDLER_TIMEOUT_MS);
         mCreatedNetworkMonitors.add(nm);
-        doReturn(false).when(mTstDependencies).isTcpInfoParsingSupported();
 
         return nm;
     }
@@ -1584,7 +1589,7 @@ public class NetworkMonitorTest {
         HandlerUtils.waitForIdle(nm.getHandler(), HANDLER_TIMEOUT_MS);
     }
 
-    @Test @IgnoreUpTo(Build.VERSION_CODES.Q)
+    @Test
     public void testIsCaptivePortal_CapportApiNotSupported() throws Exception {
         // Test that on a R+ device, if NetworkStack was compiled without CaptivePortalData support
         // (built against Q), NetworkMonitor behaves as expected.
@@ -1859,7 +1864,6 @@ public class NetworkMonitorTest {
     public void testIsDataStall_SkipEvaluateOnValidationNotRequiredNetwork() {
         // Make DNS and TCP stall condition satisfied.
         setDataStallEvaluationType(DATA_STALL_EVALUATION_TYPE_DNS | DATA_STALL_EVALUATION_TYPE_TCP);
-        doReturn(true).when(mTstDependencies).isTcpInfoParsingSupported();
         doReturn(0).when(mTst).getLatestReceivedCount();
         doReturn(true).when(mTst).isDataStallSuspected();
         final WrappedNetworkMonitor nm = makeMonitor(CELL_NO_INTERNET_CAPABILITIES);
@@ -1894,7 +1898,6 @@ public class NetworkMonitorTest {
 
     @Test
     public void testIsDataStall_EvaluationTcp() throws Exception {
-        doReturn(true).when(mTstDependencies).isTcpInfoParsingSupported();
         // Evaluate TCP only. Expect ignoring DNS signal.
         setDataStallEvaluationType(DATA_STALL_EVALUATION_TYPE_TCP);
         WrappedNetworkMonitor wrappedMonitor = makeMonitor(CELL_METERED_CAPABILITIES);
@@ -2296,7 +2299,6 @@ public class NetworkMonitorTest {
     @Test
     public void testDataStall_setOpportunisticMode() {
         setDataStallEvaluationType(DATA_STALL_EVALUATION_TYPE_TCP);
-        doReturn(true).when(mTstDependencies).isTcpInfoParsingSupported();
         WrappedNetworkMonitor wnm = makeCellNotMeteredNetworkMonitor();
         InOrder inOrder = inOrder(mTst);
         // Initialized with default value.
@@ -2402,7 +2404,6 @@ public class NetworkMonitorTest {
     }
 
     private void setupTcpDataStall() {
-        doReturn(true).when(mTstDependencies).isTcpInfoParsingSupported();
         doReturn(0).when(mTst).getLatestReceivedCount();
         doReturn(TEST_TCP_FAIL_RATE).when(mTst).getLatestPacketFailPercentage();
         doReturn(TEST_TCP_PACKET_COUNT).when(mTst).getSentSinceLastRecv();

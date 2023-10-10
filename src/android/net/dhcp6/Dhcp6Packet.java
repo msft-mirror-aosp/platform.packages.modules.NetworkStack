@@ -34,6 +34,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.OptionalInt;
 
 /**
  * Defines basic data and operations needed to build and use packets for the
@@ -76,6 +77,11 @@ public class Dhcp6Packet {
     protected final byte[] mServerDuid;
 
     /**
+     * DHCPv6 Optional Type: Option Request Option.
+     */
+    public static final byte DHCP6_OPTION_REQUEST_OPTION = 6;
+
+    /**
      * DHCPv6 Optional Type: Elapsed time.
      * This time is expressed in hundredths of a second.
      */
@@ -114,6 +120,12 @@ public class Dhcp6Packet {
     protected PrefixDelegation mPrefixDelegation;
 
     /**
+     * DHCPv6 Optional Type: SOL_MAX_RT.
+     */
+    public static final byte DHCP6_SOL_MAX_RT = 82;
+    private OptionalInt mSolMaxRt;
+
+    /**
      * The transaction identifier used in this particular DHCPv6 negotiation
      */
     protected final int mTransId;
@@ -122,6 +134,9 @@ public class Dhcp6Packet {
      * The unique identifier for IA_NA, IA_TA, IA_PD used in this particular DHCPv6 negotiation
      */
     protected int mIaId;
+    // Per rfc8415#section-12, the IAID MUST be consistent across restarts.
+    // Since currently only one IAID is supported, a well-known value can be used (0).
+    public static final int IAID = 0;
 
     Dhcp6Packet(int transId, int elapsedTime, @NonNull final byte[] clientDuid,
             final byte[] serverDuid, @NonNull final byte[] iapd) {
@@ -162,6 +177,13 @@ public class Dhcp6Packet {
     }
 
     /**
+     * Returns the SOL_MAX_RT option value in milliseconds.
+     */
+    public OptionalInt getSolMaxRtMs() {
+        return mSolMaxRt;
+    }
+
+    /**
      * A class to take DHCPv6 IA_PD option allocated from server.
      * https://www.rfc-editor.org/rfc/rfc8415.html#section-21.21
      */
@@ -176,6 +198,51 @@ public class Dhcp6Packet {
             this.t1 = t1;
             this.t2 = t2;
             this.ipo = ipo;
+        }
+
+        /**
+         * Check whether or not the delegated prefix in DHCPv6 packet is valid.
+         *
+         * TODO: ensure that the prefix has a reasonable lifetime, and the timers aren't too short.
+         */
+        public boolean isValid() {
+            if (iaid != IAID) {
+                Log.w(TAG, "IA_ID doesn't match, expected: " + IAID + ", actual: " + iaid);
+                return false;
+            }
+            if (ipo.prefixLen > 64) {
+                Log.e(TAG, "IA_PD option with prefix length " + ipo.prefixLen + " longer than 64");
+                return false;
+            }
+            if (t1 < 0 || t2 < 0) {
+                Log.e(TAG, "IA_PD option with invalid T1 " + t1 + " or T2 " + t2);
+                return false;
+            }
+
+            // Generally, t1 must be smaller or equal to t2 (except when t2 is 0).
+            if (t2 != 0 && t1 > t2) {
+                Log.e(TAG, "IA_PD option with T1 " + t1 + " greater than T2 " + t2);
+                return false;
+            }
+            final long preferred = ipo.preferred;
+            final long valid = ipo.valid;
+            if (preferred < 0 || valid < 0) {
+                Log.e(TAG, "IA_PD option with invalid lifetime, preferred lifetime " + preferred
+                        + ", valid lifetime " + valid);
+                return false;
+            }
+            if (preferred > valid) {
+                Log.e(TAG, "IA_PD option with preferred lifetime " + preferred
+                        + " greater than valid lifetime " + valid);
+                return false;
+            }
+
+            // If t2 is 0, ignore it.
+            if (t2 != 0 && preferred < t2) {
+                Log.e(TAG, "preferred lifetime " + preferred + " is smaller than T2 " + t2);
+                return false;
+            }
+            return true;
         }
 
         @Override
@@ -257,6 +324,7 @@ public class Dhcp6Packet {
         short statusCode = STATUS_SUCCESS;
         String statusMsg = null;
         boolean rapidCommit = false;
+        int solMaxRt = 0;
 
         packet.order(ByteOrder.BIG_ENDIAN);
 
@@ -315,6 +383,10 @@ public class Dhcp6Packet {
                         statusCode = packet.getShort();
                         statusMsg = readAsciiString(packet, expectedLen - 2, false /* isNullOk */);
                         break;
+                    case DHCP6_SOL_MAX_RT:
+                        expectedLen = 4;
+                        solMaxRt = packet.getInt();
+                        break;
                     default:
                         expectedLen = optionLen;
                         // BufferUnderflowException will be thrown if option is truncated.
@@ -372,6 +444,10 @@ public class Dhcp6Packet {
         newPacket.mStatusCode = statusCode;
         newPacket.mStatusMsg = statusMsg;
         newPacket.mRapidCommit = rapidCommit;
+        newPacket.mSolMaxRt =
+                (solMaxRt >= 60 && solMaxRt <= 86400)
+                        ? OptionalInt.of(solMaxRt * 1000)
+                        : OptionalInt.empty();
 
         return newPacket;
     }
@@ -402,49 +478,15 @@ public class Dhcp6Packet {
             Log.e(TAG, "Unexpected transaction ID " + mTransId + ", expected " + transId);
             return false;
         }
-        return true;
-    }
-
-    /**
-     * Check whether or not the delegated prefix in DHCPv6 packet is valid.
-     *
-     * TODO: ensure that the prefix has a reasonable lifetime, and the timers aren't too short.
-     */
-    public static boolean hasValidPrefixDelegation(@NonNull final PrefixDelegation pd) {
-        if (pd == null) {
-            Log.e(TAG, "DHCPv6 packet without IA_PD option, ignoring");
+        if (mPrefixDelegation == null) {
+            Log.e(TAG, "DHCPv6 message without IA_PD option, ignoring");
             return false;
         }
-        if (pd.ipo.prefixLen > 64) {
-            Log.e(TAG, "IA_PD option with prefix length " + pd.ipo.prefixLen + " longer than 64");
+        if (!mPrefixDelegation.isValid()) {
+            Log.e(TAG, "DHCPv6 message takes invalid IA_PD option, ignoring");
             return false;
         }
-        final long t1 = pd.t1;
-        final long t2 = pd.t2;
-        if (t1 < 0 || t2 < 0) {
-            Log.e(TAG, "IA_PD option with invalid T1 " + t1 + " or T2 " + t2);
-            return false;
-        }
-        if (t1 > t2) {
-            Log.e(TAG, "IA_PD option with T1 " + t1 + " greater than T2 " + t2);
-            return false;
-        }
-        final long preferred = pd.ipo.preferred;
-        final long valid = pd.ipo.valid;
-        if (preferred < 0 || valid < 0) {
-            Log.e(TAG, "IA_PD option with invalid lifetime, preferred lifetime " + preferred
-                    + ", valid lifetime " + valid);
-            return false;
-        }
-        if (preferred > valid) {
-            Log.e(TAG, "IA_PD option with preferred lifetime " + preferred
-                    + " greater than valid lifetime " + valid);
-            return false;
-        }
-        if (preferred < t2) {
-            Log.e(TAG, "preferred lifetime " + preferred + " is samller than T2 " + t2);
-            return false;
-        }
+        //TODO: check if the status code is success or not.
         return true;
     }
 
