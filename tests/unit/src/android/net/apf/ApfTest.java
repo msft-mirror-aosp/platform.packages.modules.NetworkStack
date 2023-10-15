@@ -2932,8 +2932,8 @@ public class ApfTest {
         ra = new RaPacketBuilder(179 /* router lifetime */).build();
         assertDrop(program, ra);
 
-        // lifetime increases above accept_ra_min_lft
-        ra = new RaPacketBuilder(181 /* router lifetime */).build();
+        // lifetime increases to accept_ra_min_lft
+        ra = new RaPacketBuilder(180 /* router lifetime */).build();
         assertPass(program, ra);
     }
 
@@ -2965,8 +2965,8 @@ public class ApfTest {
         ra = new RaPacketBuilder(1 /* router lifetime */).build();
         assertDrop(program, ra);
 
-        // above accept_ra_min_lft
-        ra = new RaPacketBuilder(181 /* router lifetime */).build();
+        // equals accept_ra_min_lft
+        ra = new RaPacketBuilder(180 /* router lifetime */).build();
         assertPass(program, ra);
 
         // lifetime is 0
@@ -3029,8 +3029,8 @@ public class ApfTest {
         ra = new RaPacketBuilder(1801 /* router lifetime */).build();
         assertPass(program, ra);
 
-        // lifetime is just above 1/3 of old lft
-        ra = new RaPacketBuilder(601 /* router lifetime */).build();
+        // lifetime is 1/3 of old lft
+        ra = new RaPacketBuilder(600 /* router lifetime */).build();
         assertDrop(program, ra);
 
         // lifetime is below 1/3 of old lft
@@ -3044,6 +3044,60 @@ public class ApfTest {
         // lifetime is 0
         ra = new RaPacketBuilder(0 /* router lifetime */).build();
         assertPass(program, ra);
+    }
+
+    @Test
+    public void testRaFilterIsUpdated() throws Exception {
+        final MockIpClientCallback ipClientCallback = new MockIpClientCallback();
+        // configure accept_ra_min_lft
+        final ApfConfiguration config = getDefaultConfig();
+        config.acceptRaMinLft = 180;
+        final TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback);
+
+        // Create an initial RA and build an APF program
+        byte[] ra = new RaPacketBuilder(1800 /* router lifetime */).build();
+        apfFilter.pretendPacketReceived(ra);
+        byte[] program = ipClientCallback.assertProgramUpdateAndGet();
+
+        // repeated RA is dropped.
+        assertDrop(program, ra);
+
+        // updated RA is passed, repeated RA is dropped after program update.
+        ra = new RaPacketBuilder(599 /* router lifetime */).build();
+        assertPass(program, ra);
+        apfFilter.pretendPacketReceived(ra);
+        program = ipClientCallback.assertProgramUpdateAndGet();
+        assertDrop(program, ra);
+
+        ra = new RaPacketBuilder(180 /* router lifetime */).build();
+        assertPass(program, ra);
+        apfFilter.pretendPacketReceived(ra);
+        program = ipClientCallback.assertProgramUpdateAndGet();
+        assertDrop(program, ra);
+
+        ra = new RaPacketBuilder(0 /* router lifetime */).build();
+        assertPass(program, ra);
+        apfFilter.pretendPacketReceived(ra);
+        program = ipClientCallback.assertProgramUpdateAndGet();
+        assertDrop(program, ra);
+
+        ra = new RaPacketBuilder(180 /* router lifetime */).build();
+        assertPass(program, ra);
+        apfFilter.pretendPacketReceived(ra);
+        program = ipClientCallback.assertProgramUpdateAndGet();
+        assertDrop(program, ra);
+
+        ra = new RaPacketBuilder(599 /* router lifetime */).build();
+        assertPass(program, ra);
+        apfFilter.pretendPacketReceived(ra);
+        program = ipClientCallback.assertProgramUpdateAndGet();
+        assertDrop(program, ra);
+
+        ra = new RaPacketBuilder(1800 /* router lifetime */).build();
+        assertPass(program, ra);
+        apfFilter.pretendPacketReceived(ra);
+        program = ipClientCallback.assertProgramUpdateAndGet();
+        assertDrop(program, ra);
     }
 
     @Test
