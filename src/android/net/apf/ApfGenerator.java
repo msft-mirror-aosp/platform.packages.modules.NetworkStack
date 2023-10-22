@@ -16,6 +16,8 @@
 
 package android.net.apf;
 
+import android.annotation.Nullable;
+
 import com.android.internal.annotations.VisibleForTesting;
 
 import java.util.ArrayList;
@@ -78,7 +80,9 @@ public class ApfGenerator {
         NOT(32),  // Not, e.g. "not R0"
         NEG(33),  // Negate, e.g. "neg R0"
         SWAP(34), // Swap, e.g. "swap R0,R1"
-        MOVE(35);  // Move, e.g. "move R0,R1"
+        MOVE(35),  // Move, e.g. "move R0,R1"
+        ALLOC(36), // Allocate buffer, "e.g. ALLOC R0"
+        TRANS(37); // Transmit buffer, "e.g. TRANS R0"
 
         final int value;
 
@@ -96,13 +100,24 @@ public class ApfGenerator {
             this.value = value;
         }
     }
+
+    private static class Immediate {
+        public final boolean mSigned;
+        public final byte mImmSize;
+        public final int mValue;
+
+        Immediate(int value, boolean signed) {
+            mValue = value;
+            mSigned = signed;
+            mImmSize = calculateImmSize(value, signed);
+        }
+    }
+
     private class Instruction {
         private final byte mOpcode;   // A "Opcode" value.
         private final byte mRegister; // A "Register" value.
-        private boolean mHasImm;
-        private byte mImmSize;
-        private boolean mImmSigned;
-        private int mImm;
+        @Nullable
+        public Immediate mImm;
         // When mOpcode is a jump:
         private byte mTargetLabelSize;
         private String mTargetLabel;
@@ -123,10 +138,7 @@ public class ApfGenerator {
         }
 
         void setImm(int imm, boolean signed) {
-            mHasImm = true;
-            mImm = imm;
-            mImmSigned = signed;
-            mImmSize = calculateImmSize(imm, signed);
+            mImm = new Immediate(imm, signed);
         }
 
         void setUnsignedImm(int imm) {
@@ -168,7 +180,7 @@ public class ApfGenerator {
                 return 0;
             }
             int size = 1;
-            if (mHasImm) {
+            if (mImm != null) {
                 size += generatedImmSize();
             }
             if (mTargetLabel != null) {
@@ -243,8 +255,8 @@ public class ApfGenerator {
             if (mTargetLabel != null) {
                 writingOffset = writeValue(calculateTargetLabelOffset(), bytecode, writingOffset);
             }
-            if (mHasImm) {
-                writingOffset = writeValue(mImm, bytecode, writingOffset);
+            if (mImm != null) {
+                writingOffset = writeValue(mImm.mValue, bytecode, writingOffset);
             }
             if (mCompareBytes != null) {
                 System.arraycopy(mCompareBytes, 0, bytecode, writingOffset, mCompareBytes.length);
@@ -265,7 +277,11 @@ public class ApfGenerator {
          * truncated.
          */
         private byte generatedImmSize() {
-            return mImmSize > mTargetLabelSize ? mImmSize : mTargetLabelSize;
+            if (mImm == null) {
+                return mTargetLabelSize;
+            } else {
+                return mImm.mImmSize > mTargetLabelSize ? mImm.mImmSize : mTargetLabelSize;
+            }
         }
 
         private int calculateTargetLabelOffset() throws IllegalInstructionException {
@@ -283,21 +299,6 @@ public class ApfGenerator {
             // Calculate distance from end of this instruction to instruction.offset.
             final int targetLabelOffset = targetLabelInstruction.offset - (offset + size());
             return targetLabelOffset;
-        }
-
-        private byte calculateImmSize(int imm, boolean signed) {
-            if (imm == 0) {
-                return 0;
-            }
-            if (signed && (imm >= -128 && imm <= 127) ||
-                    !signed && (imm >= 0 && imm <= 255)) {
-                return 1;
-            }
-            if (signed && (imm >= -32768 && imm <= 32767) ||
-                    !signed && (imm >= 0 && imm <= 65535)) {
-                return 2;
-            }
-            return 4;
         }
     }
 
@@ -839,6 +840,32 @@ public class ApfGenerator {
     }
 
     /**
+     * Add an instruction to the end of the program to call the apf_allocate_buffer() function.
+     *
+     * @param register the register value contains the buffer size.
+     */
+    public ApfGenerator addAlloc(Register register) throws IllegalInstructionException {
+        requireApfVersion(5);
+        Instruction instruction = new Instruction(Opcodes.EXT, register);
+        instruction.setUnsignedImm(ExtendedOpcodes.ALLOC.value);
+        addInstruction(instruction);
+        return this;
+    }
+
+    /**
+     * Add an instruction to the end of the program to call the apf_transmit_buffer() function.
+     *
+     * @param register the register value contains the packet type.
+     */
+    public ApfGenerator addTrans(Register register) throws IllegalInstructionException {
+        requireApfVersion(5);
+        Instruction instruction = new Instruction(Opcodes.EXT, register);
+        instruction.setUnsignedImm(ExtendedOpcodes.TRANS.value);
+        addInstruction(instruction);
+        return this;
+    }
+
+    /**
      * Add an instruction to the end of the program to load 32 bits from the data memory into
      * {@code register}. The source address is computed by adding the signed immediate
      * @{code offset} to the other register.
@@ -879,6 +906,22 @@ public class ApfGenerator {
             offset += instruction.size();
         }
         return offset;
+    }
+
+    /**
+     * Calculate the size of the imm.
+     */
+    private static byte calculateImmSize(int imm, boolean signed) {
+        if (imm == 0) {
+            return 0;
+        }
+        if (signed && (imm >= -128 && imm <= 127) || !signed && (imm >= 0 && imm <= 255)) {
+            return 1;
+        }
+        if (signed && (imm >= -32768 && imm <= 32767) || !signed && (imm >= 0 && imm <= 65535)) {
+            return 2;
+        }
+        return 4;
     }
 
     /**
