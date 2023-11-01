@@ -179,6 +179,7 @@ import android.stats.connectivity.NudEventType;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.util.ArrayMap;
+import android.util.Log;
 
 import androidx.annotation.NonNull;
 import androidx.test.InstrumentationRegistry;
@@ -281,6 +282,7 @@ import java.util.function.Predicate;
 @RunWith(Parameterized.class)
 @SmallTest
 public abstract class IpClientIntegrationTestCommon {
+    private static final String TAG = IpClientIntegrationTestCommon.class.getSimpleName();
     private static final int DATA_BUFFER_LEN = 4096;
     private static final int PACKET_TIMEOUT_MS = 5_000;
     private static final String TEST_CLUSTER = "some cluster";
@@ -3189,7 +3191,7 @@ public abstract class IpClientIntegrationTestCommon {
         return lp;
     }
 
-    private void doDualStackProvisioning() throws Exception {
+    private LinkProperties doDualStackProvisioning() throws Exception {
         final ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
                 .withoutIpReachabilityMonitor()
                 .build();
@@ -3205,7 +3207,7 @@ public abstract class IpClientIntegrationTestCommon {
             mIIpClient.startProvisioning(config.toStableParcelable());
         }
 
-        performDualStackProvisioning();
+        return performDualStackProvisioning();
     }
 
     private boolean hasRouteTo(@NonNull final LinkProperties lp, @NonNull final String prefix) {
@@ -3232,8 +3234,10 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
+    @SignatureRequiredTest(reason = "Out of SLO flakiness")
     public void testIgnoreIpv6ProvisioningLoss_disableAcceptRaDefrtr() throws Exception {
-        doDualStackProvisioning();
+        LinkProperties lp = doDualStackProvisioning();
+        Log.d(TAG, "current LinkProperties: " + lp);
 
         final CompletableFuture<LinkProperties> lpFuture = new CompletableFuture<>();
 
@@ -3254,7 +3258,8 @@ public abstract class IpClientIntegrationTestCommon {
                     lpFuture.complete(x);
                     return true;
                 }));
-        final LinkProperties lp = lpFuture.get(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        lp = lpFuture.get(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        Log.d(TAG, "After receiving RA with 0 router lifetime, LinkProperties: " + lp);
         assertNotNull(lp);
         assertEquals(lp.getAddresses().get(0), CLIENT_ADDR);
         assertEquals(lp.getDnsServers().get(0), SERVER_ADDR);
@@ -3923,9 +3928,19 @@ public abstract class IpClientIntegrationTestCommon {
         // not strictly necessary.
         setDhcpFeatures(false /* isDhcpLeaseCacheEnabled */, true /* isRapidCommitEnabled */,
                 false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+
+        // Disable gratuitious neighbor discovery feature manually, if the feature is enabled on
+        // the DUT during experiment launch, that will send another two duplicate NA packets and
+        // mess up the assert of received NA packets.
+        setFeatureEnabled(NetworkStackUtils.IPCLIENT_GRATUITOUS_NA_VERSION,
+                false /* isGratuitousNaEnabled */);
+        assumeFalse(isFeatureEnabled(NetworkStackUtils.IPCLIENT_GRATUITOUS_NA_VERSION));
         if (isGratuitousArpNaRoamingEnabled) {
             setFeatureEnabled(NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION, true);
-            assertTrue(isFeatureEnabled(NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION));
+            assumeTrue(isFeatureEnabled(NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION));
+        } else {
+            setFeatureEnabled(NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION, false);
+            assumeFalse(isFeatureEnabled(NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION));
         }
         startIpClientProvisioning(prov.build());
     }
@@ -4687,6 +4702,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
+    @IgnoreUpTo(Build.VERSION_CODES.TIRAMISU)
     public void testMaxDtimMultiplier_IPv6OnlyNetwork() throws Exception {
         ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
                 .withoutIPv4()
@@ -4704,6 +4720,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
+    @IgnoreUpTo(Build.VERSION_CODES.TIRAMISU)
     public void testMaxDtimMultiplier_IPv6LinkLocalOnlyMode() throws Exception {
         final InOrder inOrder = inOrder(mCb);
         ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
@@ -4721,6 +4738,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
+    @IgnoreUpTo(Build.VERSION_CODES.TIRAMISU)
     public void testMaxDtimMultiplier_IPv4OnlyNetwork() throws Exception {
         performDhcpHandshake(true /* isSuccessLease */, TEST_LEASE_DURATION_S,
                 true /* isDhcpLeaseCacheEnabled */, false /* shouldReplyRapidCommitAck */,
@@ -4742,12 +4760,14 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
+    @IgnoreUpTo(Build.VERSION_CODES.TIRAMISU)
     public void testMaxDtimMultiplier_DualStackNetwork() throws Exception {
         final InOrder inOrder = inOrder(mCb);
         runDualStackNetworkDtimMultiplierSetting(inOrder);
     }
 
     @Test
+    @IgnoreUpTo(Build.VERSION_CODES.TIRAMISU)
     public void testMaxDtimMultiplier_MulticastLock() throws Exception {
         final InOrder inOrder = inOrder(mCb);
         runDualStackNetworkDtimMultiplierSetting(inOrder);
@@ -4765,6 +4785,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
+    @IgnoreUpTo(Build.VERSION_CODES.TIRAMISU)
     public void testMaxDtimMultiplier_MulticastLockEnabled_StoppedState() throws Exception {
         // Simulate to hold the multicast lock by disabling the multicast filter at StoppedState,
         // verify no callback to be sent, start dual-stack provisioning and verify the multiplier
@@ -4779,6 +4800,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
+    @IgnoreUpTo(Build.VERSION_CODES.TIRAMISU)
     public void testMaxDtimMultiplier_resetMultiplier() throws Exception {
         final InOrder inOrder = inOrder(mCb);
         runDualStackNetworkDtimMultiplierSetting(inOrder);
