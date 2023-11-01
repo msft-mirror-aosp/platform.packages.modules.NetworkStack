@@ -54,4 +54,19 @@ public class ApfJniUtils {
      */
     public static native boolean dropsAllPackets(int apfVersion, byte[] program, byte[] data,
             String pcapFilename);
+
+    /**
+     * Disassemble the Apf program into human-readable text.
+     */
+    public static native String[] disassembleApf(byte[] program);
+
+    /**
+     * Get the transmitted packet.
+     */
+    public static native byte[] getTransmittedPacket();
+
+    /**
+     * Reset the memory region that stored the transmitted packet.
+     */
+    public static native void resetTransmittedPacketMemory();
 }
