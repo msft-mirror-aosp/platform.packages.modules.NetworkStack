@@ -1283,8 +1283,14 @@ public abstract class DhcpPacket {
                             captivePortalUrl = readAsciiString(packet, optionLen, true);
                             break;
                         case DHCP_IPV6_ONLY_PREFERRED:
-                            expectedLen = 4;
-                            ipv6OnlyWaitTime = Integer.valueOf(packet.getInt());
+                            if (optionLen == 4) {
+                                expectedLen = optionLen;
+                                ipv6OnlyWaitTime = Integer.valueOf(packet.getInt());
+                            } else {
+                                // rfc8925#section-3.1: The client MUST ignore the IPv6-Only
+                                // Preferred option if the length field value is not 4.
+                                expectedLen = skipOption(packet, optionLen);
+                            }
                             break;
                         default:
                             expectedLen = skipOption(packet, optionLen);

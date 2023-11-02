@@ -18,8 +18,6 @@ package android.net.ip;
 
 import static android.system.OsConstants.RT_SCOPE_UNIVERSE;
 
-import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_PARSE_NETLINK_EVENTS_VERSION;
-
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -28,7 +26,6 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.anyBoolean;
 import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doReturn;
@@ -170,8 +167,6 @@ public class IpClientTest {
         when(mDependencies.getIpMemoryStore(mContext, mNetworkStackServiceManager))
                 .thenReturn(mIpMemoryStore);
         when(mDependencies.getIpConnectivityLog()).thenReturn(mMetricsLog);
-        when(mDependencies.isFeatureEnabled(eq(mContext),
-                eq(IPCLIENT_PARSE_NETLINK_EVENTS_VERSION), anyBoolean())).thenReturn(false);
 
         mIfParams = null;
     }
@@ -427,6 +422,8 @@ public class IpClientTest {
         verifyNetworkAttributesStored(l2Key, new NetworkAttributes.Builder()
                 .setCluster(cluster)
                 .build());
+
+        verifyShutdown(ipc);
     }
 
     private void verifyShutdown(IpClient ipc) throws Exception {
@@ -486,6 +483,8 @@ public class IpClientTest {
                 fail(testcase.errorMessage());
             }
         }
+
+        ipc.shutdown();
     }
 
     static class IsProvisionedTestCase {
@@ -834,6 +833,7 @@ public class IpClientTest {
         final MacAddress bssid = ipc.getInitialBssid(layer2Info, scanResultInfo,
                 true /* isAtLeastS */);
         assertEquals(bssid, MacAddress.fromString(TEST_BSSID));
+        ipc.shutdown();
     }
 
     @Test
@@ -844,6 +844,7 @@ public class IpClientTest {
         final MacAddress bssid = ipc.getInitialBssid(layer2Info, null /* ScanResultInfo */,
                 true /* isAtLeastS */);
         assertEquals(bssid, MacAddress.fromString(TEST_BSSID));
+        ipc.shutdown();
     }
 
     @Test
@@ -855,6 +856,7 @@ public class IpClientTest {
         final MacAddress bssid = ipc.getInitialBssid(layer2Info, scanResultInfo,
                 true /* isAtLeastS */);
         assertNull(bssid);
+        ipc.shutdown();
     }
 
     @Test
@@ -864,6 +866,7 @@ public class IpClientTest {
         final MacAddress bssid = ipc.getInitialBssid(null /* layer2Info */, scanResultInfo,
                 true /* isAtLeastS */);
         assertNull(bssid);
+        ipc.shutdown();
     }
 
     @Test
@@ -875,6 +878,7 @@ public class IpClientTest {
         final MacAddress bssid = ipc.getInitialBssid(layer2Info, scanResultInfo,
                 false /* isAtLeastS */);
         assertEquals(bssid, MacAddress.fromString(TEST_BSSID));
+        ipc.shutdown();
     }
 
     @Test
@@ -884,6 +888,7 @@ public class IpClientTest {
         final MacAddress bssid = ipc.getInitialBssid(null /* layer2Info */, scanResultInfo,
                 false /* isAtLeastS */);
         assertEquals(bssid, MacAddress.fromString(TEST_BSSID));
+        ipc.shutdown();
     }
 
     @Test
@@ -893,6 +898,7 @@ public class IpClientTest {
         final MacAddress bssid = ipc.getInitialBssid(null /* layer2Info */, scanResultInfo,
                 false /* isAtLeastS */);
         assertNull(bssid);
+        ipc.shutdown();
     }
 
     @Test
@@ -904,6 +910,7 @@ public class IpClientTest {
         final MacAddress bssid = ipc.getInitialBssid(layer2Info, scanResultInfo,
                 false /* isAtLeastS */);
         assertEquals(bssid, MacAddress.fromString(TEST_BSSID));
+        ipc.shutdown();
     }
 
     @Test
@@ -914,6 +921,7 @@ public class IpClientTest {
         final MacAddress bssid = ipc.getInitialBssid(layer2Info, null /* scanResultInfo */,
                 false /* isAtLeastS */);
         assertEquals(bssid, MacAddress.fromString(TEST_BSSID));
+        ipc.shutdown();
     }
 
     @Test
@@ -922,6 +930,7 @@ public class IpClientTest {
         final MacAddress bssid = ipc.getInitialBssid(null /* layer2Info */,
                 null /* scanResultInfo */, false /* isAtLeastS */);
         assertNull(bssid);
+        ipc.shutdown();
     }
 
     interface Fn<A,B> {
