@@ -19,6 +19,8 @@ import static android.net.util.DataStallUtils.CONFIG_MIN_PACKETS_THRESHOLD;
 import static android.net.util.DataStallUtils.CONFIG_TCP_PACKETS_FAIL_PERCENTAGE;
 import static android.net.util.DataStallUtils.DEFAULT_DATA_STALL_MIN_PACKETS_THRESHOLD;
 import static android.net.util.DataStallUtils.DEFAULT_TCP_PACKETS_FAIL_PERCENTAGE;
+import static android.os.PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED;
+import static android.os.PowerManager.ACTION_DEVICE_LIGHT_IDLE_MODE_CHANGED;
 import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
 import static android.system.OsConstants.AF_INET;
 import static android.system.OsConstants.AF_INET6;
@@ -31,7 +33,9 @@ import static com.android.net.module.util.netlink.NetlinkConstants.SOCKDIAG_MSG_
 import static com.android.net.module.util.netlink.NetlinkConstants.SOCK_DIAG_BY_FAMILY;
 import static com.android.net.module.util.netlink.NetlinkUtils.DEFAULT_RECV_BUFSIZE;
 import static com.android.net.module.util.netlink.NetlinkUtils.IO_TIMEOUT_MS;
+import static com.android.networkstack.util.NetworkStackUtils.SKIP_TCP_POLL_IN_LIGHT_DOZE;
 
+import android.annotation.TargetApi;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -60,15 +64,15 @@ import androidx.annotation.Nullable;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.modules.utils.build.SdkLevel;
 import com.android.net.module.util.DeviceConfigUtils;
 import com.android.net.module.util.SocketUtils;
 import com.android.net.module.util.netlink.InetDiagMessage;
-import com.android.net.module.util.netlink.NetlinkConstants;
 import com.android.net.module.util.netlink.NetlinkUtils;
 import com.android.net.module.util.netlink.StructInetDiagMsg;
+import com.android.net.module.util.netlink.StructNlAttr;
 import com.android.net.module.util.netlink.StructNlMsgHdr;
 import com.android.networkstack.apishim.NetworkShimImpl;
-import com.android.networkstack.apishim.common.ShimUtils;
 import com.android.networkstack.apishim.common.UnsupportedApiLevelException;
 
 import java.io.FileDescriptor;
@@ -136,6 +140,8 @@ public class TcpSocketTracker {
     @NonNull
     private LinkProperties mLinkProperties;
 
+    private final boolean mShouldDisableInLightDoze;
+
     @VisibleForTesting
     protected final DeviceConfig.OnPropertiesChangedListener mConfigListener =
             new DeviceConfig.OnPropertiesChangedListener() {
@@ -152,14 +158,30 @@ public class TcpSocketTracker {
                 }
             };
 
+    private static boolean isDeviceIdleModeChangedAction(Intent intent) {
+        return ACTION_DEVICE_IDLE_MODE_CHANGED.equals(intent.getAction());
+    }
+
+    @TargetApi(Build.VERSION_CODES.TIRAMISU)
+    private boolean isDeviceLightIdleModeChangedAction(Intent intent) {
+        return mShouldDisableInLightDoze
+                && ACTION_DEVICE_LIGHT_IDLE_MODE_CHANGED.equals(intent.getAction());
+    }
+
     final BroadcastReceiver mDeviceIdleReceiver = new BroadcastReceiver() {
         @Override
+        @TargetApi(Build.VERSION_CODES.TIRAMISU)
         public void onReceive(Context context, Intent intent) {
             if (intent == null) return;
 
-            if (PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED.equals(intent.getAction())) {
+            if (isDeviceIdleModeChangedAction(intent)
+                    || isDeviceLightIdleModeChangedAction(intent)) {
                 final PowerManager powerManager = context.getSystemService(PowerManager.class);
-                final boolean deviceIdle = powerManager.isDeviceIdleMode();
+                // For tcp polling mechanism, there is no difference between deep doze mode and
+                // light doze mode. The deep doze mode and light doze mode block networking
+                // for uids in the same way, use single variable to control.
+                final boolean deviceIdle = powerManager.isDeviceIdleMode()
+                        || (mShouldDisableInLightDoze && powerManager.isDeviceLightIdleMode());
                 setDozeMode(deviceIdle);
             }
         }
@@ -169,6 +191,7 @@ public class TcpSocketTracker {
         mDependencies = dps;
         mNetwork = network;
         mNetd = mDependencies.getNetd();
+        mShouldDisableInLightDoze = mDependencies.shouldDisableInLightDoze();
 
         // If the parcel is null, nothing should be matched which is achieved by the combination of
         // {@code NetlinkUtils#NULL_MASK} and {@code NetlinkUtils#UNKNOWN_MARK}.
@@ -176,16 +199,13 @@ public class TcpSocketTracker {
         mNetworkMark = (parcel != null) ? parcel.mark : NetlinkUtils.UNKNOWN_MARK;
         mNetworkMask = (parcel != null) ? parcel.mask : NetlinkUtils.NULL_MASK;
 
-        // Request tcp info from NetworkStack directly needs extra SELinux permission added after Q
-        // release.
-        if (!mDependencies.isTcpInfoParsingSupported()) return;
         // Build SocketDiag messages.
         for (final int family : ADDRESS_FAMILIES) {
             mSockDiagMsg.put(
                     family, InetDiagMessage.buildInetDiagReqForAliveTcpSockets(family));
         }
         mDependencies.addDeviceConfigChangedListener(mConfigListener);
-        mDependencies.addDeviceIdleReceiver(mDeviceIdleReceiver);
+        mDependencies.addDeviceIdleReceiver(mDeviceIdleReceiver, mShouldDisableInLightDoze);
     }
 
     @Nullable
@@ -208,7 +228,6 @@ public class TcpSocketTracker {
      * @Return if this polling request is sent to kernel and executes successfully or not.
      */
     public boolean pollSocketsInfo() {
-        if (!mDependencies.isTcpInfoParsingSupported()) return false;
         // Traffic will be restricted in doze mode. TCP info may not reflect the correct network
         // behavior.
         // TODO: Traffic may be restricted by other reason. Get the restriction info from bpf in T+.
@@ -263,7 +282,7 @@ public class TcpSocketTracker {
                     ? (mSentSinceLastRecv + stat.sentCount) : 0;
             mLatestReceivedCount = stat.receivedCount;
             mLatestPacketFailPercentage = ((stat.sentCount != 0)
-                    ? ((stat.retransmitCount + stat.lostCount) * 100 / stat.sentCount) : 0);
+                    ? (stat.retransCount * 100 / stat.sentCount) : 0);
 
             // Remove out-of-date socket info.
             cleanupSocketInfo(time);
@@ -382,18 +401,13 @@ public class TcpSocketTracker {
         int mark = NetlinkUtils.INIT_MARK_VALUE;
         // Get a tcp_info.
         while (bytes.position() < remainingDataSize) {
-            final RoutingAttribute rtattr =
-                    new RoutingAttribute(bytes.getShort(), bytes.getShort());
-            final short dataLen = rtattr.getDataLength();
-            if (rtattr.rtaType == NetlinkUtils.INET_DIAG_INFO) {
-                tcpInfo = TcpInfo.parse(bytes, dataLen);
-            } else if (rtattr.rtaType == NetlinkUtils.INET_DIAG_MARK) {
-                mark = bytes.getInt();
-            } else {
-                // Data provided by kernel will include both valid data and padding data. The data
-                // len provided from kernel indicates the valid data size. Readers must deduce the
-                // alignment by themselves.
-                skipRemainingAttributesBytesAligned(bytes, dataLen);
+            final StructNlAttr nlattr = StructNlAttr.parse(bytes);
+            if (nlattr == null) break;
+
+            if (nlattr.nla_type == NetlinkUtils.INET_DIAG_MARK) {
+                mark = nlattr.getValueAsInteger();
+            } else if (nlattr.nla_type == NetlinkUtils.INET_DIAG_INFO) {
+                tcpInfo = TcpInfo.parse(nlattr.getValueAsByteBuffer(), nlattr.getAlignedLength());
             }
         }
         final SocketInfo info = new SocketInfo(tcpInfo, family, mark, time, uid, cookie, dstPort);
@@ -407,8 +421,6 @@ public class TcpSocketTracker {
      * statemachine thread of NetworkMonitor.
      */
     public boolean isDataStallSuspected() {
-        if (!mDependencies.isTcpInfoParsingSupported()) return false;
-
         // Skip checking data stall since the traffic will be restricted and it will not be real
         // network stall.
         // TODO: Traffic may be restricted by other reason. Get the restriction info from bpf in T+.
@@ -439,14 +451,12 @@ public class TcpSocketTracker {
 
         stat.sentCount = current.tcpInfo.mSegsOut;
         stat.receivedCount = current.tcpInfo.mSegsIn;
-        stat.lostCount = current.tcpInfo.mLost;
-        stat.retransmitCount = current.tcpInfo.mRetransmits;
+        stat.retransCount = current.tcpInfo.mTotalRetrans;
 
         if (previous != null && previous.tcpInfo != null) {
             stat.sentCount -= previous.tcpInfo.mSegsOut;
             stat.receivedCount -= previous.tcpInfo.mSegsIn;
-            stat.lostCount -= previous.tcpInfo.mLost;
-            stat.retransmitCount -= previous.tcpInfo.mRetransmits;
+            stat.retransCount -= previous.tcpInfo.mTotalRetrans;
         }
         log("calculateLatestPacketsStat, stat:" + stat);
         return stat;
@@ -458,7 +468,6 @@ public class TcpSocketTracker {
      * @return the latest packet fail percentage. -1 denotes that there is no available data.
      */
     public int getLatestPacketFailPercentage() {
-        if (!mDependencies.isTcpInfoParsingSupported()) return -1;
         // Only return fail rate if device sent enough packets.
         if (getSentSinceLastRecv() < getMinPacketsThreshold()) return -1;
         return mLatestPacketFailPercentage;
@@ -469,13 +478,11 @@ public class TcpSocketTracker {
      * between each polling period, not an accurate number.
      */
     public int getSentSinceLastRecv() {
-        if (!mDependencies.isTcpInfoParsingSupported()) return -1;
         return mSentSinceLastRecv;
     }
 
     /** Return the number of the packets received in the latest polling cycle. */
     public int getLatestReceivedCount() {
-        if (!mDependencies.isTcpInfoParsingSupported()) return -1;
         return mLatestReceivedCount;
     }
 
@@ -491,67 +498,14 @@ public class TcpSocketTracker {
         return mTcpPacketsFailRateThreshold;
     }
 
-    /**
-     * Method to skip the remaining attributes bytes.
-     * Corresponds to NLMSG_NEXT in bionic/libc/kernel/uapi/linux/netlink.h.
-     *
-     * @param buffer the target ByteBuffer
-     * @param len the remaining length to skip.
-     */
-    private static void skipRemainingAttributesBytesAligned(@NonNull final ByteBuffer buffer,
-            final short len) {
-        // Data in {@Code RoutingAttribute} is followed after header with size {@Code NLA_ALIGNTO}
-        // bytes long for each block. Next attribute will start after the padding bytes if any.
-        // If all remaining bytes after header are valid in a data block, next attr will just start
-        // after valid bytes.
-        //
-        // E.g. With NLA_ALIGNTO(4), an attr struct with length 5 means 1 byte valid data remains
-        // after header and 3(4-1) padding bytes. Next attr with length 8 will start after the
-        // padding bytes and contain 4(8-4) valid bytes of data. The next attr start after the
-        // valid bytes, like:
-        //
-        // [HEADER(L=5)][   4-Bytes DATA      ][ HEADER(L=8) ][4 bytes DATA][Next attr]
-        // [ 5 valid bytes ][3 padding bytes  ][      8 valid bytes        ]   ...
-        final int cur = buffer.position();
-        buffer.position(cur + NetlinkConstants.alignedLengthOf(len));
-    }
-
     private static void log(final String str) {
         if (DBG) Log.d(TAG, str);
     }
 
     /** Stops monitoring and releases resources. */
     public void quit() {
-        // Do not need to unregister receiver and listener since registration is skipped
-        // in the constructor.
-        if (!mDependencies.isTcpInfoParsingSupported()) return;
-
         mDependencies.removeDeviceConfigChangedListener(mConfigListener);
         mDependencies.removeBroadcastReceiver(mDeviceIdleReceiver);
-    }
-
-    /**
-     * Corresponds to {@code struct rtattr} from bionic/libc/kernel/uapi/linux/rtnetlink.h
-     *
-     * struct rtattr {
-     *    unsigned short rta_len;    // Length of option
-     *    unsigned short rta_type;   // Type of option
-     *    // Data follows
-     * };
-     */
-    static class RoutingAttribute {
-        public static final int HEADER_LENGTH = 4;
-
-        public final short rtaLen;  // The whole valid size of the struct.
-        public final short rtaType;
-
-        RoutingAttribute(final short len, final short type) {
-            rtaLen = len;
-            rtaType = type;
-        }
-        public short getDataLength() {
-            return (short) (rtaLen - HEADER_LENGTH);
-        }
     }
 
     /**
@@ -609,23 +563,21 @@ public class TcpSocketTracker {
      * */
     private class TcpStat {
         public int sentCount;
-        public int lostCount;
-        public int retransmitCount;
         public int receivedCount;
+        public int retransCount;
 
         void accumulate(@Nullable final TcpStat stat) {
             if (stat == null) return;
 
             sentCount += stat.sentCount;
-            lostCount += stat.lostCount;
             receivedCount += stat.receivedCount;
-            retransmitCount += stat.retransmitCount;
+            retransCount += stat.retransCount;
         }
 
         @Override
         public String toString() {
-            return "TcpStat {sent=" + sentCount + ", lost=" + lostCount
-                    + ", retransmit=" + retransmitCount + ", received=" + receivedCount + "}";
+            return "TcpStat {sent=" + sentCount + ", retransCount=" + retransCount
+                    + ", received=" + receivedCount + "}";
         }
     }
 
@@ -699,15 +651,6 @@ public class TcpSocketTracker {
         }
 
         /**
-         * Return if request tcp info via netlink socket is supported or not.
-         */
-        public boolean isTcpInfoParsingSupported() {
-            // Request tcp info from NetworkStack directly needs extra SELinux permission added
-            // after Q release.
-            return ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.Q);
-        }
-
-        /**
          * Receive the request message from kernel via given fd.
          */
         public ByteBuffer recvMessage(@NonNull final FileDescriptor fd)
@@ -741,14 +684,31 @@ public class TcpSocketTracker {
         }
 
         /** Add receiver for detecting doze mode change to control TCP detection. */
-        public void addDeviceIdleReceiver(@NonNull final BroadcastReceiver receiver) {
-            mContext.registerReceiver(receiver,
-                    new IntentFilter(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED));
+        @TargetApi(Build.VERSION_CODES.TIRAMISU)
+        public void addDeviceIdleReceiver(@NonNull final BroadcastReceiver receiver,
+                boolean shouldDisableInLightDoze) {
+            final IntentFilter intentFilter = new IntentFilter(ACTION_DEVICE_IDLE_MODE_CHANGED);
+            if (shouldDisableInLightDoze) {
+                intentFilter.addAction(ACTION_DEVICE_LIGHT_IDLE_MODE_CHANGED);
+            }
+            mContext.registerReceiver(receiver, intentFilter);
         }
 
         /** Remove broadcast receiver. */
         public void removeBroadcastReceiver(@NonNull final BroadcastReceiver receiver) {
             mContext.unregisterReceiver(receiver);
+        }
+
+        /**
+         * Get whether polling should be disabled in light doze mode. This method should
+         * only be called once in the constructor, to ensure that the code does not need
+         * to deal with flag values changing at runtime.
+         */
+        @TargetApi(Build.VERSION_CODES.TIRAMISU)
+        public boolean shouldDisableInLightDoze() {
+            // Light doze mode status checking API is only available at T or later releases.
+            return SdkLevel.isAtLeastT() && DeviceConfigUtils.isNetworkStackFeatureNotChickenedOut(
+                    mContext, SKIP_TCP_POLL_IN_LIGHT_DOZE);
         }
     }
 }

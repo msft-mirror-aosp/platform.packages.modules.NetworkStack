@@ -233,13 +233,6 @@ public class NetworkStackUtils {
             "ipclient_garp_na_roaming_version";
 
     /**
-     * Experiment flag to enable parsing netlink events from kernel directly instead from netd aidl
-     * interface.
-     */
-    public static final String IPCLIENT_PARSE_NETLINK_EVENTS_VERSION =
-            "ipclient_parse_netlink_events_version";
-
-    /**
      * Experiment flag to check if an on-link IPv6 link local DNS is acceptable. The default flag
      * value is true, just add this flag for A/B testing to see if this fix works as expected via
      * experiment rollout.
@@ -273,6 +266,33 @@ public class NetworkStackUtils {
      */
     public static final String IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION =
             "ipclient_dhcpv6_prefix_delegation_version";
+
+    /**
+     * Experiment flag to enable new ra filter.
+     */
+    public static final String APF_NEW_RA_FILTER_VERSION = "apf_new_ra_filter_version";
+
+    /**** BEGIN Feature Kill Switch Flags ****/
+
+    /**
+     * Kill switch flag to disable the feature of parsing netlink events from kernel directly
+     * instead from netd aidl interface by flag push.
+     */
+    public static final String IPCLIENT_PARSE_NETLINK_EVENTS_FORCE_DISABLE =
+            "ipclient_parse_netlink_events_force_disable";
+
+    /**
+     * Kill switch flag to disable the feature of ignoring any individual RA section with lifetime
+     * below accept_ra_min_lft sysctl.
+     */
+    public static final String IPCLIENT_IGNORE_LOW_RA_LIFETIME_FORCE_DISABLE =
+            "ipclient_ignore_low_ra_lifetime_force_disable";
+
+    /**
+     * Kill switch flag to disable the feature of skipping Tcp socket info polling when light
+     * doze mode is enabled.
+     */
+    public static final String SKIP_TCP_POLL_IN_LIGHT_DOZE = "skip_tcp_poll_in_light_doze_mode";
 
     static {
         System.loadLibrary("networkstackutilsjni");
@@ -373,8 +393,7 @@ public class NetworkStackUtils {
      * Attaches a socket filter that accepts ICMPv6 router advertisements to the given socket.
      * @param fd the socket's {@link FileDescriptor}.
      */
-    public static native void attachRaFilter(FileDescriptor fd)
-            throws SocketException;
+    public static native void attachRaFilter(FileDescriptor fd) throws ErrnoException;
 
     /**
      * Attaches a socket filter that accepts L2-L4 signaling traffic required for IP connectivity.
@@ -382,10 +401,8 @@ public class NetworkStackUtils {
      * This includes: all ARP, ICMPv6 RS/RA/NS/NA messages, and DHCPv4 exchanges.
      *
      * @param fd the socket's {@link FileDescriptor}.
-     * @param packetType the hardware address type, one of ARPHRD_*.
      */
-    public static native void attachControlPacketFilter(FileDescriptor fd, int packetType)
-            throws SocketException;
+    public static native void attachControlPacketFilter(FileDescriptor fd) throws ErrnoException;
 
     /**
      * Add an entry into the ARP cache.
