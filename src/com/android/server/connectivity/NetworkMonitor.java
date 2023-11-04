@@ -125,7 +125,6 @@ import android.os.Message;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.SystemClock;
-import android.provider.DeviceConfig;
 import android.provider.Settings;
 import android.stats.connectivity.ProbeResult;
 import android.stats.connectivity.ProbeType;
@@ -627,8 +626,8 @@ public class NetworkMonitor extends StateMachine {
         mTestCaptivePortalHttpUrl = getTestUrl(TEST_CAPTIVE_PORTAL_HTTP_URL, validationLogs, deps);
         mIsCaptivePortalCheckEnabled = getIsCaptivePortalCheckEnabled(context, deps);
         mPrivateIpNoInternetEnabled = getIsPrivateIpNoInternetEnabled();
-        mMetricsEnabled = deps.isFeatureEnabled(context, NAMESPACE_CONNECTIVITY,
-                NetworkStackUtils.VALIDATION_METRICS_VERSION, true /* defaultEnabled */);
+        mMetricsEnabled = deps.isFeatureNotChickenedOut(context,
+                NetworkStackUtils.VALIDATION_METRICS_VERSION);
         mUseHttps = getUseHttpsValidation();
         mCaptivePortalUserAgent = getCaptivePortalUserAgent();
         mCaptivePortalFallbackSpecs =
@@ -3325,27 +3324,19 @@ public class NetworkMonitor extends StateMachine {
          * Check whether or not one experimental feature in the connectivity namespace is
          * enabled.
          * @param name Flag name of the experiment in the connectivity namespace.
-         * @see DeviceConfigUtils#isFeatureEnabled(Context, String, String)
+         * @see DeviceConfigUtils#isNetworkStackFeatureEnabled(Context, String)
          */
         public boolean isFeatureEnabled(@NonNull Context context, @NonNull String name) {
-            return DeviceConfigUtils.isFeatureEnabled(context, NAMESPACE_CONNECTIVITY, name);
+            return DeviceConfigUtils.isNetworkStackFeatureEnabled(context, name);
         }
 
         /**
-         * Check whether or not one specific experimental feature for a particular namespace from
-         * {@link DeviceConfig} is enabled by comparing NetworkStack module version
-         * {@link NetworkStack} with current version of property. If this property version is valid,
-         * the corresponding experimental feature would be enabled, otherwise disabled.
-         * @param context The global context information about an app environment.
-         * @param namespace The namespace containing the property to look up.
-         * @param name The name of the property to look up.
-         * @param defaultEnabled The value to return if the property does not exist or its value is
-         *                       null.
-         * @return true if this feature is enabled, or false if disabled.
+         * Check whether one specific feature is not disabled.
+         * @param name Flag name of the experiment in the connectivity namespace.
+         * @see DeviceConfigUtils#isNetworkStackFeatureNotChickenedOut(Context, String)
          */
-        public boolean isFeatureEnabled(@NonNull Context context, @NonNull String namespace,
-                @NonNull String name, boolean defaultEnabled) {
-            return DeviceConfigUtils.isFeatureEnabled(context, namespace, name, defaultEnabled);
+        public boolean isFeatureNotChickenedOut(@NonNull Context context, @NonNull String name) {
+            return DeviceConfigUtils.isNetworkStackFeatureNotChickenedOut(context, name);
         }
 
         /**
