@@ -68,9 +68,9 @@ import com.android.modules.utils.build.SdkLevel;
 import com.android.net.module.util.DeviceConfigUtils;
 import com.android.net.module.util.SocketUtils;
 import com.android.net.module.util.netlink.InetDiagMessage;
-import com.android.net.module.util.netlink.NetlinkConstants;
 import com.android.net.module.util.netlink.NetlinkUtils;
 import com.android.net.module.util.netlink.StructInetDiagMsg;
+import com.android.net.module.util.netlink.StructNlAttr;
 import com.android.net.module.util.netlink.StructNlMsgHdr;
 import com.android.networkstack.apishim.NetworkShimImpl;
 import com.android.networkstack.apishim.common.UnsupportedApiLevelException;
@@ -214,9 +214,9 @@ public class TcpSocketTracker {
             final int netId = NetworkShimImpl.newInstance(mNetwork).getNetId();
             return mNetd.getFwmarkForNetwork(netId);
         } catch (UnsupportedApiLevelException e) {
-            log("Get netId is not available in this API level.");
+            logd("Get netId is not available in this API level.");
         } catch (RemoteException e) {
-            Log.e(TAG, "Error getting fwmark for network, ", e);
+            loge("Error getting fwmark for network, ", e);
         }
         return null;
     }
@@ -246,7 +246,7 @@ public class TcpSocketTracker {
                 mDependencies.sendPollingRequest(fd, mSockDiagMsg.get(family));
                 while (parseMessage(mDependencies.recvMessage(fd),
                         family, newSocketInfoList, time)) {
-                    log("Pending info exist. Attempt to read more");
+                    logd("Pending info exist. Attempt to read more");
                 }
             }
 
@@ -288,7 +288,7 @@ public class TcpSocketTracker {
             cleanupSocketInfo(time);
             return true;
         } catch (ErrnoException | SocketException | InterruptedIOException e) {
-            Log.e(TAG, "Fail to get TCP info via netlink.", e);
+            loge("Fail to get TCP info via netlink.", e);
         } finally {
             SocketUtils.closeSocketQuietly(fd);
         }
@@ -302,11 +302,11 @@ public class TcpSocketTracker {
 
     // Return true if there are more pending messages to read
     @VisibleForTesting
-    static boolean parseMessage(ByteBuffer bytes, int family,
+    boolean parseMessage(ByteBuffer bytes, int family,
             ArrayList<SocketInfo> outputSocketInfoList, long time) {
         if (!NetlinkUtils.enoughBytesRemainForValidNlMsg(bytes)) {
             // This is unlikely to happen in real cases. Check this first for testing.
-            Log.e(TAG, "Size is less than header size. Ignored.");
+            loge("Size is less than header size. Ignored.");
             return false;
         }
 
@@ -340,12 +340,12 @@ public class TcpSocketTracker {
                 outputSocketInfoList.add(info);
             } while (NetlinkUtils.enoughBytesRemainForValidNlMsg(bytes));
         } catch (IllegalArgumentException | BufferUnderflowException e) {
-            Log.wtf(TAG, "Unexpected socket info parsing, family " + family
+            logwtf("Unexpected socket info parsing, family " + family
                     + " buffer:" + bytes + " "
                     + Base64.getEncoder().encodeToString(bytes.array()), e);
             return false;
         } catch (IllegalStateException e) {
-            Log.e(TAG, "Unexpected socket info parsing, family " + family
+            loge("Unexpected socket info parsing, family " + family
                     + " buffer:" + bytes + " "
                     + Base64.getEncoder().encodeToString(bytes.array()), e);
             return false;
@@ -354,21 +354,21 @@ public class TcpSocketTracker {
         return true;
     }
 
-    private static int getLengthAndVerifyMsgHeader(@NonNull ByteBuffer bytes, int family) {
+    private int getLengthAndVerifyMsgHeader(@NonNull ByteBuffer bytes, int family) {
         final StructNlMsgHdr nlmsghdr = StructNlMsgHdr.parse(bytes);
         if (nlmsghdr == null) {
-            Log.e(TAG, "Badly formatted data.");
+            loge("Badly formatted data.");
             return END_OF_PARSING;
         }
 
-        log("pollSocketsInfo: nlmsghdr=" + nlmsghdr + ", limit=" + bytes.limit());
+        logd("pollSocketsInfo: nlmsghdr=" + nlmsghdr + ", limit=" + bytes.limit());
         // End of the message. Stop parsing.
         if (nlmsghdr.nlmsg_type == NLMSG_DONE) {
             return END_OF_PARSING;
         }
 
         if (nlmsghdr.nlmsg_type != SOCK_DIAG_BY_FAMILY) {
-            Log.e(TAG, "Expect to get family " + family
+            loge("Expect to get family " + family
                     + " SOCK_DIAG_BY_FAMILY message but get "
                     + nlmsghdr.nlmsg_type);
             return END_OF_PARSING;
@@ -393,7 +393,7 @@ public class TcpSocketTracker {
 
     /** Parse a {@code SocketInfo} from the given position of the given byte buffer. */
     @NonNull
-    private static SocketInfo parseSockInfo(@NonNull final ByteBuffer bytes, final int family,
+    private SocketInfo parseSockInfo(@NonNull final ByteBuffer bytes, final int family,
             final int nlmsgLen, final long time, final int uid, final long cookie,
             final int dstPort) {
         final int remainingDataSize = bytes.position() + nlmsgLen - SOCKDIAG_MSG_HEADER_SIZE;
@@ -401,22 +401,17 @@ public class TcpSocketTracker {
         int mark = NetlinkUtils.INIT_MARK_VALUE;
         // Get a tcp_info.
         while (bytes.position() < remainingDataSize) {
-            final RoutingAttribute rtattr =
-                    new RoutingAttribute(bytes.getShort(), bytes.getShort());
-            final short dataLen = rtattr.getDataLength();
-            if (rtattr.rtaType == NetlinkUtils.INET_DIAG_INFO) {
-                tcpInfo = TcpInfo.parse(bytes, dataLen);
-            } else if (rtattr.rtaType == NetlinkUtils.INET_DIAG_MARK) {
-                mark = bytes.getInt();
-            } else {
-                // Data provided by kernel will include both valid data and padding data. The data
-                // len provided from kernel indicates the valid data size. Readers must deduce the
-                // alignment by themselves.
-                skipRemainingAttributesBytesAligned(bytes, dataLen);
+            final StructNlAttr nlattr = StructNlAttr.parse(bytes);
+            if (nlattr == null) break;
+
+            if (nlattr.nla_type == NetlinkUtils.INET_DIAG_MARK) {
+                mark = nlattr.getValueAsInteger();
+            } else if (nlattr.nla_type == NetlinkUtils.INET_DIAG_INFO) {
+                tcpInfo = TcpInfo.parse(nlattr.getValueAsByteBuffer(), nlattr.getAlignedLength());
             }
         }
         final SocketInfo info = new SocketInfo(tcpInfo, family, mark, time, uid, cookie, dstPort);
-        log("parseSockInfo, " + info);
+        logd("parseSockInfo, " + info);
         return info;
     }
 
@@ -434,7 +429,7 @@ public class TcpSocketTracker {
         }
         final boolean ret = (getLatestPacketFailPercentage() >= getTcpPacketsFailRateThreshold());
         if (ret) {
-            Log.d(TAG, "data stall suspected, uids: " + mLatestReportedUids.toString());
+            log("data stall suspected, uids: " + mLatestReportedUids.toString());
         }
         return ret;
     }
@@ -450,7 +445,7 @@ public class TcpSocketTracker {
         }
 
         if (current.tcpInfo == null) {
-            log("Current tcpInfo is null.");
+            logd("Current tcpInfo is null.");
             return null;
         }
 
@@ -463,7 +458,7 @@ public class TcpSocketTracker {
             stat.receivedCount -= previous.tcpInfo.mSegsIn;
             stat.retransCount -= previous.tcpInfo.mTotalRetrans;
         }
-        log("calculateLatestPacketsStat, stat:" + stat);
+        logd("calculateLatestPacketsStat, stat:" + stat);
         return stat;
     }
 
@@ -503,63 +498,30 @@ public class TcpSocketTracker {
         return mTcpPacketsFailRateThreshold;
     }
 
-    /**
-     * Method to skip the remaining attributes bytes.
-     * Corresponds to NLMSG_NEXT in bionic/libc/kernel/uapi/linux/netlink.h.
-     *
-     * @param buffer the target ByteBuffer
-     * @param len the remaining length to skip.
-     */
-    private static void skipRemainingAttributesBytesAligned(@NonNull final ByteBuffer buffer,
-            final short len) {
-        // Data in {@Code RoutingAttribute} is followed after header with size {@Code NLA_ALIGNTO}
-        // bytes long for each block. Next attribute will start after the padding bytes if any.
-        // If all remaining bytes after header are valid in a data block, next attr will just start
-        // after valid bytes.
-        //
-        // E.g. With NLA_ALIGNTO(4), an attr struct with length 5 means 1 byte valid data remains
-        // after header and 3(4-1) padding bytes. Next attr with length 8 will start after the
-        // padding bytes and contain 4(8-4) valid bytes of data. The next attr start after the
-        // valid bytes, like:
-        //
-        // [HEADER(L=5)][   4-Bytes DATA      ][ HEADER(L=8) ][4 bytes DATA][Next attr]
-        // [ 5 valid bytes ][3 padding bytes  ][      8 valid bytes        ]   ...
-        final int cur = buffer.position();
-        buffer.position(cur + NetlinkConstants.alignedLengthOf(len));
+    private void logd(final String str) {
+        if (DBG) log(str);
     }
 
-    private static void log(final String str) {
-        if (DBG) Log.d(TAG, str);
+    private void log(final String s) {
+        Log.d(TAG + "/" + mNetwork.toString(), s);
+    }
+
+    private void loge(final String str) {
+        loge(str, null /* tr */);
+    }
+
+    private void loge(final String str, @Nullable Throwable tr) {
+        Log.e(TAG + "/" + mNetwork.toString(), str, tr);
+    }
+
+    private void logwtf(final String str, @Nullable Throwable tr) {
+        Log.wtf(TAG + "/" + mNetwork.toString(), str, tr);
     }
 
     /** Stops monitoring and releases resources. */
     public void quit() {
         mDependencies.removeDeviceConfigChangedListener(mConfigListener);
         mDependencies.removeBroadcastReceiver(mDeviceIdleReceiver);
-    }
-
-    /**
-     * Corresponds to {@code struct rtattr} from bionic/libc/kernel/uapi/linux/rtnetlink.h
-     *
-     * struct rtattr {
-     *    unsigned short rta_len;    // Length of option
-     *    unsigned short rta_type;   // Type of option
-     *    // Data follows
-     * };
-     */
-    static class RoutingAttribute {
-        public static final int HEADER_LENGTH = 4;
-
-        public final short rtaLen;  // The whole valid size of the struct.
-        public final short rtaType;
-
-        RoutingAttribute(final short len, final short type) {
-            rtaLen = len;
-            rtaType = type;
-        }
-        public short getDataLength() {
-            return (short) (rtaLen - HEADER_LENGTH);
-        }
     }
 
     /**
@@ -639,7 +601,7 @@ public class TcpSocketTracker {
         synchronized (mDozeModeLock) {
             if (mInDozeMode == isEnabled) return;
             mInDozeMode = isEnabled;
-            log("Doze mode enabled=" + mInDozeMode);
+            logd("Doze mode enabled=" + mInDozeMode);
         }
     }
 
@@ -647,7 +609,7 @@ public class TcpSocketTracker {
         if (mInOpportunisticMode == isEnabled) return;
         mInOpportunisticMode = isEnabled;
 
-        log("Private DNS Opportunistic mode enabled=" + mInOpportunisticMode);
+        logd("Private DNS Opportunistic mode enabled=" + mInOpportunisticMode);
     }
 
     public void setLinkProperties(@NonNull LinkProperties lp) {
@@ -673,7 +635,7 @@ public class TcpSocketTracker {
          */
         public FileDescriptor connectToKernel() throws ErrnoException, SocketException {
             final FileDescriptor fd = NetlinkUtils.createNetLinkInetDiagSocket();
-            NetlinkUtils.connectSocketToNetlink(fd);
+            NetlinkUtils.connectToKernel(fd);
             Os.setsockoptTimeval(fd, SOL_SOCKET, SO_SNDTIMEO,
                     StructTimeval.fromMillis(IO_TIMEOUT_MS));
             return fd;
