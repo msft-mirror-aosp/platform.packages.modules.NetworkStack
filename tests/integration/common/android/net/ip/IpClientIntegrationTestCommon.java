@@ -38,6 +38,7 @@ import static android.net.dhcp.DhcpPacket.ENCAP_L2;
 import static android.net.dhcp.DhcpPacket.INADDR_BROADCAST;
 import static android.net.dhcp.DhcpPacket.INFINITE_LEASE;
 import static android.net.dhcp.DhcpPacket.MIN_V6ONLY_WAIT_MS;
+import static android.net.dhcp6.Dhcp6Packet.PrefixDelegation;
 import static android.net.ip.IIpClientCallbacks.DTIM_MULTIPLIER_RESET;
 import static android.net.ip.IpClient.CONFIG_IPV6_AUTOCONF_TIMEOUT;
 import static android.net.ip.IpClient.CONFIG_ACCEPT_RA_MIN_LFT;
@@ -78,6 +79,7 @@ import static com.android.net.module.util.NetworkStackConstants.NEIGHBOR_ADVERTI
 import static com.android.net.module.util.NetworkStackConstants.NEIGHBOR_ADVERTISEMENT_FLAG_SOLICITED;
 import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_AUTONOMOUS;
 import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_ON_LINK;
+import static com.android.net.module.util.NetworkStackConstants.RFC7421_PREFIX_LENGTH;
 import static com.android.testutils.MiscAsserts.assertThrows;
 import static com.android.testutils.ParcelUtils.parcelingRoundTrip;
 import static com.android.testutils.TestPermissionUtil.runAsShell;
@@ -151,6 +153,7 @@ import android.net.dhcp.DhcpPacket.ParseException;
 import android.net.dhcp.DhcpRequestPacket;
 import android.net.dhcp6.Dhcp6Client;
 import android.net.dhcp6.Dhcp6Packet;
+import android.net.dhcp6.Dhcp6Packet.PrefixDelegation;
 import android.net.dhcp6.Dhcp6RebindPacket;
 import android.net.dhcp6.Dhcp6RenewPacket;
 import android.net.dhcp6.Dhcp6RequestPacket;
@@ -199,6 +202,7 @@ import com.android.net.module.util.ip.IpNeighborMonitor.NeighborEventConsumer;
 import com.android.net.module.util.netlink.NetlinkUtils;
 import com.android.net.module.util.netlink.StructNdOptPref64;
 import com.android.net.module.util.structs.EthernetHeader;
+import com.android.net.module.util.structs.IaPrefixOption;
 import com.android.net.module.util.structs.Ipv6Header;
 import com.android.net.module.util.structs.LlaOption;
 import com.android.net.module.util.structs.PrefixInformationOption;
@@ -693,14 +697,11 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     protected void setDhcpFeatures(final boolean isDhcpLeaseCacheEnabled,
-            final boolean isRapidCommitEnabled, final boolean isDhcpIpConflictDetectEnabled,
-            final boolean isIPv6OnlyPreferredEnabled) {
+            final boolean isRapidCommitEnabled, final boolean isDhcpIpConflictDetectEnabled) {
         setFeatureEnabled(NetworkStackUtils.DHCP_INIT_REBOOT_VERSION, isDhcpLeaseCacheEnabled);
         setFeatureEnabled(NetworkStackUtils.DHCP_RAPID_COMMIT_VERSION, isRapidCommitEnabled);
         setFeatureEnabled(NetworkStackUtils.DHCP_IP_CONFLICT_DETECT_VERSION,
                 isDhcpIpConflictDetectEnabled);
-        setFeatureEnabled(NetworkStackUtils.DHCP_IPV6_ONLY_PREFERRED_VERSION,
-                isIPv6OnlyPreferredEnabled);
     }
 
     private void setDeviceConfigForMaxDtimMultiplier() {
@@ -1201,9 +1202,9 @@ public abstract class IpClientIntegrationTestCommon {
 
     private void startIpClientProvisioning(final boolean isDhcpLeaseCacheEnabled,
             final boolean shouldReplyRapidCommitAck, final boolean isPreconnectionEnabled,
-            final boolean isDhcpIpConflictDetectEnabled, final boolean isIPv6OnlyPreferredEnabled,
-            final String displayName, final ScanResultInfo scanResultInfo,
-            final Layer2Information layer2Info) throws Exception {
+            final boolean isDhcpIpConflictDetectEnabled, final String displayName,
+            final ScanResultInfo scanResultInfo, final Layer2Information layer2Info)
+                    throws Exception {
         ProvisioningConfiguration.Builder prov = new ProvisioningConfiguration.Builder()
                 .withoutIpReachabilityMonitor()
                 .withLayer2Information(layer2Info == null
@@ -1216,7 +1217,7 @@ public abstract class IpClientIntegrationTestCommon {
         if (scanResultInfo != null) prov.withScanResultInfo(scanResultInfo);
 
         setDhcpFeatures(isDhcpLeaseCacheEnabled, shouldReplyRapidCommitAck,
-                isDhcpIpConflictDetectEnabled, isIPv6OnlyPreferredEnabled);
+                isDhcpIpConflictDetectEnabled);
 
         startIpClientProvisioning(prov.build());
         if (!isPreconnectionEnabled) {
@@ -1227,10 +1228,9 @@ public abstract class IpClientIntegrationTestCommon {
 
     private void startIpClientProvisioning(final boolean isDhcpLeaseCacheEnabled,
             final boolean isDhcpRapidCommitEnabled, final boolean isPreconnectionEnabled,
-            final boolean isDhcpIpConflictDetectEnabled, final boolean isIPv6OnlyPreferredEnabled)
-            throws Exception {
+            final boolean isDhcpIpConflictDetectEnabled) throws Exception {
         startIpClientProvisioning(isDhcpLeaseCacheEnabled, isDhcpRapidCommitEnabled,
-                isPreconnectionEnabled, isDhcpIpConflictDetectEnabled, isIPv6OnlyPreferredEnabled,
+                isPreconnectionEnabled, isDhcpIpConflictDetectEnabled,
                 null /* displayName */, null /* ScanResultInfo */, null /* layer2Info */);
     }
 
@@ -1284,13 +1284,12 @@ public abstract class IpClientIntegrationTestCommon {
             final Integer leaseTimeSec, final boolean isDhcpLeaseCacheEnabled,
             final boolean shouldReplyRapidCommitAck, final int mtu,
             final boolean isDhcpIpConflictDetectEnabled,
-            final boolean isIPv6OnlyPreferredEnabled,
             final String captivePortalApiUrl, final String displayName,
             final ScanResultInfo scanResultInfo, final Layer2Information layer2Info)
             throws Exception {
         startIpClientProvisioning(isDhcpLeaseCacheEnabled, shouldReplyRapidCommitAck,
                 false /* isPreconnectionEnabled */, isDhcpIpConflictDetectEnabled,
-                isIPv6OnlyPreferredEnabled, displayName, scanResultInfo, layer2Info);
+                displayName, scanResultInfo, layer2Info);
         return handleDhcpPackets(isSuccessLease, leaseTimeSec, shouldReplyRapidCommitAck, mtu,
                 captivePortalApiUrl);
     }
@@ -1335,7 +1334,6 @@ public abstract class IpClientIntegrationTestCommon {
             final boolean isDhcpIpConflictDetectEnabled) throws Exception {
         return performDhcpHandshake(isSuccessLease, leaseTimeSec, isDhcpLeaseCacheEnabled,
                 isDhcpRapidCommitEnabled, mtu, isDhcpIpConflictDetectEnabled,
-                false /* isIPv6OnlyPreferredEnabled */,
                 null /* captivePortalApiUrl */, null /* displayName */, null /* scanResultInfo */,
                 null /* layer2Info */);
     }
@@ -1392,7 +1390,7 @@ public abstract class IpClientIntegrationTestCommon {
         }).when(mIpMemoryStore).retrieveNetworkAttributes(eq(TEST_L2KEY), any());
         startIpClientProvisioning(true /* isDhcpLeaseCacheEnabled */,
                 false /* shouldReplyRapidCommitAck */, false /* isPreconnectionEnabled */,
-                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+                false /* isDhcpIpConflictDetectEnabled */);
         return getNextDhcpPacket();
     }
 
@@ -1494,7 +1492,7 @@ public abstract class IpClientIntegrationTestCommon {
 
         startIpClientProvisioning(true /* isDhcpLeaseCacheEnabled */,
                 shouldReplyRapidCommitAck, true /* isDhcpPreConnectionEnabled */,
-                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+                false /* isDhcpIpConflictDetectEnabled */);
         DhcpPacket packet = assertDiscoverPacketOnPreconnectionStart();
         final int preconnDiscoverTransId = packet.getTransactionId();
 
@@ -1674,7 +1672,7 @@ public abstract class IpClientIntegrationTestCommon {
     public void testDhcpInit() throws Exception {
         startIpClientProvisioning(false /* isDhcpLeaseCacheEnabled */,
                 false /* shouldReplyRapidCommitAck */, false /* isPreconnectionEnabled */,
-                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+                false /* isDhcpIpConflictDetectEnabled */);
         final DhcpPacket packet = getNextDhcpPacket();
         assertTrue(packet instanceof DhcpDiscoverPacket);
     }
@@ -1742,7 +1740,7 @@ public abstract class IpClientIntegrationTestCommon {
     public void testRollbackFromRapidCommitOption() throws Exception {
         startIpClientProvisioning(false /* isDhcpLeaseCacheEnabled */,
                 true /* isDhcpRapidCommitEnabled */, false /* isPreConnectionEnabled */,
-                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+                false /* isDhcpIpConflictDetectEnabled */);
 
         final List<DhcpPacket> discoverList = new ArrayList<DhcpPacket>();
         DhcpPacket packet;
@@ -1819,7 +1817,7 @@ public abstract class IpClientIntegrationTestCommon {
     public void testDhcpClientRapidCommitEnabled() throws Exception {
         startIpClientProvisioning(false /* isDhcpLeaseCacheEnabled */,
                 true /* shouldReplyRapidCommitAck */, false /* isPreconnectionEnabled */,
-                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+                false /* isDhcpIpConflictDetectEnabled */);
         final DhcpPacket packet = getNextDhcpPacket();
         assertTrue(packet instanceof DhcpDiscoverPacket);
     }
@@ -2545,7 +2543,7 @@ public abstract class IpClientIntegrationTestCommon {
         // PreconnectionState instead of RunningState.
         startIpClientProvisioning(false /* isDhcpLeaseCacheEnabled */,
                 false /* shouldReplyRapidCommitAck */, true /* isDhcpPreConnectionEnabled */,
-                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+                false /* isDhcpIpConflictDetectEnabled */);
         assertDiscoverPacketOnPreconnectionStart();
 
         // Force to enter RunningState.
@@ -2671,7 +2669,7 @@ public abstract class IpClientIntegrationTestCommon {
                 .withPreconnection()
                 .build();
         setDhcpFeatures(false /* isDhcpLeaseCacheEnabled */, false /* shouldReplyRapidCommitAck */,
-                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+                false /* isDhcpIpConflictDetectEnabled */);
         startIpClientProvisioning(config);
         assertDiscoverPacketOnPreconnectionStart();
 
@@ -2703,7 +2701,7 @@ public abstract class IpClientIntegrationTestCommon {
         // StoppedState.
         startIpClientProvisioning(false /* isDhcpLeaseCacheEnabled */,
                 false /* shouldReplyRapidCommitAck */, false /* isPreConnectionEnabled */,
-                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+                false /* isDhcpIpConflictDetectEnabled */);
         final DhcpPacket discover = getNextDhcpPacket();
         assertTrue(discover instanceof DhcpDiscoverPacket);
     }
@@ -2820,7 +2818,7 @@ public abstract class IpClientIntegrationTestCommon {
             boolean serverSendsOption) throws Exception {
         startIpClientProvisioning(false /* isDhcpLeaseCacheEnabled */,
                 false /* shouldReplyRapidCommitAck */, false /* isPreConnectionEnabled */,
-                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+                false /* isDhcpIpConflictDetectEnabled */);
         final DhcpPacket discover = getNextDhcpPacket();
         assertTrue(discover instanceof DhcpDiscoverPacket);
         assertEquals(featureEnabled, discover.hasRequestedParam(DhcpPacket.DHCP_CAPTIVE_PORTAL));
@@ -2931,7 +2929,6 @@ public abstract class IpClientIntegrationTestCommon {
                 TEST_LEASE_DURATION_S, true /* isDhcpLeaseCacheEnabled */,
                 false /* isDhcpRapidCommitEnabled */, TEST_DEFAULT_MTU,
                 false /* isDhcpIpConflictDetectEnabled */,
-                false /* isIPv6OnlyPreferredEnabled */,
                 null /* captivePortalApiUrl */, displayName, info /* scanResultInfo */,
                 null /* layer2Info */);
         assertEquals(2, sentPackets.size());
@@ -3046,7 +3043,6 @@ public abstract class IpClientIntegrationTestCommon {
         performDhcpHandshake(true /* isSuccessLease */, TEST_LEASE_DURATION_S,
                 true /* isDhcpLeaseCacheEnabled */, false /* isDhcpRapidCommitEnabled */,
                 TEST_DEFAULT_MTU, false /* isDhcpIpConflictDetectEnabled */,
-                false /* isIPv6OnlyPreferredEnabled */,
                 null /* captivePortalApiUrl */, displayName, null /* scanResultInfo */,
                 layer2Info);
         verifyIPv4OnlyProvisioningSuccess(Collections.singletonList(CLIENT_ADDR));
@@ -3199,7 +3195,7 @@ public abstract class IpClientIntegrationTestCommon {
         // Enable rapid commit to accelerate DHCP handshake to shorten test duration,
         // not strictly necessary.
         setDhcpFeatures(false /* isDhcpLeaseCacheEnabled */, true /* isRapidCommitEnabled */,
-                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+                false /* isDhcpIpConflictDetectEnabled */);
         // Both signature and root tests can use this function to do dual-stack provisioning.
         if (useNetworkStackSignature()) {
             mIpc.startProvisioning(config);
@@ -3227,7 +3223,7 @@ public abstract class IpClientIntegrationTestCommon {
         for (LinkAddress la : lp.getLinkAddresses()) {
             final InetAddress addr = la.getAddress();
             if ((addr instanceof Inet6Address) && !addr.isLinkLocalAddress()) {
-                return prefix.contains(addr);
+                if (prefix.contains(addr)) return true;
             }
         }
         return false;
@@ -3303,7 +3299,7 @@ public abstract class IpClientIntegrationTestCommon {
                 .withoutIpReachabilityMonitor()
                 .build();
         setDhcpFeatures(false /* isDhcpLeaseCacheEnabled */, false /* isRapidCommitEnabled */,
-                false /* isDhcpIpConflictDetectEnabled */, true /* isIPv6OnlyPreferredEnabled */);
+                false /* isDhcpIpConflictDetectEnabled */);
         startIpClientProvisioning(config);
 
         final DhcpPacket packet =
@@ -3367,7 +3363,7 @@ public abstract class IpClientIntegrationTestCommon {
                 .build();
 
         setDhcpFeatures(false /* isDhcpLeaseCacheEnabled */, true /* isRapidCommitEnabled */,
-                false /* isDhcpIpConflictDetectEnabled */, true /* isIPv6OnlyPreferredEnabled */);
+                false /* isDhcpIpConflictDetectEnabled */);
         startIpClientProvisioning(config);
 
         final DhcpPacket packet = assertDiscoverPacketOnPreconnectionStart();
@@ -3422,7 +3418,7 @@ public abstract class IpClientIntegrationTestCommon {
                 .build();
 
         setDhcpFeatures(true /* isDhcpLeaseCacheEnabled */, false /* isRapidCommitEnabled */,
-                false /* isDhcpIpConflictDetectEnabled */, true /* isIPv6OnlyPreferredEnabled */);
+                false /* isDhcpIpConflictDetectEnabled */);
         startIpClientProvisioning(config);
 
         final DhcpPacket packet =
@@ -3556,7 +3552,7 @@ public abstract class IpClientIntegrationTestCommon {
                 .withoutIPv6();
 
         setDhcpFeatures(isDhcpLeaseCacheEnabled, false /* isRapidCommitEnabled */,
-                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+                false /* isDhcpIpConflictDetectEnabled */);
 
         startIpClientProvisioning(prov.build());
         verify(mCb, timeout(TEST_TIMEOUT_MS)).setFallbackMulticastFilter(true);
@@ -3927,7 +3923,7 @@ public abstract class IpClientIntegrationTestCommon {
         // Enable rapid commit to accelerate DHCP handshake to shorten test duration,
         // not strictly necessary.
         setDhcpFeatures(false /* isDhcpLeaseCacheEnabled */, true /* isRapidCommitEnabled */,
-                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+                false /* isDhcpIpConflictDetectEnabled */);
 
         // Disable gratuitious neighbor discovery feature manually, if the feature is enabled on
         // the DUT during experiment launch, that will send another two duplicate NA packets and
@@ -4294,8 +4290,7 @@ public abstract class IpClientIntegrationTestCommon {
         mNetworkAgentThread.start();
 
         setDhcpFeatures(false /* isDhcpLeaseCacheEnabled */, true /* isRapidCommitEnabled */,
-                false /* isDhcpIpConflictDetectEnabled */,
-                false /* isIPv6OnlyPreferredEnabled */);
+                false /* isDhcpIpConflictDetectEnabled */);
         setFeatureEnabled(
                 NetworkStackUtils.IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION,
                 isIgnoreIncompleteIpv6DnsServerEnabled);
@@ -4471,7 +4466,7 @@ public abstract class IpClientIntegrationTestCommon {
 
         // Speed up provisioning by enabling rapid commit. TODO: why is this necessary?
         setDhcpFeatures(false /* isDhcpLeaseCacheEnabled */, true /* isRapidCommitEnabled */,
-                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+                false /* isDhcpIpConflictDetectEnabled */);
         config = new ProvisioningConfiguration.Builder()
                 .build();
         startIpClientProvisioning(config);
@@ -4812,18 +4807,27 @@ public abstract class IpClientIntegrationTestCommon {
         inOrder.verify(mCb, timeout(TEST_TIMEOUT_MS)).setMaxDtimMultiplier(DTIM_MULTIPLIER_RESET);
     }
 
-    private void handleDhcp6Packets(final IpPrefix prefix, boolean shouldReplyRapidCommit)
-            throws Exception {
-        handleDhcp6Packets(prefix, 3600 /* t1 */, 4500 /* t2 */, 4500 /* preferred */,
-                7200 /* valid */, shouldReplyRapidCommit);
+    private IaPrefixOption buildIaPrefixOption(final IpPrefix prefix, int preferred,
+            int valid) {
+        return new IaPrefixOption((short) IaPrefixOption.LENGTH, preferred, valid,
+                (byte) RFC7421_PREFIX_LENGTH, prefix.getRawAddress() /* prefix */);
     }
 
-    private void handleDhcp6Packets(final IpPrefix prefix, int t1, int t2, int preferred, int valid,
+    private void handleDhcp6Packets(final IpPrefix prefix, boolean shouldReplyRapidCommit)
+            throws Exception {
+        final IaPrefixOption ipo = buildIaPrefixOption(prefix, 4500 /* preferred */,
+                7200 /* valid */);
+        handleDhcp6Packets(Collections.singletonList(ipo), 3600 /* t1 */, 4500 /* t2 */,
+                shouldReplyRapidCommit);
+    }
+
+    private void handleDhcp6Packets(final List<IaPrefixOption> ipos, int t1, int t2,
             boolean shouldReplyRapidCommit) throws Exception {
+        ByteBuffer iapd;
         Dhcp6Packet packet;
         while ((packet = getNextDhcp6Packet()) != null) {
-            final ByteBuffer iapd = Dhcp6Packet.buildIaPdOption(packet.getIaId(), t1, t2,
-                    preferred, valid, prefix.getRawAddress(), (byte) prefix.getPrefixLength());
+            final PrefixDelegation pd = new PrefixDelegation(packet.getIaId(), t1, t2, ipos);
+            iapd = pd.build();
             if (packet instanceof Dhcp6SolicitPacket) {
                 if (shouldReplyRapidCommit) {
                     mPacketReader.sendResponse(buildDhcp6Reply(packet, iapd.array(), mClientMac,
@@ -4883,7 +4887,11 @@ public abstract class IpClientIntegrationTestCommon {
     @Test
     public void testDhcp6Pd_longPrefixLength() throws Exception {
         prepareDhcp6PdTest();
-        handleDhcp6Packets(new IpPrefix("2001:db8:1::/80"), true /* shouldReplyRapidCommit */);
+        final IpPrefix prefix = new IpPrefix("2001:db8:1::/80");
+        final IaPrefixOption ipo = buildIaPrefixOption(prefix, 3600 /* preferred */,
+                4000 /* valid */);
+        handleDhcp6Packets(Collections.singletonList(ipo), 3600 /* t1 */, 4500 /* t2 */,
+                true /* shouldReplyRapidCommit */);
         verify(mCb, never()).onProvisioningSuccess(any());
     }
 
@@ -4900,24 +4908,33 @@ public abstract class IpClientIntegrationTestCommon {
     @Test
     public void testDhcp6Pd_T1GreaterThanT2() throws Exception {
         prepareDhcp6PdTest();
-        handleDhcp6Packets(new IpPrefix("2001:db8:1::/80"), 4500 /* t1 */, 3600 /* t2 */,
-                4500 /* preferred */, 7200 /* valid */, true /* shouldReplyRapidCommit */);
+        final IpPrefix prefix = new IpPrefix("2001:db8:1::/64");
+        final IaPrefixOption ipo = buildIaPrefixOption(prefix, 3600 /* preferred */,
+                4000 /* valid */);
+        handleDhcp6Packets(Collections.singletonList(ipo), 4500 /* t1 */, 3600 /* t2 */,
+                true /* shouldReplyRapidCommit */);
         verify(mCb, never()).onProvisioningSuccess(any());
     }
 
     @Test
     public void testDhcp6Pd_preferredLifetimeGreaterThanValidLifetime() throws Exception {
         prepareDhcp6PdTest();
-        handleDhcp6Packets(new IpPrefix("2001:db8:1::/80"), 3600 /* t1 */, 4500 /* t2 */,
-                7200 /* preferred */, 4500 /* valid */, true /* shouldReplyRapidCommit */);
+        final IpPrefix prefix = new IpPrefix("2001:db8:1::/64");
+        final IaPrefixOption ipo = buildIaPrefixOption(prefix, 7200 /* preferred */,
+                4500 /* valid */);
+        handleDhcp6Packets(Collections.singletonList(ipo), 3600 /* t1 */, 4500 /* t2 */,
+                true /* shouldReplyRapidCommit */);
         verify(mCb, never()).onProvisioningSuccess(any());
     }
 
     @Test
     public void testDhcp6Pd_preferredLifetimeLessThanT2() throws Exception {
         prepareDhcp6PdTest();
-        handleDhcp6Packets(new IpPrefix("2001:db8:1::/80"), 3600 /* t1 */, 4500 /* t2 */,
-                3600 /* preferred */, 4000 /* valid */, true /* shouldReplyRapidCommit */);
+        final IpPrefix prefix = new IpPrefix("2001:db8:1::/64");
+        final IaPrefixOption ipo = buildIaPrefixOption(prefix, 3600 /* preferred */,
+                4000 /* valid */);
+        handleDhcp6Packets(Collections.singletonList(ipo), 3600 /* t1 */, 4500 /* t2 */,
+                true /* shouldReplyRapidCommit */);
         verify(mCb, never()).onProvisioningSuccess(any());
     }
 
@@ -4936,7 +4953,7 @@ public abstract class IpClientIntegrationTestCommon {
         ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
                 .build();
         setDhcpFeatures(false /* isDhcpLeaseCacheEnabled */, true /* isRapidCommitEnabled */,
-                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+                false /* isDhcpIpConflictDetectEnabled */);
         startIpClientProvisioning(config);
 
         waitForRouterSolicitation();
@@ -4994,7 +5011,7 @@ public abstract class IpClientIntegrationTestCommon {
         ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
                 .build();
         setDhcpFeatures(false /* isDhcpLeaseCacheEnabled */, true /* isRapidCommitEnabled */,
-                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
+                false /* isDhcpIpConflictDetectEnabled */);
         startIpClientProvisioning(config);
 
         waitForRouterSolicitation();
@@ -5015,6 +5032,44 @@ public abstract class IpClientIntegrationTestCommon {
                         // IPv4 address, IPv6 link-local, two global delegated IPv6 addresses
                         && x.getLinkAddresses().size() == 4
         ));
+    }
+
+    @Test
+    public void testDhcp6Pd_multiplePrefixesWithInvalidPrefix() throws Exception {
+        final IpPrefix valid = new IpPrefix("2001:db8:1::/64");
+        final IpPrefix invalid = new IpPrefix("2001:db8:2::/64"); // preferred lft > valid lft
+        final IaPrefixOption validIpo = buildIaPrefixOption(valid, 4500 /* preferred */,
+                7200 /* valid */);
+        final IaPrefixOption invalidIpo = buildIaPrefixOption(invalid, 4500 /* preferred */,
+                3000 /* valid */);
+
+        prepareDhcp6PdTest();
+        handleDhcp6Packets(Arrays.asList(invalidIpo, validIpo), 3600 /* t1 */, 4500 /* t2 */,
+                true /* shouldReplyRapidCommit */);
+        final ArgumentCaptor<LinkProperties> captor = ArgumentCaptor.forClass(LinkProperties.class);
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningSuccess(captor.capture());
+        final LinkProperties lp = captor.getValue();
+        assertTrue(hasIpv6AddressPrefixedWith(lp, valid));
+        assertFalse(hasIpv6AddressPrefixedWith(lp, invalid));
+    }
+
+    @Test
+    public void testDhcp6Pd_multiplePrefixesWithPrefixValidLifetimeOfZero() throws Exception {
+        final IpPrefix valid = new IpPrefix("2001:db8:1::/64");
+        final IpPrefix invalid = new IpPrefix("2001:db8:2::/64"); // preferred/valid lft 0
+        final IaPrefixOption validIpo = buildIaPrefixOption(valid, 4500 /* preferred */,
+                7200 /* valid */);
+        final IaPrefixOption invalidIpo = buildIaPrefixOption(invalid, 0 /* preferred */,
+                0 /* valid */);
+
+        prepareDhcp6PdTest();
+        handleDhcp6Packets(Arrays.asList(invalidIpo, validIpo), 3600 /* t1 */, 4500 /* t2 */,
+                true /* shouldReplyRapidCommit */);
+        final ArgumentCaptor<LinkProperties> captor = ArgumentCaptor.forClass(LinkProperties.class);
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningSuccess(captor.capture());
+        final LinkProperties lp = captor.getValue();
+        assertTrue(hasIpv6AddressPrefixedWith(lp, valid));
+        assertFalse(hasIpv6AddressPrefixedWith(lp, invalid));
     }
 
     private void prepareDhcp6PdRenewTest() throws Exception {
@@ -5065,12 +5120,14 @@ public abstract class IpClientIntegrationTestCommon {
         Dhcp6Packet packet = getNextDhcp6Packet();
         assertTrue(packet instanceof Dhcp6RenewPacket);
 
-        // Reply with a different prefix with requested one, check if all global IPv6 addresses
-        // will be deleted and loss the IPv6 provisioning.
+        // Reply with a different prefix with requested one, per RFC8415#section-18.2.10.1
+        // any new prefix should be added.
         final IpPrefix prefix1 = new IpPrefix("2001:db8:2::/64");
-        final ByteBuffer iapd = Dhcp6Packet.buildIaPdOption(packet.getIaId(), 3600 /* t1*/,
-                4500 /* t2 */, 4500 /* preferred */, 7200 /* valid */, prefix1.getRawAddress(),
-                (byte) 64 /* prefix length */);
+        final IaPrefixOption ipo = buildIaPrefixOption(prefix1, 4500 /* preferred */,
+                7200 /* valid */);
+        final PrefixDelegation pd = new PrefixDelegation(packet.getIaId(), 3600 /* t1 */,
+                4500 /* t2 */, Collections.singletonList(ipo));
+        final ByteBuffer iapd = pd.build();
         mPacketReader.sendResponse(buildDhcp6Reply(packet, iapd.array(), mClientMac,
                 (Inet6Address) mClientIpAddress, false /* rapidCommit */));
         verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningFailure(any());
