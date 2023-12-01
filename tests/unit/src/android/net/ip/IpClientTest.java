@@ -25,6 +25,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.clearInvocations;
@@ -86,6 +87,8 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
+import java.io.FileDescriptor;
+import java.io.PrintWriter;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
@@ -147,6 +150,8 @@ public class IpClientTest {
     @Mock private IpMemoryStoreService mIpMemoryStoreService;
     @Mock private InterfaceParams mInterfaceParams;
     @Mock private IpConnectivityLog mMetricsLog;
+    @Mock private FileDescriptor mFd;
+    @Mock private PrintWriter mWriter;
 
     private NetworkObserver mObserver;
     private InterfaceParams mIfParams;
@@ -702,7 +707,7 @@ public class IpClientTest {
         final ArgumentCaptor<ApfConfiguration> configCaptor = ArgumentCaptor.forClass(
                 ApfConfiguration.class);
         verify(mDependencies, timeout(TEST_TIMEOUT_MS)).maybeCreateApfFilter(
-                any(), configCaptor.capture(), any(), any());
+                any(), configCaptor.capture(), any(), any(), anyBoolean());
 
         return configCaptor.getValue();
     }
@@ -771,13 +776,24 @@ public class IpClientTest {
         final ArgumentCaptor<ApfConfiguration> configCaptor = ArgumentCaptor.forClass(
                 ApfConfiguration.class);
         verify(mDependencies, timeout(TEST_TIMEOUT_MS)).maybeCreateApfFilter(
-                any(), configCaptor.capture(), any(), any());
+                any(), configCaptor.capture(), any(), any(), anyBoolean());
         final ApfConfiguration actual = configCaptor.getValue();
         assertNotNull(actual);
         assertEquals(4, actual.apfCapabilities.apfVersionSupported);
         assertEquals(4096, actual.apfCapabilities.maximumApfProgramSize);
         assertEquals(4, actual.apfCapabilities.apfPacketFormat);
 
+        verifyShutdown(ipc);
+    }
+
+    @Test
+    public void testDumpApfFilter_withNoException() throws Exception {
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
+        final ApfConfiguration config = verifyApfFilterCreatedOnStart(ipc,
+                false /* isApfSupported */);
+        assertNull(config.apfCapabilities);
+        clearInvocations(mDependencies);
+        ipc.dump(mFd, mWriter, null /* args */);
         verifyShutdown(ipc);
     }
 
@@ -793,7 +809,8 @@ public class IpClientTest {
                 8192 /* maxProgramSize */, 4 /* format */);
         ipc.updateApfCapabilities(newApfCapabilities);
         HandlerUtils.waitForIdle(ipc.getHandler(), TEST_TIMEOUT_MS);
-        verify(mDependencies, never()).maybeCreateApfFilter(any(), any(), any(), any());
+        verify(mDependencies, never()).maybeCreateApfFilter(any(), any(), any(), any(),
+                anyBoolean());
         verifyShutdown(ipc);
     }
 
@@ -807,7 +824,8 @@ public class IpClientTest {
 
         ipc.updateApfCapabilities(null /* apfCapabilities */);
         HandlerUtils.waitForIdle(ipc.getHandler(), TEST_TIMEOUT_MS);
-        verify(mDependencies, never()).maybeCreateApfFilter(any(), any(), any(), any());
+        verify(mDependencies, never()).maybeCreateApfFilter(any(), any(), any(), any(),
+                anyBoolean());
         verifyShutdown(ipc);
     }
 
