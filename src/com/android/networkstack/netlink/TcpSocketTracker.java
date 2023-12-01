@@ -27,12 +27,14 @@ import static android.system.OsConstants.AF_INET6;
 import static android.system.OsConstants.SOL_SOCKET;
 import static android.system.OsConstants.SO_SNDTIMEO;
 
+import static com.android.net.module.util.FeatureVersions.FEATURE_IS_UID_NETWORKING_BLOCKED;
 import static com.android.net.module.util.NetworkStackConstants.DNS_OVER_TLS_PORT;
 import static com.android.net.module.util.netlink.NetlinkConstants.NLMSG_DONE;
 import static com.android.net.module.util.netlink.NetlinkConstants.SOCKDIAG_MSG_HEADER_SIZE;
 import static com.android.net.module.util.netlink.NetlinkConstants.SOCK_DIAG_BY_FAMILY;
 import static com.android.net.module.util.netlink.NetlinkUtils.DEFAULT_RECV_BUFSIZE;
 import static com.android.net.module.util.netlink.NetlinkUtils.IO_TIMEOUT_MS;
+import static com.android.networkstack.util.NetworkStackUtils.IGNORE_TCP_INFO_FOR_BLOCKED_UIDS;
 import static com.android.networkstack.util.NetworkStackUtils.SKIP_TCP_POLL_IN_LIGHT_DOZE;
 
 import android.annotation.TargetApi;
@@ -40,10 +42,12 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.net.ConnectivityManager;
 import android.net.INetd;
 import android.net.LinkProperties;
 import android.net.MarkMaskParcel;
 import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.os.AsyncTask;
 import android.os.Build;
 import android.os.IBinder;
@@ -129,6 +133,8 @@ public class TcpSocketTracker {
     private int mMinPacketsThreshold = DEFAULT_DATA_STALL_MIN_PACKETS_THRESHOLD;
     private int mTcpPacketsFailRateThreshold = DEFAULT_TCP_PACKETS_FAIL_PERCENTAGE;
 
+    // TODO: Remove doze mode solution since uid networking blocked traffic is filtered out by
+    //  the info provided by bpf maps.
     private final Object mDozeModeLock = new Object();
     @GuardedBy("mDozeModeLock")
     private boolean mInDozeMode = false;
@@ -139,8 +145,13 @@ public class TcpSocketTracker {
     private boolean mInOpportunisticMode;
     @NonNull
     private LinkProperties mLinkProperties;
+    @NonNull
+    private NetworkCapabilities mNetworkCapabilities;
 
+    private final boolean mShouldDisableInDeepDoze;
     private final boolean mShouldDisableInLightDoze;
+    private final boolean mShouldIgnoreTcpInfoForBlockedUids;
+    private final ConnectivityManager mCm;
 
     @VisibleForTesting
     protected final DeviceConfig.OnPropertiesChangedListener mConfigListener =
@@ -158,8 +169,9 @@ public class TcpSocketTracker {
                 }
             };
 
-    private static boolean isDeviceIdleModeChangedAction(Intent intent) {
-        return ACTION_DEVICE_IDLE_MODE_CHANGED.equals(intent.getAction());
+    private boolean isDeviceIdleModeChangedAction(Intent intent) {
+        return mShouldDisableInDeepDoze
+                && ACTION_DEVICE_IDLE_MODE_CHANGED.equals(intent.getAction());
     }
 
     @TargetApi(Build.VERSION_CODES.TIRAMISU)
@@ -180,7 +192,8 @@ public class TcpSocketTracker {
                 // For tcp polling mechanism, there is no difference between deep doze mode and
                 // light doze mode. The deep doze mode and light doze mode block networking
                 // for uids in the same way, use single variable to control.
-                final boolean deviceIdle = powerManager.isDeviceIdleMode()
+                final boolean deviceIdle = (mShouldDisableInDeepDoze
+                        && powerManager.isDeviceIdleMode())
                         || (mShouldDisableInLightDoze && powerManager.isDeviceLightIdleMode());
                 setDozeMode(deviceIdle);
             }
@@ -191,7 +204,15 @@ public class TcpSocketTracker {
         mDependencies = dps;
         mNetwork = network;
         mNetd = mDependencies.getNetd();
-        mShouldDisableInLightDoze = mDependencies.shouldDisableInLightDoze();
+        mShouldIgnoreTcpInfoForBlockedUids = mDependencies.shouldIgnoreTcpInfoForBlockedUids();
+
+        // Previous workarounds can be disabled if the device supports ignore blocked uids feature.
+        // To prevent inconsistencies and issues like broadcast receiver leaks, the feature flags
+        // are fixed after being read.
+        // TODO: Remove these workarounds when pre-T devices are no longer supported.
+        mShouldDisableInLightDoze = mDependencies.shouldDisableInLightDoze(
+                mShouldIgnoreTcpInfoForBlockedUids);
+        mShouldDisableInDeepDoze = !mShouldIgnoreTcpInfoForBlockedUids;
 
         // If the parcel is null, nothing should be matched which is achieved by the combination of
         // {@code NetlinkUtils#NULL_MASK} and {@code NetlinkUtils#UNKNOWN_MARK}.
@@ -205,7 +226,9 @@ public class TcpSocketTracker {
                     family, InetDiagMessage.buildInetDiagReqForAliveTcpSockets(family));
         }
         mDependencies.addDeviceConfigChangedListener(mConfigListener);
-        mDependencies.addDeviceIdleReceiver(mDeviceIdleReceiver, mShouldDisableInLightDoze);
+        mDependencies.addDeviceIdleReceiver(mDeviceIdleReceiver, mShouldDisableInDeepDoze,
+                mShouldDisableInLightDoze);
+        mCm = mDependencies.getContext().getSystemService(ConnectivityManager.class);
     }
 
     @Nullable
@@ -214,9 +237,9 @@ public class TcpSocketTracker {
             final int netId = NetworkShimImpl.newInstance(mNetwork).getNetId();
             return mNetd.getFwmarkForNetwork(netId);
         } catch (UnsupportedApiLevelException e) {
-            log("Get netId is not available in this API level.");
+            logd("Get netId is not available in this API level.");
         } catch (RemoteException e) {
-            Log.e(TAG, "Error getting fwmark for network, ", e);
+            loge("Error getting fwmark for network, ", e);
         }
         return null;
     }
@@ -246,12 +269,13 @@ public class TcpSocketTracker {
                 mDependencies.sendPollingRequest(fd, mSockDiagMsg.get(family));
                 while (parseMessage(mDependencies.recvMessage(fd),
                         family, newSocketInfoList, time)) {
-                    log("Pending info exist. Attempt to read more");
+                    logd("Pending info exist. Attempt to read more");
                 }
             }
 
             // Append TcpStats based on previous and current socket info.
             final TcpStat stat = new TcpStat();
+            final ArrayList<Integer> skippedBlockedUids = new ArrayList<>();
             mLatestReportedUids.clear();
             for (final SocketInfo newInfo : newSocketInfoList) {
                 final TcpStat diff = calculateLatestPacketsStat(newInfo,
@@ -271,10 +295,27 @@ public class TcpSocketTracker {
                     continue;
                 }
 
+                if (mShouldIgnoreTcpInfoForBlockedUids) {
+                    // For backward-compatibility, NET_CAPABILITY_TEMPORARILY_NOT_METERED
+                    // is not referenced when deciding meteredness in NetworkPolicyManagerService.
+                    // Thus, whether to block metered networking should only be judged with
+                    // NET_CAPABILITY_NOT_METERED.
+                    final boolean metered = !mNetworkCapabilities.hasCapability(
+                            NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
+                    final boolean uidBlocked = mCm.isUidNetworkingBlocked(newInfo.uid, metered);
+                    if (uidBlocked) {
+                        skippedBlockedUids.add(newInfo.uid);
+                        continue;
+                    }
+                }
+
                 if (diff != null) {
                     mLatestReportedUids.add(newInfo.uid);
                     stat.accumulate(diff);
                 }
+            }
+            if (!skippedBlockedUids.isEmpty()) {
+                logd("Skip blocked uids: " + skippedBlockedUids);
             }
 
             // Calculate mLatestReceiveCount, mSentSinceLastRecv and mLatestPacketFailPercentage.
@@ -288,7 +329,7 @@ public class TcpSocketTracker {
             cleanupSocketInfo(time);
             return true;
         } catch (ErrnoException | SocketException | InterruptedIOException e) {
-            Log.e(TAG, "Fail to get TCP info via netlink.", e);
+            loge("Fail to get TCP info via netlink.", e);
         } finally {
             SocketUtils.closeSocketQuietly(fd);
         }
@@ -302,11 +343,11 @@ public class TcpSocketTracker {
 
     // Return true if there are more pending messages to read
     @VisibleForTesting
-    static boolean parseMessage(ByteBuffer bytes, int family,
+    boolean parseMessage(ByteBuffer bytes, int family,
             ArrayList<SocketInfo> outputSocketInfoList, long time) {
         if (!NetlinkUtils.enoughBytesRemainForValidNlMsg(bytes)) {
             // This is unlikely to happen in real cases. Check this first for testing.
-            Log.e(TAG, "Size is less than header size. Ignored.");
+            loge("Size is less than header size. Ignored.");
             return false;
         }
 
@@ -340,12 +381,12 @@ public class TcpSocketTracker {
                 outputSocketInfoList.add(info);
             } while (NetlinkUtils.enoughBytesRemainForValidNlMsg(bytes));
         } catch (IllegalArgumentException | BufferUnderflowException e) {
-            Log.wtf(TAG, "Unexpected socket info parsing, family " + family
+            logwtf("Unexpected socket info parsing, family " + family
                     + " buffer:" + bytes + " "
                     + Base64.getEncoder().encodeToString(bytes.array()), e);
             return false;
         } catch (IllegalStateException e) {
-            Log.e(TAG, "Unexpected socket info parsing, family " + family
+            loge("Unexpected socket info parsing, family " + family
                     + " buffer:" + bytes + " "
                     + Base64.getEncoder().encodeToString(bytes.array()), e);
             return false;
@@ -354,21 +395,21 @@ public class TcpSocketTracker {
         return true;
     }
 
-    private static int getLengthAndVerifyMsgHeader(@NonNull ByteBuffer bytes, int family) {
+    private int getLengthAndVerifyMsgHeader(@NonNull ByteBuffer bytes, int family) {
         final StructNlMsgHdr nlmsghdr = StructNlMsgHdr.parse(bytes);
         if (nlmsghdr == null) {
-            Log.e(TAG, "Badly formatted data.");
+            loge("Badly formatted data.");
             return END_OF_PARSING;
         }
 
-        log("pollSocketsInfo: nlmsghdr=" + nlmsghdr + ", limit=" + bytes.limit());
+        logd("pollSocketsInfo: nlmsghdr=" + nlmsghdr + ", limit=" + bytes.limit());
         // End of the message. Stop parsing.
         if (nlmsghdr.nlmsg_type == NLMSG_DONE) {
             return END_OF_PARSING;
         }
 
         if (nlmsghdr.nlmsg_type != SOCK_DIAG_BY_FAMILY) {
-            Log.e(TAG, "Expect to get family " + family
+            loge("Expect to get family " + family
                     + " SOCK_DIAG_BY_FAMILY message but get "
                     + nlmsghdr.nlmsg_type);
             return END_OF_PARSING;
@@ -393,7 +434,7 @@ public class TcpSocketTracker {
 
     /** Parse a {@code SocketInfo} from the given position of the given byte buffer. */
     @NonNull
-    private static SocketInfo parseSockInfo(@NonNull final ByteBuffer bytes, final int family,
+    private SocketInfo parseSockInfo(@NonNull final ByteBuffer bytes, final int family,
             final int nlmsgLen, final long time, final int uid, final long cookie,
             final int dstPort) {
         final int remainingDataSize = bytes.position() + nlmsgLen - SOCKDIAG_MSG_HEADER_SIZE;
@@ -411,7 +452,7 @@ public class TcpSocketTracker {
             }
         }
         final SocketInfo info = new SocketInfo(tcpInfo, family, mark, time, uid, cookie, dstPort);
-        log("parseSockInfo, " + info);
+        logd("parseSockInfo, " + info);
         return info;
     }
 
@@ -429,7 +470,7 @@ public class TcpSocketTracker {
         }
         final boolean ret = (getLatestPacketFailPercentage() >= getTcpPacketsFailRateThreshold());
         if (ret) {
-            Log.d(TAG, "data stall suspected, uids: " + mLatestReportedUids.toString());
+            log("data stall suspected, uids: " + mLatestReportedUids.toString());
         }
         return ret;
     }
@@ -445,7 +486,7 @@ public class TcpSocketTracker {
         }
 
         if (current.tcpInfo == null) {
-            log("Current tcpInfo is null.");
+            logd("Current tcpInfo is null.");
             return null;
         }
 
@@ -458,7 +499,7 @@ public class TcpSocketTracker {
             stat.receivedCount -= previous.tcpInfo.mSegsIn;
             stat.retransCount -= previous.tcpInfo.mTotalRetrans;
         }
-        log("calculateLatestPacketsStat, stat:" + stat);
+        logd("calculateLatestPacketsStat, stat:" + stat);
         return stat;
     }
 
@@ -498,14 +539,31 @@ public class TcpSocketTracker {
         return mTcpPacketsFailRateThreshold;
     }
 
-    private static void log(final String str) {
-        if (DBG) Log.d(TAG, str);
+    private void logd(final String str) {
+        if (DBG) log(str);
+    }
+
+    private void log(final String s) {
+        Log.d(TAG + "/" + mNetwork.toString(), s);
+    }
+
+    private void loge(final String str) {
+        loge(str, null /* tr */);
+    }
+
+    private void loge(final String str, @Nullable Throwable tr) {
+        Log.e(TAG + "/" + mNetwork.toString(), str, tr);
+    }
+
+    private void logwtf(final String str, @Nullable Throwable tr) {
+        Log.wtf(TAG + "/" + mNetwork.toString(), str, tr);
     }
 
     /** Stops monitoring and releases resources. */
     public void quit() {
         mDependencies.removeDeviceConfigChangedListener(mConfigListener);
-        mDependencies.removeBroadcastReceiver(mDeviceIdleReceiver);
+        mDependencies.removeBroadcastReceiver(mDeviceIdleReceiver,
+                mShouldDisableInDeepDoze, mShouldDisableInLightDoze);
     }
 
     /**
@@ -585,7 +643,7 @@ public class TcpSocketTracker {
         synchronized (mDozeModeLock) {
             if (mInDozeMode == isEnabled) return;
             mInDozeMode = isEnabled;
-            log("Doze mode enabled=" + mInDozeMode);
+            logd("Doze mode enabled=" + mInDozeMode);
         }
     }
 
@@ -593,11 +651,15 @@ public class TcpSocketTracker {
         if (mInOpportunisticMode == isEnabled) return;
         mInOpportunisticMode = isEnabled;
 
-        log("Private DNS Opportunistic mode enabled=" + mInOpportunisticMode);
+        logd("Private DNS Opportunistic mode enabled=" + mInOpportunisticMode);
     }
 
     public void setLinkProperties(@NonNull LinkProperties lp) {
         mLinkProperties = lp;
+    }
+
+    public void setNetworkCapabilities(@NonNull NetworkCapabilities caps) {
+        mNetworkCapabilities = caps;
     }
 
     /**
@@ -686,8 +748,14 @@ public class TcpSocketTracker {
         /** Add receiver for detecting doze mode change to control TCP detection. */
         @TargetApi(Build.VERSION_CODES.TIRAMISU)
         public void addDeviceIdleReceiver(@NonNull final BroadcastReceiver receiver,
-                boolean shouldDisableInLightDoze) {
-            final IntentFilter intentFilter = new IntentFilter(ACTION_DEVICE_IDLE_MODE_CHANGED);
+                boolean shouldDisableInDeepDoze, boolean shouldDisableInLightDoze) {
+            // No need to register receiver if no related feature is enabled.
+            if (!shouldDisableInDeepDoze && !shouldDisableInLightDoze) return;
+
+            final IntentFilter intentFilter = new IntentFilter();
+            if (shouldDisableInDeepDoze) {
+                intentFilter.addAction(ACTION_DEVICE_IDLE_MODE_CHANGED);
+            }
             if (shouldDisableInLightDoze) {
                 intentFilter.addAction(ACTION_DEVICE_LIGHT_IDLE_MODE_CHANGED);
             }
@@ -695,7 +763,9 @@ public class TcpSocketTracker {
         }
 
         /** Remove broadcast receiver. */
-        public void removeBroadcastReceiver(@NonNull final BroadcastReceiver receiver) {
+        public void removeBroadcastReceiver(@NonNull final BroadcastReceiver receiver,
+                boolean shouldDisableInDeepDoze, boolean shouldDisableInLightDoze) {
+            if (!shouldDisableInDeepDoze && !shouldDisableInLightDoze) return;
             mContext.unregisterReceiver(receiver);
         }
 
@@ -705,10 +775,27 @@ public class TcpSocketTracker {
          * to deal with flag values changing at runtime.
          */
         @TargetApi(Build.VERSION_CODES.TIRAMISU)
-        public boolean shouldDisableInLightDoze() {
+        public boolean shouldDisableInLightDoze(boolean ignoreBlockedUidsSupported) {
             // Light doze mode status checking API is only available at T or later releases.
-            return SdkLevel.isAtLeastT() && DeviceConfigUtils.isNetworkStackFeatureNotChickenedOut(
+            if (!SdkLevel.isAtLeastT()) return false;
+
+            // Disable light doze mode design is replaced by ignoring blocked uids design.
+            if (ignoreBlockedUidsSupported) return false;
+
+            return DeviceConfigUtils.isNetworkStackFeatureNotChickenedOut(
                     mContext, SKIP_TCP_POLL_IN_LIGHT_DOZE);
+        }
+
+        /**
+         * Get whether the ignore Tcp info for blocked uids is supported. This method should
+         * only be called once in the constructor, to ensure that the code does not need
+         * to deal with flag values changing at runtime.
+         */
+        public boolean shouldIgnoreTcpInfoForBlockedUids() {
+            return SdkLevel.isAtLeastT() && DeviceConfigUtils.isFeatureSupported(
+                    mContext, FEATURE_IS_UID_NETWORKING_BLOCKED)
+                    && DeviceConfigUtils.isNetworkStackFeatureNotChickenedOut(mContext,
+                    IGNORE_TCP_INFO_FOR_BLOCKED_UIDS);
         }
     }
 }

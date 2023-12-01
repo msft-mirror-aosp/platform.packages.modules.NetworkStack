@@ -28,7 +28,9 @@ import android.net.NetworkStatsIntegrationTest.Direction.DOWNLOAD
 import android.net.NetworkStatsIntegrationTest.Direction.UPLOAD
 import android.net.NetworkTemplate.MATCH_TEST
 import android.os.Build
+import android.os.ParcelFileDescriptor.AutoCloseInputStream
 import android.os.Process
+import android.util.Log
 import androidx.test.platform.app.InstrumentationRegistry
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo
 import com.android.testutils.DevSdkIgnoreRunner
@@ -42,6 +44,7 @@ import com.android.testutils.runAsShell
 import fi.iki.elonen.NanoHTTPD
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.io.BufferedReader
 import java.net.HttpURLConnection
 import java.net.HttpURLConnection.HTTP_OK
 import java.net.InetSocketAddress
@@ -49,6 +52,7 @@ import java.net.URL
 import java.nio.charset.Charset
 import kotlin.math.ceil
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import org.junit.After
 import org.junit.Assume.assumeTrue
@@ -62,6 +66,7 @@ private const val TEST_TAG = 0xF00D
 @TargetApi(Build.VERSION_CODES.S)
 @IgnoreUpTo(Build.VERSION_CODES.TIRAMISU)
 class NetworkStatsIntegrationTest {
+    private val TAG = NetworkStatsIntegrationTest::class.java.simpleName
     private val INTERNAL_V6ADDR =
         LinkAddress(InetAddresses.parseNumericAddress("2001:db8::1234"), 64)
     private val EXTERNAL_V6ADDR =
@@ -381,6 +386,7 @@ class NetworkStatsIntegrationTest {
         val taggedUid = getUidDetail(iface, TEST_TAG)
         val trafficStatsIface = getTrafficStatsIface(iface)
         val trafficStatsUid = getTrafficStatsUid(Process.myUid())
+        val xtBpfStats = getXtBpfStatsInternal()
 
         private fun getUidDetail(iface: String, tag: Int): BareStats {
             return getNetworkStatsThat(iface, tag) { nsm, template ->
@@ -447,6 +453,40 @@ class NetworkStatsIntegrationTest {
             TrafficStats.getUidTxBytes(uid),
             TrafficStats.getUidTxPackets(uid)
         )
+
+        private fun getXtBpfStatsInternal(): BareStats {
+            // The following pattern matches ip(6)tables-save -c output like below:
+            // [119:37802] -A bw_raw_PREROUTING -m bpf --object-pinned
+            //      /sys/fs/bpf/netd_shared/prog_netd_skfilter_ingress_xtbpf
+            // [141:26439] -A bw_mangle_POSTROUTING -m bpf --object-pinned
+            //      /sys/fs/bpf/netd_shared/prog_netd_skfilter_egress_xtbpf
+            val ingressRegex = Regex("""\[(?<rxPackets>\d+):(?<rxBytes>\d+)\]""" +
+                    """.*prog_netd_skfilter_ingress_xtbpf""")
+            val egressRegex = Regex("""\[(?<txPackets>\d+):(?<txBytes>\d+)\]""" +
+                    """.*prog_netd_skfilter_egress_xtbpf""")
+            val (v4Stats, v6Stats) = listOf("iptables-save -c", "ip6tables-save -c").map {
+                val output = runShellCommand(it)
+                val rxMatches = ingressRegex.find(output)
+                val txMatches = egressRegex.find(output)
+                assertNotNull(rxMatches)
+                assertNotNull(txMatches)
+
+                BareStats(
+                        rxBytes = rxMatches.groups["rxBytes"]!!.value.toLong(),
+                        rxPackets = rxMatches.groups["rxPackets"]!!.value.toLong(),
+                        txBytes = txMatches.groups["txBytes"]!!.value.toLong(),
+                        txPackets = txMatches.groups["txPackets"]!!.value.toLong()
+                )
+            }
+            return v4Stats.plus(v6Stats)
+        }
+
+        private fun runShellCommand(cmd: String): String {
+            return InstrumentationRegistry.getInstrumentation().getUiAutomation()
+                    .executeShellCommand(cmd).use { pfd ->
+                        AutoCloseInputStream(pfd).bufferedReader().use(BufferedReader::readText)
+                    }
+        }
     }
 
     private fun assertAllStatsIncreases(
@@ -475,6 +515,15 @@ class NetworkStatsIntegrationTest {
         lower: BareStats,
         upper: BareStats
     ) {
+        // XtBpf iptables hook counted traffic on all interfaces. Thus, this might see traffic
+        // on other interfaces as well. Also, other thread/process could reload the relevant
+        // iptables table. Thus, instead of asserting the readings, print logs when it is
+        // unexpected to provide more debug information when failing other items.
+        if (!checkInRange(before.xtBpfStats, after.xtBpfStats,
+                        lower + lower.reverse(), upper + upper.reverse())) {
+            Log.d(TAG, "Unexpected xtbpf stats: ${after.xtBpfStats} - ${before.xtBpfStats} " +
+                    "is not within range [$lower, $upper]")
+        }
         assertInRange(
             "Unexpected iface traffic stats",
             after.iface,
@@ -550,14 +599,22 @@ class NetworkStatsIntegrationTest {
     ) {
         // Passing the value after operation and the value before operation to dump the actual
         // numbers if it fails.
-        val value = after - before
-        assertTrue(
-            value.rxBytes in lower.rxBytes..upper.rxBytes &&
-                    value.rxPackets in lower.rxPackets..upper.rxPackets &&
-                    value.txBytes in lower.txBytes..upper.txBytes &&
-                    value.txPackets in lower.txPackets..upper.txPackets,
+        assertTrue(checkInRange(before, after, lower, upper),
             "$tag on $iface: $after - $before is not within range [$lower, $upper]"
         )
+    }
+
+    private fun checkInRange(
+            before: BareStats,
+            after: BareStats,
+            lower: BareStats,
+            upper: BareStats
+    ): Boolean {
+        val value = after - before
+        return value.rxBytes in lower.rxBytes..upper.rxBytes &&
+                value.rxPackets in lower.rxPackets..upper.rxPackets &&
+                value.txBytes in lower.txBytes..upper.txBytes &&
+                value.txPackets in lower.txPackets..upper.txPackets
     }
 
     fun getRandomString(length: Long): String {
