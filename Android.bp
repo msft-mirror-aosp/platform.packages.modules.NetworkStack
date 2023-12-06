@@ -89,7 +89,7 @@ java_defaults {
     sdk_version: module_34_version,
     libs: [
         "framework-configinfrastructure",
-        "framework-connectivity",
+        "framework-connectivity.stubs.module_lib",
         "framework-connectivity-t",
         "framework-statsd",
         "framework-wifi",
@@ -193,7 +193,6 @@ java_library {
         "framework-connectivity",
         "framework-connectivity-t.stubs.module_lib",
         "framework-tethering",
-        "android.net.ipsec.ike.stubs.module_lib",
     ],
     sdk_version: "module_33",
     visibility: ["//visibility:private"],
@@ -215,7 +214,6 @@ java_library {
         "framework-connectivity",
         "framework-connectivity-t.stubs.module_lib",
         "framework-tethering",
-        "android.net.ipsec.ike.stubs.module_lib"
     ],
     sdk_version: module_34_version,
     visibility: ["//visibility:private"],
@@ -313,6 +311,7 @@ java_defaults {
         "androidx.annotation_annotation",
         "modules-utils-build_system",
         "modules-utils-preconditions",
+        "modules-utils-shell-command-handler",
         "modules-utils-statemachine",
         "netd_aidl_interface-lateststable-java",
         "networkstack-client",
@@ -339,7 +338,10 @@ android_library {
         "src/**/*.java",
         ":statslog-networkstack-java-gen-current"
     ],
-    static_libs: ["NetworkStackApiCurrentShims"],
+    static_libs: [
+        "NetworkStackApiCurrentShims",
+        "net-utils-device-common-struct",
+    ],
     manifest: "AndroidManifestBase.xml",
     visibility: [
         "//frameworks/base/tests/net/integration",
@@ -357,7 +359,10 @@ android_library {
         "src/**/*.java",
         ":statslog-networkstack-java-gen-stable",
     ],
-    static_libs: ["NetworkStackApiStableShims"],
+    static_libs: [
+        "NetworkStackApiStableShims",
+        "net-utils-device-common-struct",
+    ],
     manifest: "AndroidManifestBase.xml",
     visibility: [
         "//frameworks/base/packages/Connectivity/tests/integration",

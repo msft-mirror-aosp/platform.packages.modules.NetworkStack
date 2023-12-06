@@ -22,8 +22,8 @@ import android.net.MacAddress;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
-import androidx.annotation.VisibleForTesting;
 
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.HexDump;
 import com.android.net.module.util.Struct;
 import com.android.net.module.util.structs.IaPdOption;
@@ -33,7 +33,12 @@ import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+import java.util.OptionalInt;
 
 /**
  * Defines basic data and operations needed to build and use packets for the
@@ -76,6 +81,11 @@ public class Dhcp6Packet {
     protected final byte[] mServerDuid;
 
     /**
+     * DHCPv6 Optional Type: Option Request Option.
+     */
+    public static final byte DHCP6_OPTION_REQUEST_OPTION = 6;
+
+    /**
      * DHCPv6 Optional Type: Elapsed time.
      * This time is expressed in hundredths of a second.
      */
@@ -114,6 +124,17 @@ public class Dhcp6Packet {
     protected PrefixDelegation mPrefixDelegation;
 
     /**
+     * DHCPv6 Optional Type: IA Prefix Option.
+     */
+    public static final byte DHCP6_IAPREFIX = 26;
+
+    /**
+     * DHCPv6 Optional Type: SOL_MAX_RT.
+     */
+    public static final byte DHCP6_SOL_MAX_RT = 82;
+    private OptionalInt mSolMaxRt;
+
+    /**
      * The transaction identifier used in this particular DHCPv6 negotiation
      */
     protected final int mTransId;
@@ -122,6 +143,9 @@ public class Dhcp6Packet {
      * The unique identifier for IA_NA, IA_TA, IA_PD used in this particular DHCPv6 negotiation
      */
     protected int mIaId;
+    // Per rfc8415#section-12, the IAID MUST be consistent across restarts.
+    // Since currently only one IAID is supported, a well-known value can be used (0).
+    public static final int IAID = 0;
 
     Dhcp6Packet(int transId, int elapsedTime, @NonNull final byte[] clientDuid,
             final byte[] serverDuid, @NonNull final byte[] iapd) {
@@ -137,6 +161,14 @@ public class Dhcp6Packet {
      */
     public int getTransactionId() {
         return mTransId;
+    }
+
+    /**
+     * Returns decoded IA_PD options associated with IA_ID.
+     */
+    @VisibleForTesting
+    public PrefixDelegation getPrefixDelegation() {
+        return mPrefixDelegation;
     }
 
     /**
@@ -162,26 +194,143 @@ public class Dhcp6Packet {
     }
 
     /**
+     * Returns the SOL_MAX_RT option value in milliseconds.
+     */
+    public OptionalInt getSolMaxRtMs() {
+        return mSolMaxRt;
+    }
+
+    /**
      * A class to take DHCPv6 IA_PD option allocated from server.
      * https://www.rfc-editor.org/rfc/rfc8415.html#section-21.21
      */
     public static class PrefixDelegation {
-        public int iaid;
-        public int t1;
-        public int t2;
-        public final IaPrefixOption ipo;
+        public final int iaid;
+        public final int t1;
+        public final int t2;
+        @NonNull
+        public final List<IaPrefixOption> ipos;
 
-        PrefixDelegation(int iaid, int t1, int t2, final IaPrefixOption ipo) {
+        public PrefixDelegation(int iaid, int t1, int t2,
+                @NonNull final List<IaPrefixOption> ipos) {
+            Objects.requireNonNull(ipos);
             this.iaid = iaid;
             this.t1 = t1;
             this.t2 = t2;
-            this.ipo = ipo;
+            this.ipos = ipos;
+        }
+
+        /**
+         * Check whether or not the IA_PD option in DHCPv6 message is valid.
+         *
+         * TODO: ensure that the prefix has a reasonable lifetime, and the timers aren't too short.
+         */
+        public boolean isValid() {
+            if (iaid != IAID) {
+                Log.w(TAG, "IA_ID doesn't match, expected: " + IAID + ", actual: " + iaid);
+                return false;
+            }
+            if (t1 < 0 || t2 < 0) {
+                Log.e(TAG, "IA_PD option with invalid T1 " + t1 + " or T2 " + t2);
+                return false;
+            }
+            // Generally, t1 must be smaller or equal to t2 (except when t2 is 0).
+            if (t2 != 0 && t1 > t2) {
+                Log.e(TAG, "IA_PD option with T1 " + t1 + " greater than T2 " + t2);
+                return false;
+            }
+            return true;
+        }
+
+        /**
+         * Decode an IA_PD option from the byte buffer.
+         */
+        public static PrefixDelegation decode(@NonNull final ByteBuffer buffer)
+                throws ParseException {
+            try {
+                final int iaid = buffer.getInt();
+                final int t1 = buffer.getInt();
+                final int t2 = buffer.getInt();
+                final List<IaPrefixOption> ipos = new ArrayList<IaPrefixOption>();
+                while (buffer.remaining() > 0) {
+                    final int original = buffer.position();
+                    final short optionType = buffer.getShort();
+                    final int optionLen = buffer.getShort() & 0xFFFF;
+                    switch (optionType) {
+                        case DHCP6_IAPREFIX:
+                            buffer.position(original);
+                            final IaPrefixOption ipo = Struct.parse(IaPrefixOption.class, buffer);
+                            Log.d(TAG, "IA Prefix Option: " + ipo);
+                            ipos.add(ipo);
+                            break;
+                        // TODO: support DHCP6_STATUS_CODE option
+                        default:
+                            skipOption(buffer, optionLen);
+                    }
+                }
+                return new PrefixDelegation(iaid, t1, t2, ipos);
+            } catch (BufferUnderflowException e) {
+                throw new ParseException(e.getMessage());
+            }
+        }
+
+        /**
+         * Build an IA_PD option from given specific parameters, including IA_PREFIX options.
+         */
+        public ByteBuffer build() {
+            final ByteBuffer iapd = ByteBuffer.allocate(IaPdOption.LENGTH
+                    + Struct.getSize(IaPrefixOption.class) * ipos.size());
+            iapd.putInt(iaid);
+            iapd.putInt(t1);
+            iapd.putInt(t2);
+            for (IaPrefixOption ipo : ipos) {
+                ipo.writeToByteBuffer(iapd);
+            }
+            iapd.flip();
+            return iapd;
+        }
+
+        /**
+         * Return valid IA prefix options to be used and extended in the Reply message. It may
+         * return empty list if there isn't any valid IA prefix option in the Reply message.
+         *
+         * TODO: ensure that the prefix has a reasonable lifetime, and the timers aren't too short.
+         * and handle status code such as NoPrefixAvail.
+         */
+        public List<IaPrefixOption> getValidIaPrefixes() {
+            final List<IaPrefixOption> validIpos = new ArrayList<IaPrefixOption>();
+            for (IaPrefixOption ipo : ipos) {
+                if (!ipo.isValid()) continue;
+                validIpos.add(ipo);
+            }
+            return validIpos;
         }
 
         @Override
         public String toString() {
             return "Prefix Delegation: iaid " + iaid + ", t1 " + t1 + ", t2 " + t2
-                    + ", prefix " + ipo;
+                    + ", IA prefix options: " + ipos;
+        }
+
+        /**
+         * Compare the preferred lifetime in the IA prefix optin list and return the minimum one.
+         * TODO: exclude 0 preferred lifetime.
+         */
+        public long getMinimalPreferredLifetime() {
+            final IaPrefixOption ipo = Collections.min(ipos,
+                    (IaPrefixOption lhs, IaPrefixOption rhs) -> Long.compare(lhs.preferred,
+                            rhs.preferred));
+            return ipo.preferred;
+        }
+
+        /**
+         * Compare the valid lifetime in the IA prefix optin list and return the minimum one.
+         * TODO: exclude 0 valid lifetime.
+         */
+        public long getMinimalValidLifetime() {
+            final IaPrefixOption ipo = Collections.min(ipos,
+                    (IaPrefixOption lhs, IaPrefixOption rhs) -> Long.compare(lhs.valid, rhs.valid));
+            return ipo.valid;
         }
     }
 
@@ -248,8 +397,7 @@ public class Dhcp6Packet {
      * |                                                               |
      * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
      */
-    @VisibleForTesting
-    static Dhcp6Packet decode(@NonNull final ByteBuffer packet) throws ParseException {
+    private static Dhcp6Packet decode(@NonNull final ByteBuffer packet) throws ParseException {
         int elapsedTime = 0;
         byte[] iapd = null;
         byte[] serverDuid = null;
@@ -257,6 +405,8 @@ public class Dhcp6Packet {
         short statusCode = STATUS_SUCCESS;
         String statusMsg = null;
         boolean rapidCommit = false;
+        int solMaxRt = 0;
+        PrefixDelegation pd = null;
 
         packet.order(ByteOrder.BIG_ENDIAN);
 
@@ -301,6 +451,7 @@ public class Dhcp6Packet {
                         final byte[] bytes = new byte[expectedLen];
                         packet.get(bytes, 0 /* offset */, expectedLen);
                         iapd = bytes;
+                        pd = PrefixDelegation.decode(ByteBuffer.wrap(iapd));
                         break;
                     case DHCP6_RAPID_COMMIT:
                         expectedLen = 0;
@@ -314,6 +465,10 @@ public class Dhcp6Packet {
                         expectedLen = optionLen;
                         statusCode = packet.getShort();
                         statusMsg = readAsciiString(packet, expectedLen - 2, false /* isNullOk */);
+                        break;
+                    case DHCP6_SOL_MAX_RT:
+                        expectedLen = 4;
+                        solMaxRt = packet.getInt();
                         break;
                     default:
                         expectedLen = optionLen;
@@ -360,18 +515,17 @@ public class Dhcp6Packet {
                 throw new ParseException("Unimplemented DHCP6 message type %d" + messageType);
         }
 
-        if (iapd != null) {
-            final ByteBuffer buffer = ByteBuffer.wrap(iapd);
-            final int iaid = buffer.getInt();
-            final int t1 = buffer.getInt();
-            final int t2 = buffer.getInt();
-            final IaPrefixOption ipo = Struct.parse(IaPrefixOption.class, buffer);
-            newPacket.mPrefixDelegation = new PrefixDelegation(iaid, t1, t2, ipo);
-            newPacket.mIaId = iaid;
+        if (pd != null) {
+            newPacket.mPrefixDelegation = pd;
+            newPacket.mIaId = pd.iaid;
         }
         newPacket.mStatusCode = statusCode;
         newPacket.mStatusMsg = statusMsg;
         newPacket.mRapidCommit = rapidCommit;
+        newPacket.mSolMaxRt =
+                (solMaxRt >= 60 && solMaxRt <= 86400)
+                        ? OptionalInt.of(solMaxRt * 1000)
+                        : OptionalInt.empty();
 
         return newPacket;
     }
@@ -402,53 +556,15 @@ public class Dhcp6Packet {
             Log.e(TAG, "Unexpected transaction ID " + mTransId + ", expected " + transId);
             return false;
         }
-        return true;
-    }
-
-    /**
-     * Check whether or not the delegated prefix in DHCPv6 packet is valid.
-     *
-     * TODO: ensure that the prefix has a reasonable lifetime, and the timers aren't too short.
-     */
-    public static boolean hasValidPrefixDelegation(@NonNull final PrefixDelegation pd) {
-        if (pd == null) {
-            Log.e(TAG, "DHCPv6 packet without IA_PD option, ignoring");
+        if (mPrefixDelegation == null) {
+            Log.e(TAG, "DHCPv6 message without IA_PD option, ignoring");
             return false;
         }
-        if (pd.ipo.prefixLen > 64) {
-            Log.e(TAG, "IA_PD option with prefix length " + pd.ipo.prefixLen + " longer than 64");
+        if (!mPrefixDelegation.isValid()) {
+            Log.e(TAG, "DHCPv6 message takes invalid IA_PD option, ignoring");
             return false;
         }
-        final long t1 = pd.t1;
-        final long t2 = pd.t2;
-        if (t1 < 0 || t2 < 0) {
-            Log.e(TAG, "IA_PD option with invalid T1 " + t1 + " or T2 " + t2);
-            return false;
-        }
-
-        // Generally, t1 must be smaller or equal to t2 (except when t2 is 0).
-        if (t2 != 0 && t1 > t2) {
-            Log.e(TAG, "IA_PD option with T1 " + t1 + " greater than T2 " + t2);
-            return false;
-        }
-        final long preferred = pd.ipo.preferred;
-        final long valid = pd.ipo.valid;
-        if (preferred < 0 || valid < 0) {
-            Log.e(TAG, "IA_PD option with invalid lifetime, preferred lifetime " + preferred
-                    + ", valid lifetime " + valid);
-            return false;
-        }
-        if (preferred > valid) {
-            Log.e(TAG, "IA_PD option with preferred lifetime " + preferred
-                    + " greater than valid lifetime " + valid);
-            return false;
-        }
-
-        // If t2 is 0, ignore it.
-        if (t2 != 0 && preferred < t2) {
-            Log.e(TAG, "preferred lifetime " + preferred + " is smaller than T2 " + t2);
-            return false;
-        }
+        //TODO: check if the status code is success or not.
         return true;
     }
 
@@ -509,23 +625,6 @@ public class Dhcp6Packet {
     protected static void addTlv(ByteBuffer buf, short type) {
         buf.putShort(type);
         buf.putShort((short) 0);
-    }
-
-    /**
-     * Build an IA_PD option from given specific parameters, including IA_PREFIX option.
-     */
-    public static ByteBuffer buildIaPdOption(int iaid, int t1, int t2, long preferred, long valid,
-            final byte[] prefix, byte prefixLen) {
-        final ByteBuffer iapd = ByteBuffer.allocate(IaPdOption.LENGTH
-                + Struct.getSize(IaPrefixOption.class));
-        iapd.putInt(iaid);
-        iapd.putInt(t1);
-        iapd.putInt(t2);
-        final ByteBuffer prefixOption = IaPrefixOption.build((short) IaPrefixOption.LENGTH,
-                preferred, valid, prefixLen, prefix);
-        iapd.put(prefixOption);
-        iapd.flip();
-        return iapd;
     }
 
     /**

@@ -34,7 +34,6 @@ import java.io.IOException;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
-import java.net.SocketException;
 import java.net.UnknownHostException;
 
 /**
@@ -152,21 +151,6 @@ public class NetworkStackUtils {
             new String [] {"https://www.google.com/generate_204"};
 
     /**
-     * @deprecated Considering boolean experiment flag is likely to cause misconfiguration
-     *             particularly when NetworkStack module rolls back to previous version. It's
-     *             much safer to determine whether or not to enable one specific experimental
-     *             feature by comparing flag version with module version.
-     */
-    @Deprecated
-    public static final String DHCP_INIT_REBOOT_ENABLED = "dhcp_init_reboot_enabled";
-
-    /**
-     * @deprecated See above explanation.
-     */
-    @Deprecated
-    public static final String DHCP_RAPID_COMMIT_ENABLED = "dhcp_rapid_commit_enabled";
-
-    /**
      * Minimum module version at which to enable the DHCP INIT-REBOOT state.
      */
     public static final String DHCP_INIT_REBOOT_VERSION = "dhcp_init_reboot_version";
@@ -180,12 +164,6 @@ public class NetworkStackUtils {
      * Minimum module version at which to enable the IP address conflict detection feature.
      */
     public static final String DHCP_IP_CONFLICT_DETECT_VERSION = "dhcp_ip_conflict_detect_version";
-
-    /**
-     * Minimum module version at which to enable the IPv6-Only preferred option.
-     */
-    public static final String DHCP_IPV6_ONLY_PREFERRED_VERSION =
-            "dhcp_ipv6_only_preferred_version";
 
     /**
      * Minimum module version at which to enable slow DHCP retransmission approach in renew/rebind
@@ -267,6 +245,17 @@ public class NetworkStackUtils {
     public static final String IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION =
             "ipclient_dhcpv6_prefix_delegation_version";
 
+    /**
+     * Experiment flag to enable new ra filter.
+     */
+    public static final String APF_NEW_RA_FILTER_VERSION = "apf_new_ra_filter_version";
+    /**
+     * Experiment flag to enable the feature of ignoring any individual RA section with lifetime
+     * below accept_ra_min_lft sysctl.
+     */
+    public static final String IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION =
+            "ipclient_ignore_low_ra_lifetime_version";
+
     /**** BEGIN Feature Kill Switch Flags ****/
 
     /**
@@ -277,22 +266,28 @@ public class NetworkStackUtils {
             "ipclient_parse_netlink_events_force_disable";
 
     /**
-     * Kill switch flag to disable the feature of ignoring any individual RA section with lifetime
-     * below accept_ra_min_lft sysctl.
+     * Kill switch flag to disable the feature of handle light doze mode in Apf.
      */
-    public static final String IPCLIENT_IGNORE_LOW_RA_LIFETIME_FORCE_DISABLE =
-            "ipclient_ignore_low_ra_lifetime_force_disable";
-    /**
-     * Kill switch flag to disable new apf ra filter.
-     */
-    public static final String APF_NEW_RA_FILTER_FORCE_DISABLE =
-            "apf_new_ra_filter_force_disable";
+    public static final String APF_HANDLE_LIGHT_DOZE_FORCE_DISABLE =
+            "apf_handle_light_doze_force_disable";
 
     /**
      * Kill switch flag to disable the feature of skipping Tcp socket info polling when light
      * doze mode is enabled.
      */
     public static final String SKIP_TCP_POLL_IN_LIGHT_DOZE = "skip_tcp_poll_in_light_doze_mode";
+
+    /**
+     * Experiment flag to enable the feature of re-evaluate when network resumes.
+     */
+    public static final String REEVALUATE_WHEN_RESUME = "reevaluate_when_resume";
+
+    /**
+     * Kill switch flag to disable the feature of ignoring Tcp socket info for uids which
+     * networking are blocked.
+     */
+    public static final String IGNORE_TCP_INFO_FOR_BLOCKED_UIDS =
+            "ignore_tcp_info_for_blocked_uids";
 
     static {
         System.loadLibrary("networkstackutilsjni");
@@ -393,8 +388,7 @@ public class NetworkStackUtils {
      * Attaches a socket filter that accepts ICMPv6 router advertisements to the given socket.
      * @param fd the socket's {@link FileDescriptor}.
      */
-    public static native void attachRaFilter(FileDescriptor fd)
-            throws SocketException;
+    public static native void attachRaFilter(FileDescriptor fd) throws ErrnoException;
 
     /**
      * Attaches a socket filter that accepts L2-L4 signaling traffic required for IP connectivity.
@@ -402,10 +396,8 @@ public class NetworkStackUtils {
      * This includes: all ARP, ICMPv6 RS/RA/NS/NA messages, and DHCPv4 exchanges.
      *
      * @param fd the socket's {@link FileDescriptor}.
-     * @param packetType the hardware address type, one of ARPHRD_*.
      */
-    public static native void attachControlPacketFilter(FileDescriptor fd, int packetType)
-            throws SocketException;
+    public static native void attachControlPacketFilter(FileDescriptor fd) throws ErrnoException;
 
     /**
      * Add an entry into the ARP cache.
