@@ -249,6 +249,12 @@ public class NetworkStackUtils {
      * Experiment flag to enable new ra filter.
      */
     public static final String APF_NEW_RA_FILTER_VERSION = "apf_new_ra_filter_version";
+    /**
+     * Experiment flag to enable the feature of ignoring any individual RA section with lifetime
+     * below accept_ra_min_lft sysctl.
+     */
+    public static final String IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION =
+            "ipclient_ignore_low_ra_lifetime_version";
 
     /**** BEGIN Feature Kill Switch Flags ****/
 
@@ -260,11 +266,10 @@ public class NetworkStackUtils {
             "ipclient_parse_netlink_events_force_disable";
 
     /**
-     * Kill switch flag to disable the feature of ignoring any individual RA section with lifetime
-     * below accept_ra_min_lft sysctl.
+     * Kill switch flag to disable the feature of handle light doze mode in Apf.
      */
-    public static final String IPCLIENT_IGNORE_LOW_RA_LIFETIME_FORCE_DISABLE =
-            "ipclient_ignore_low_ra_lifetime_force_disable";
+    public static final String APF_HANDLE_LIGHT_DOZE_FORCE_DISABLE =
+            "apf_handle_light_doze_force_disable";
 
     /**
      * Kill switch flag to disable the feature of skipping Tcp socket info polling when light
@@ -276,6 +281,13 @@ public class NetworkStackUtils {
      * Kill switch flag to disable the feature of re-evaluate when network resumes.
      */
     public static final String REEVALUATE_WHEN_RESUME = "reevaluate_when_resume";
+
+    /**
+     * Kill switch flag to disable the feature of ignoring Tcp socket info for uids which
+     * networking are blocked.
+     */
+    public static final String IGNORE_TCP_INFO_FOR_BLOCKED_UIDS =
+            "ignore_tcp_info_for_blocked_uids";
 
     static {
         System.loadLibrary("networkstackutilsjni");
