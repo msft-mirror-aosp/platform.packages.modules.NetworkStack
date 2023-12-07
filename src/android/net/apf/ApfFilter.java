@@ -17,6 +17,8 @@
 package android.net.apf;
 
 import static android.net.util.SocketUtils.makePacketSocketAddress;
+import static android.os.PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED;
+import static android.os.PowerManager.ACTION_DEVICE_LIGHT_IDLE_MODE_CHANGED;
 import static android.system.OsConstants.AF_PACKET;
 import static android.system.OsConstants.ARPHRD_ETHER;
 import static android.system.OsConstants.ETH_P_ARP;
@@ -54,6 +56,7 @@ import android.text.format.DateUtils;
 import android.util.Log;
 import android.util.SparseArray;
 
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.android.internal.annotations.GuardedBy;
@@ -61,6 +64,7 @@ import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.HexDump;
 import com.android.internal.util.IndentingPrintWriter;
 import com.android.internal.util.TokenBucket;
+import com.android.modules.utils.build.SdkLevel;
 import com.android.net.module.util.CollectionUtils;
 import com.android.net.module.util.ConnectivityUtils;
 import com.android.net.module.util.InterfaceParams;
@@ -112,6 +116,7 @@ public class ApfFilter implements AndroidPacketFilter {
         public int[] ethTypeBlackList;
         public int minRdnssLifetimeSec;
         public int acceptRaMinLft;
+        public boolean shouldHandleLightDoze;
     }
 
     /**
@@ -132,8 +137,6 @@ public class ApfFilter implements AndroidPacketFilter {
         PASSED_IPV4_UNICAST,
         PASSED_IPV6_ICMP,
         PASSED_IPV6_UNICAST_NON_ICMP,
-        PASSED_ARP_NON_IPV4,
-        PASSED_ARP_UNKNOWN,
         PASSED_ARP_UNICAST_REPLY,
         PASSED_NON_IP_UNICAST,
         PASSED_MDNS,
@@ -156,7 +159,10 @@ public class ApfFilter implements AndroidPacketFilter {
         DROPPED_IPV4_KEEPALIVE_ACK,
         DROPPED_IPV6_KEEPALIVE_ACK,
         DROPPED_IPV4_NATT_KEEPALIVE,
-        DROPPED_MDNS;
+        DROPPED_MDNS,
+        DROPPED_IPV4_TCP_PORT7_UNICAST,
+        DROPPED_ARP_NON_IPV4,
+        DROPPED_ARP_UNKNOWN;
 
         // Returns the negative byte offset from the end of the APF data segment for
         // a given counter.
@@ -233,6 +239,7 @@ public class ApfFilter implements AndroidPacketFilter {
     // Endianness is not an issue for this constant because the APF interpreter always operates in
     // network byte order.
     private static final int IPV4_FRAGMENT_OFFSET_MASK = 0x1fff;
+    private static final int IPV4_FRAGMENT_MORE_FRAGS_MASK = 0x2000;
     private static final int IPV4_PROTOCOL_OFFSET = ETH_HEADER_LEN + 9;
     private static final int IPV4_DEST_ADDR_OFFSET = ETH_HEADER_LEN + 16;
     private static final int IPV4_ANY_HOST_ADDRESS = 0;
@@ -257,7 +264,7 @@ public class ApfFilter implements AndroidPacketFilter {
     private static final int IPPROTO_HOPOPTS = 0;
 
     // NOTE: this must be added to the IPv4 header length in IPV4_HEADER_SIZE_MEMORY_SLOT
-    private static final int UDP_DESTINATION_PORT_OFFSET = ETH_HEADER_LEN + 2;
+    private static final int TCP_UDP_DESTINATION_PORT_OFFSET = ETH_HEADER_LEN + 2;
     private static final int UDP_HEADER_LEN = 8;
 
     private static final int TCP_HEADER_SIZE_OFFSET = 12;
@@ -288,6 +295,8 @@ public class ApfFilter implements AndroidPacketFilter {
     private static final byte[] ETH_MULTICAST_MDNS_V6_MAC_ADDRESS =
             {(byte) 0x33, (byte) 0x33, (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0xfb};
     private static final int MDNS_PORT = 5353;
+
+    private static final int ECHO_PORT = 7;
     private static final int DNS_HEADER_LEN = 12;
     private static final int DNS_QDCOUNT_OFFSET = 4;
     // NOTE: this must be added to the IPv4 header length in IPV4_HEADER_SIZE_MEMORY_SLOT, or the
@@ -323,16 +332,48 @@ public class ApfFilter implements AndroidPacketFilter {
     // Tracks the value of /proc/sys/ipv6/conf/$iface/accept_ra_min_lft which affects router, RIO,
     // and PIO valid lifetimes.
     private final int mAcceptRaMinLft;
+    private final boolean mShouldHandleLightDoze;
+
+    private static boolean isDeviceIdleModeChangedAction(Intent intent) {
+        return ACTION_DEVICE_IDLE_MODE_CHANGED.equals(intent.getAction());
+    }
+
+    private boolean isDeviceLightIdleModeChangedAction(Intent intent) {
+        // The ACTION_DEVICE_LIGHT_IDLE_MODE_CHANGED only exist since T. For lower platform version,
+        // the check should return false. The explicit SDK check is needed to make linter happy
+        // about accessing ACTION_DEVICE_LIGHT_IDLE_MODE_CHANGED in this function.
+        if (!SdkLevel.isAtLeastT()) {
+            return false;
+        }
+        if (!mShouldHandleLightDoze) {
+            return false;
+        }
+        return ACTION_DEVICE_LIGHT_IDLE_MODE_CHANGED.equals(intent.getAction());
+    }
+
+    private boolean isDeviceLightIdleMode(@NonNull PowerManager powerManager) {
+        // The powerManager.isDeviceLightIdleMode() only exist since T. For lower platform version,
+        // the check should return false. The explicit SDK check is needed to make linter happy
+        // about accessing powerManager.isDeviceLightIdleMode() in this function.
+        if (!SdkLevel.isAtLeastT()) {
+            return false;
+        }
+        if (!mShouldHandleLightDoze) {
+            return false;
+        }
+
+        return powerManager.isDeviceLightIdleMode();
+    }
 
     // Detects doze mode state transitions.
     private final BroadcastReceiver mDeviceIdleReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            String action = intent.getAction();
-            if (action.equals(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)) {
-                PowerManager powerManager =
-                        (PowerManager) context.getSystemService(Context.POWER_SERVICE);
-                final boolean deviceIdle = powerManager.isDeviceIdleMode();
+            final PowerManager powerManager = context.getSystemService(PowerManager.class);
+            if (isDeviceIdleModeChangedAction(intent)
+                    || isDeviceLightIdleModeChangedAction(intent)) {
+                final boolean deviceIdle = powerManager.isDeviceIdleMode()
+                        || isDeviceLightIdleMode(powerManager);
                 setDozeMode(deviceIdle);
             }
         }
@@ -346,9 +387,16 @@ public class ApfFilter implements AndroidPacketFilter {
     @GuardedBy("this")
     private int mIPv4PrefixLength;
 
-    @VisibleForTesting
+    private final Dependencies mDependencies;
+
     public ApfFilter(Context context, ApfConfiguration config, InterfaceParams ifParams,
             IpClientCallbacksWrapper ipClientCallback) {
+        this(context, config, ifParams, ipClientCallback, new Dependencies(context));
+    }
+
+    @VisibleForTesting
+    public ApfFilter(Context context, ApfConfiguration config, InterfaceParams ifParams,
+            IpClientCallbacksWrapper ipClientCallback, Dependencies dependencies) {
         mApfCapabilities = config.apfCapabilities;
         mIpClientCallback = ipClientCallback;
         mInterfaceParams = ifParams;
@@ -357,6 +405,8 @@ public class ApfFilter implements AndroidPacketFilter {
         mMinRdnssLifetimeSec = config.minRdnssLifetimeSec;
         mAcceptRaMinLft = config.acceptRaMinLft;
         mContext = context;
+        mShouldHandleLightDoze = config.shouldHandleLightDoze;
+        mDependencies = dependencies;
 
         if (mApfCapabilities.hasDataAccess()) {
             mCountAndPassLabel = "countAndPass";
@@ -384,8 +434,33 @@ public class ApfFilter implements AndroidPacketFilter {
         maybeStartFilter();
 
         // Listen for doze-mode transition changes to enable/disable the IPv6 multicast filter.
-        mContext.registerReceiver(mDeviceIdleReceiver,
-                new IntentFilter(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED));
+        mDependencies.addDeviceIdleReceiver(mDeviceIdleReceiver, mShouldHandleLightDoze);
+    }
+
+    /**
+     * Dependencies class for testing.
+     */
+    @VisibleForTesting
+    public static class Dependencies {
+        private final Context mContext;
+        public Dependencies(final Context context) {
+            mContext = context;
+        }
+
+        /** Add receiver for detecting doze mode change */
+        public void addDeviceIdleReceiver(@NonNull final BroadcastReceiver receiver,
+                boolean shouldHandleLightDoze) {
+            final IntentFilter intentFilter = new IntentFilter(ACTION_DEVICE_IDLE_MODE_CHANGED);
+            if (SdkLevel.isAtLeastT() && shouldHandleLightDoze) {
+                intentFilter.addAction(ACTION_DEVICE_LIGHT_IDLE_MODE_CHANGED);
+            }
+            mContext.registerReceiver(receiver, intentFilter);
+        }
+
+        /** Remove broadcast receiver. */
+        public void removeBroadcastReceiver(@NonNull final BroadcastReceiver receiver) {
+            mContext.unregisterReceiver(receiver);
+        }
     }
 
     public synchronized void setDataSnapshot(byte[] data) {
@@ -1360,9 +1435,9 @@ public class ApfFilter implements AndroidPacketFilter {
         // Here's a basic summary of what the ARP filter program does:
         //
         // if not ARP IPv4
-        //   pass
+        //   drop
         // if not ARP IPv4 reply or request
-        //   pass
+        //   drop
         // if ARP reply source ip is 0.0.0.0
         //   drop
         // if unicast ARP reply
@@ -1377,28 +1452,28 @@ public class ApfFilter implements AndroidPacketFilter {
 
         final String checkTargetIPv4 = "checkTargetIPv4";
 
-        // Pass if not ARP IPv4.
+        // Drop if not ARP IPv4.
         gen.addLoadImmediate(Register.R0, ARP_HEADER_OFFSET);
-        maybeSetupCounter(gen, Counter.PASSED_ARP_NON_IPV4);
-        gen.addJumpIfBytesNotEqual(Register.R0, ARP_IPV4_HEADER, mCountAndPassLabel);
+        maybeSetupCounter(gen, Counter.DROPPED_ARP_NON_IPV4);
+        gen.addJumpIfBytesNotEqual(Register.R0, ARP_IPV4_HEADER, mCountAndDropLabel);
 
-        // Pass if unknown ARP opcode.
+        // Drop if unknown ARP opcode.
         gen.addLoad16(Register.R0, ARP_OPCODE_OFFSET);
         gen.addJumpIfR0Equals(ARP_OPCODE_REQUEST, checkTargetIPv4); // Skip to unicast check
-        maybeSetupCounter(gen, Counter.PASSED_ARP_UNKNOWN);
-        gen.addJumpIfR0NotEquals(ARP_OPCODE_REPLY, mCountAndPassLabel);
+        maybeSetupCounter(gen, Counter.DROPPED_ARP_UNKNOWN);
+        gen.addJumpIfR0NotEquals(ARP_OPCODE_REPLY, mCountAndDropLabel);
 
         // Drop if ARP reply source IP is 0.0.0.0
         gen.addLoad32(Register.R0, ARP_SOURCE_IP_ADDRESS_OFFSET);
         maybeSetupCounter(gen, Counter.DROPPED_ARP_REPLY_SPA_NO_HOST);
         gen.addJumpIfR0Equals(IPV4_ANY_HOST_ADDRESS, mCountAndDropLabel);
 
-        // Pass if unicast reply.
+        // Pass if non-broadcast reply.
         gen.addLoadImmediate(Register.R0, ETH_DEST_ADDR_OFFSET);
         maybeSetupCounter(gen, Counter.PASSED_ARP_UNICAST_REPLY);
         gen.addJumpIfBytesNotEqual(Register.R0, ETHER_BROADCAST, mCountAndPassLabel);
 
-        // Either a unicast request, a unicast reply, or a broadcast reply.
+        // Either a request, or a broadcast reply.
         gen.defineLabel(checkTargetIPv4);
         if (mIPv4Address == null) {
             // When there is no IPv4 address, drop GARP replies (b/29404209).
@@ -1447,12 +1522,12 @@ public class ApfFilter implements AndroidPacketFilter {
             // Check it's UDP.
             gen.addLoad8(Register.R0, IPV4_PROTOCOL_OFFSET);
             gen.addJumpIfR0NotEquals(IPPROTO_UDP, skipDhcpv4Filter);
-            // Check it's not a fragment. This matches the BPF filter installed by the DHCP client.
+            // Check it's not a fragment or is the initial fragment.
             gen.addLoad16(Register.R0, IPV4_FRAGMENT_OFFSET_OFFSET);
             gen.addJumpIfR0AnyBitsSet(IPV4_FRAGMENT_OFFSET_MASK, skipDhcpv4Filter);
             // Check it's addressed to DHCP client port.
             gen.addLoadFromMemory(Register.R1, gen.IPV4_HEADER_SIZE_MEMORY_SLOT);
-            gen.addLoad16Indexed(Register.R0, UDP_DESTINATION_PORT_OFFSET);
+            gen.addLoad16Indexed(Register.R0, TCP_UDP_DESTINATION_PORT_OFFSET);
             gen.addJumpIfR0NotEquals(DHCP_CLIENT_PORT, skipDhcpv4Filter);
             // Check it's DHCP to our MAC address.
             gen.addLoadImmediate(Register.R0, DHCP_CLIENT_MAC_OFFSET);
@@ -1480,13 +1555,18 @@ public class ApfFilter implements AndroidPacketFilter {
                 int broadcastAddr = ipv4BroadcastAddress(mIPv4Address, mIPv4PrefixLength);
                 gen.addJumpIfR0Equals(broadcastAddr, mCountAndDropLabel);
             }
+        }
 
-            // If any TCP keepalive filter matches, drop
-            generateV4KeepaliveFilters(gen);
+        // If any TCP keepalive filter matches, drop
+        generateV4KeepaliveFilters(gen);
 
-            // If any NAT-T keepalive filter matches, drop
-            generateV4NattKeepaliveFilters(gen);
+        // If any NAT-T keepalive filter matches, drop
+        generateV4NattKeepaliveFilters(gen);
 
+        // If TCP unicast on port 7, drop
+        generateV4TcpPort7FilterLocked(gen);
+
+        if (mMulticastFilter) {
             // Otherwise, this is an IPv4 unicast, pass
             // If L2 broadcast packet, drop.
             // TODO: can we invert this condition to fall through to the common pass case below?
@@ -1495,9 +1575,6 @@ public class ApfFilter implements AndroidPacketFilter {
             gen.addJumpIfBytesNotEqual(Register.R0, ETHER_BROADCAST, mCountAndPassLabel);
             maybeSetupCounter(gen, Counter.DROPPED_IPV4_L2_BROADCAST);
             gen.addJump(mCountAndDropLabel);
-        } else {
-            generateV4KeepaliveFilters(gen);
-            generateV4NattKeepaliveFilters(gen);
         }
 
         // Otherwise, pass
@@ -1684,9 +1761,15 @@ public class ApfFilter implements AndroidPacketFilter {
         gen.addLoad16(Register.R0, ETH_ETHERTYPE_OFFSET);
         gen.addJumpIfR0NotEquals(ETH_P_IP, skipMdnsFilter);
 
+        // Check it's not a fragment.
+        gen.addLoad16(Register.R0, IPV4_FRAGMENT_OFFSET_OFFSET);
+        gen.addJumpIfR0AnyBitsSet(IPV4_FRAGMENT_MORE_FRAGS_MASK | IPV4_FRAGMENT_OFFSET_MASK,
+                skipMdnsFilter);
+
         // Checks it's UDP.
         gen.addLoad8(Register.R0, IPV4_PROTOCOL_OFFSET);
         gen.addJumpIfR0NotEquals(IPPROTO_UDP, skipMdnsFilter);
+
         // Set R1 to IPv4 header.
         gen.addLoadFromMemory(Register.R1, gen.IPV4_HEADER_SIZE_MEMORY_SLOT);
         gen.addJump(checkMdnsUdpPort);
@@ -1711,7 +1794,7 @@ public class ApfFilter implements AndroidPacketFilter {
 
         // Checks it's mDNS UDP port
         gen.defineLabel(checkMdnsUdpPort);
-        gen.addLoad16Indexed(Register.R0, UDP_DESTINATION_PORT_OFFSET);
+        gen.addLoad16Indexed(Register.R0, TCP_UDP_DESTINATION_PORT_OFFSET);
         gen.addJumpIfR0NotEquals(MDNS_PORT, skipMdnsFilter);
 
         gen.addLoad16Indexed(Register.R0, MDNS_QDCOUNT_OFFSET);
@@ -1746,6 +1829,37 @@ public class ApfFilter implements AndroidPacketFilter {
         gen.defineLabel(skipMdnsFilter);
     }
 
+    /**
+     * Generate filter code to drop IPv4 TCP packets on port 7.
+     *
+     * On entry we know it is IPv4 ethertype, but don't know anything else.
+     * R0/R1 have nothing useful in them, and can be clobbered.
+     */
+    @GuardedBy("this")
+    private void generateV4TcpPort7FilterLocked(ApfGenerator gen)
+            throws IllegalInstructionException {
+        final String skipPort7V4Filter = "skip_port7_v4_filter";
+
+        // Check it's TCP.
+        gen.addLoad8(Register.R0, IPV4_PROTOCOL_OFFSET);
+        gen.addJumpIfR0NotEquals(IPPROTO_TCP, skipPort7V4Filter);
+
+        // Check it's not a fragment or is the initial fragment.
+        gen.addLoad16(Register.R0, IPV4_FRAGMENT_OFFSET_OFFSET);
+        gen.addJumpIfR0AnyBitsSet(IPV4_FRAGMENT_OFFSET_MASK, skipPort7V4Filter);
+
+        // Check it's destination port 7.
+        gen.addLoadFromMemory(Register.R1, gen.IPV4_HEADER_SIZE_MEMORY_SLOT);
+        gen.addLoad16Indexed(Register.R0, TCP_UDP_DESTINATION_PORT_OFFSET);
+        gen.addJumpIfR0NotEquals(ECHO_PORT, skipPort7V4Filter);
+
+        // Drop it.
+        maybeSetupCounter(gen, Counter.DROPPED_IPV4_TCP_PORT7_UNICAST);
+        gen.addJump(mCountAndDropLabel);
+
+        // Skip label.
+        gen.defineLabel(skipPort7V4Filter);
+    }
 
     private void generateV6KeepaliveFilters(ApfGenerator gen) throws IllegalInstructionException {
         generateKeepaliveFilters(gen, TcpKeepaliveAckV6.class, IPPROTO_TCP, IPV6_NEXT_HEADER_OFFSET,
@@ -2052,7 +2166,7 @@ public class ApfFilter implements AndroidPacketFilter {
             mReceiveThread = null;
         }
         mRas.clear();
-        mContext.unregisterReceiver(mDeviceIdleReceiver);
+        mDependencies.removeBroadcastReceiver(mDeviceIdleReceiver);
     }
 
     public synchronized void setMulticastFilter(boolean isEnabled) {
@@ -2085,6 +2199,11 @@ public class ApfFilter implements AndroidPacketFilter {
         if (mInDozeMode == isEnabled) return;
         mInDozeMode = isEnabled;
         installNewProgramLocked();
+    }
+
+    @VisibleForTesting
+    public synchronized boolean isInDozeMode() {
+        return mInDozeMode;
     }
 
     /** Find the single IPv4 LinkAddress if there is one, otherwise return null. */
