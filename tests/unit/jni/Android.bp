@@ -37,6 +37,8 @@ cc_library_shared {
     ],
     static_libs: [
         "libapf",
+        "libapf_v5",
+        "libapfdisassembler",
         "libpcap",
     ],
     sdk_version: "30",

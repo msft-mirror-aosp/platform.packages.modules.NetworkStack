@@ -20,6 +20,7 @@ import com.android.internal.annotations.VisibleForTesting;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 
 /**
  * APF assembler/generator.  A tool for generating an APF program.
@@ -40,6 +41,8 @@ public class ApfGenerator {
     }
     private enum Opcodes {
         LABEL(-1),
+        PASS(0),   // Unconditionally pass packet, requires R=0, LEN=0, e.g. "pass"
+        DROP(0),   // Unconditionally drop packet, requires R=1, LEN=0, e.g. "drop"
         LDB(1),    // Load 1 byte from immediate offset, e.g. "ldb R0, [5]"
         LDH(2),    // Load 2 bytes from immediate offset, e.g. "ldh R0, [5]"
         LDW(3),    // Load 4 bytes from immediate offset, e.g. "ldw R0, [5]"
@@ -62,7 +65,13 @@ public class ApfGenerator {
         JNEBS(20), // Compare not equal byte sequence, e.g. "jnebs R0,5,label,0x1122334455"
         EXT(21),   // Followed by immediate indicating ExtendedOpcodes.
         LDDW(22),  // Load 4 bytes from data memory address (register + immediate): "lddw R0, [5]R1"
-        STDW(23);  // Store 4 bytes to data memory address (register + immediate): "stdw R0, [5]R1"
+        STDW(23),  // Store 4 bytes to data memory address (register + immediate): "stdw R0, [5]R1"
+        WRITE(24),  // Write 1, 2 or 4 bytes imm to the output buffer, e.g. "WRITE 5"
+        // Copy the data from input packet or APF data region to output buffer. Register bit is
+        // used to specify the source of data copy: R=0 means copy from packet, R=1 means copy
+        // from APF data region. The source offset is encoded in the first imm and the copy length
+        // is encoded in the second imm. "e.g. MEMCOPY(R=0), 5, 5"
+        MEMCOPY(25);
 
         final int value;
 
@@ -78,7 +87,18 @@ public class ApfGenerator {
         NOT(32),  // Not, e.g. "not R0"
         NEG(33),  // Negate, e.g. "neg R0"
         SWAP(34), // Swap, e.g. "swap R0,R1"
-        MOVE(35);  // Move, e.g. "move R0,R1"
+        MOVE(35),  // Move, e.g. "move R0,R1"
+        ALLOC(36), // Allocate buffer, "e.g. ALLOC R0"
+        TRANS(37), // Transmit buffer, "e.g. TRANS R0"
+        EWRITE1(38), // Write 1 byte from register to the output buffer, e.g. "EWRITE1 R0"
+        EWRITE2(39), // Write 2 bytes from register to the output buffer, e.g. "EWRITE2 R0"
+        EWRITE4(40), // Write 4 bytes from register to the output buffer, e.g. "EWRITE4 R0"
+        // Copy the data from input packet to output buffer. The source offset is encoded as [Rx
+        // + second imm]. The copy length is encoded in the third imm. "e.g. EPKTCOPY [R0 + 5], 5"
+        EPKTCOPY(41),
+        // Copy the data from APF data region to output buffer. The source offset is encoded as [Rx
+        // + second imm]. The copy length is encoded in the third imm. "e.g. EDATACOPY [R0 + 5], 5"
+        EDATACOPY(42);
 
         final int value;
 
@@ -96,13 +116,34 @@ public class ApfGenerator {
             this.value = value;
         }
     }
+
+    private static class Immediate {
+        public final boolean mSigned;
+        public final byte mImmSize;
+        public final int mValue;
+
+        Immediate(int value, boolean signed) {
+            this(value, signed, calculateImmSize(value, signed));
+        }
+
+        Immediate(int value, boolean signed, byte size) {
+            mValue = value;
+            mSigned = signed;
+            mImmSize = size;
+        }
+
+        @Override
+        public String toString() {
+            return "Immediate{" + "mSigned=" + mSigned + ", mImmSize=" + mImmSize + ", mValue="
+                    + mValue + '}';
+        }
+    }
+
     private class Instruction {
         private final byte mOpcode;   // A "Opcode" value.
         private final byte mRegister; // A "Register" value.
-        private boolean mHasImm;
-        private byte mImmSize;
-        private boolean mImmSigned;
-        private int mImm;
+        private final int mMaxSupportedImms;
+        public final List<Immediate> mImms = new ArrayList<>();
         // When mOpcode is a jump:
         private byte mTargetLabelSize;
         private String mTargetLabel;
@@ -114,27 +155,38 @@ public class ApfGenerator {
         int offset;
 
         Instruction(Opcodes opcode, Register register) {
-            mOpcode = (byte)opcode.value;
-            mRegister = (byte)register.value;
+            this(opcode, register, 1 /* maxSupportedImm */);
+        }
+
+        Instruction(Opcodes opcode, Register register, int maxSupportedImms) {
+            mOpcode = (byte) opcode.value;
+            mRegister = (byte) register.value;
+            mMaxSupportedImms = maxSupportedImms;
         }
 
         Instruction(Opcodes opcode) {
             this(opcode, Register.R0);
         }
 
-        void setImm(int imm, boolean signed) {
-            mHasImm = true;
-            mImm = imm;
-            mImmSigned = signed;
-            mImmSize = calculateImmSize(imm, signed);
+        void addUnsignedImm(int imm) {
+            addImm(new Immediate(imm, false));
         }
 
-        void setUnsignedImm(int imm) {
-            setImm(imm, false);
+        void addUnsignedImm(int imm, byte size) {
+            addImm(new Immediate(imm, false, size));
         }
 
-        void setSignedImm(int imm) {
-            setImm(imm, true);
+        void addSignedImm(int imm) {
+            addImm(new Immediate(imm, true));
+        }
+
+        void addImm(Immediate imm) {
+            if (mImms.size() == mMaxSupportedImms) {
+                throw new IllegalArgumentException(
+                        String.format("Opcode: %d only support at max: %d imms", mOpcode,
+                                mMaxSupportedImms));
+            }
+            mImms.add(imm);
         }
 
         void setLabel(String label) throws IllegalInstructionException {
@@ -168,11 +220,20 @@ public class ApfGenerator {
                 return 0;
             }
             int size = 1;
-            if (mHasImm) {
-                size += generatedImmSize();
+            byte maxImmSize = getMaxImmSize();
+            // For the copy opcode, the last imm is the length field is always 1 byte
+            if (isCopyOpCode()) {
+                if (mMaxSupportedImms != mImms.size()) {
+                    throw new IllegalStateException(
+                            "mImm size: " + mImms.size() + " doesn't match the mMaxSupportedImms: "
+                                    + mMaxSupportedImms);
+                }
+                size += (mImms.size() - 1) * maxImmSize + mImms.get(mImms.size() - 1).mImmSize;
+            } else {
+                size += mImms.size() * maxImmSize;
             }
             if (mTargetLabel != null) {
-                size += generatedImmSize();
+                size += maxImmSize;
             }
             if (mCompareBytes != null) {
                 size += mCompareBytes.length;
@@ -202,7 +263,7 @@ public class ApfGenerator {
          * Assemble value for instruction size field.
          */
         private byte generateImmSizeField() {
-            byte immSize = generatedImmSize();
+            byte immSize = getMaxImmSize();
             // Encode size field to fit in 2 bits: 0->0, 1->1, 2->2, 3->4.
             return immSize == 4 ? 3 : immSize;
         }
@@ -217,15 +278,15 @@ public class ApfGenerator {
 
         /**
          * Write {@code value} at offset {@code writingOffset} into {@code bytecode}.
-         * {@link generatedImmSize} bytes are written. {@code value} is truncated to
-         * {@code generatedImmSize} bytes. {@code value} is treated simply as a
+         * {@code immSize} bytes are written. {@code value} is truncated to
+         * {@code immSize} bytes. {@code value} is treated simply as a
          * 32-bit value, so unsigned values should be zero extended and the truncation
          * should simply throw away their zero-ed upper bits, and signed values should
          * be sign extended and the truncation should simply throw away their signed
          * upper bits.
          */
-        private int writeValue(int value, byte[] bytecode, int writingOffset) {
-            for (int i = generatedImmSize() - 1; i >= 0; i--) {
+        private int writeValue(int value, byte[] bytecode, int writingOffset, byte immSize) {
+            for (int i = immSize - 1; i >= 0; i--) {
                 bytecode[writingOffset++] = (byte)((value >> (i * 8)) & 255);
             }
             return writingOffset;
@@ -240,11 +301,29 @@ public class ApfGenerator {
             }
             int writingOffset = offset;
             bytecode[writingOffset++] = generateInstructionByte();
+            byte maxImmSize = getMaxImmSize();
             if (mTargetLabel != null) {
-                writingOffset = writeValue(calculateTargetLabelOffset(), bytecode, writingOffset);
+                writingOffset = writeValue(calculateTargetLabelOffset(), bytecode, writingOffset,
+                        maxImmSize);
             }
-            if (mHasImm) {
-                writingOffset = writeValue(mImm, bytecode, writingOffset);
+            // For the copy opcode, the last imm is the length field is always 1 byte
+            if (isCopyOpCode()) {
+                if (mMaxSupportedImms != mImms.size()) {
+                    throw new IllegalStateException(
+                            "mImm size: " + mImms.size() + " doesn't match the mMaxSupportedImms: "
+                                    + mMaxSupportedImms);
+                }
+                int i;
+                for (i = 0; i < mImms.size() - 1; ++i) {
+                    writingOffset = writeValue(mImms.get(i).mValue, bytecode, writingOffset,
+                            maxImmSize);
+                }
+                writingOffset = writeValue(mImms.get(i).mValue, bytecode, writingOffset,
+                        mImms.get(i).mImmSize);
+            } else {
+                for (Immediate imm : mImms) {
+                    writingOffset = writeValue(imm.mValue, bytecode, writingOffset, maxImmSize);
+                }
             }
             if (mCompareBytes != null) {
                 System.arraycopy(mCompareBytes, 0, bytecode, writingOffset, mCompareBytes.length);
@@ -256,16 +335,34 @@ public class ApfGenerator {
             }
         }
 
+        private boolean isCopyOpCode() {
+            if (mOpcode == Opcodes.MEMCOPY.value) {
+                return true;
+            }
+            if (mOpcode == Opcodes.EXT.value) {
+                int realOpcode = mImms.get(0).mValue;
+                if (realOpcode == ExtendedOpcodes.EPKTCOPY.value
+                        || realOpcode == ExtendedOpcodes.EDATACOPY.value) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         /**
-         * Calculate the size of either the immediate field or the target label field, if either is
-         * present. Most instructions have either an immediate or a target label field, but for the
+         * Calculate the size of either the immediate fields or the target label field, if either is
+         * present. Most instructions have either immediates or a target label field, but for the
          * instructions that have both, the size of the target label field must be the same as the
-         * size of the immediate field, because there is only one length field in the instruction
-         * byte, hence why this function simply takes the maximum of the two sizes, so neither is
+         * size of the immediate fields, because there is only one length field in the instruction
+         * byte, hence why this function simply takes the maximum of those sizes, so neither is
          * truncated.
          */
-        private byte generatedImmSize() {
-            return mImmSize > mTargetLabelSize ? mImmSize : mTargetLabelSize;
+        private byte getMaxImmSize() {
+            byte maxSize = mTargetLabelSize;
+            for (int i = 0; i < mImms.size(); ++i) {
+                maxSize = (byte) Math.max(maxSize, mImms.get(i).mImmSize);
+            }
+            return maxSize;
         }
 
         private int calculateTargetLabelOffset() throws IllegalInstructionException {
@@ -283,21 +380,6 @@ public class ApfGenerator {
             // Calculate distance from end of this instruction to instruction.offset.
             final int targetLabelOffset = targetLabelInstruction.offset - (offset + size());
             return targetLabelOffset;
-        }
-
-        private byte calculateImmSize(int imm, boolean signed) {
-            if (imm == 0) {
-                return 0;
-            }
-            if (signed && (imm >= -128 && imm <= 127) ||
-                    !signed && (imm >= 0 && imm <= 255)) {
-                return 1;
-            }
-            if (signed && (imm >= -32768 && imm <= 32767) ||
-                    !signed && (imm >= 0 && imm <= 65535)) {
-                return 2;
-            }
-            return 4;
         }
     }
 
@@ -356,7 +438,9 @@ public class ApfGenerator {
     public static final int LAST_PREFILLED_MEMORY_SLOT = FILTER_AGE_MEMORY_SLOT;
 
     // This version number syncs up with APF_VERSION in hardware/google/apf/apf_interpreter.h
-    private static final int MIN_APF_VERSION = 2;
+    public static final int MIN_APF_VERSION = 2;
+    public static final int MIN_APF_VERSION_IN_DEV = 5;
+
 
     private final ArrayList<Instruction> mInstructions = new ArrayList<Instruction>();
     private final HashMap<String, Instruction> mLabels = new HashMap<String, Instruction>();
@@ -434,7 +518,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addLoad8(Register register, int offset) {
         Instruction instruction = new Instruction(Opcodes.LDB, register);
-        instruction.setUnsignedImm(offset);
+        instruction.addUnsignedImm(offset);
         addInstruction(instruction);
         return this;
     }
@@ -445,7 +529,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addLoad16(Register register, int offset) {
         Instruction instruction = new Instruction(Opcodes.LDH, register);
-        instruction.setUnsignedImm(offset);
+        instruction.addUnsignedImm(offset);
         addInstruction(instruction);
         return this;
     }
@@ -456,7 +540,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addLoad32(Register register, int offset) {
         Instruction instruction = new Instruction(Opcodes.LDW, register);
-        instruction.setUnsignedImm(offset);
+        instruction.addUnsignedImm(offset);
         addInstruction(instruction);
         return this;
     }
@@ -468,7 +552,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addLoad8Indexed(Register register, int offset) {
         Instruction instruction = new Instruction(Opcodes.LDBX, register);
-        instruction.setUnsignedImm(offset);
+        instruction.addUnsignedImm(offset);
         addInstruction(instruction);
         return this;
     }
@@ -480,7 +564,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addLoad16Indexed(Register register, int offset) {
         Instruction instruction = new Instruction(Opcodes.LDHX, register);
-        instruction.setUnsignedImm(offset);
+        instruction.addUnsignedImm(offset);
         addInstruction(instruction);
         return this;
     }
@@ -492,7 +576,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addLoad32Indexed(Register register, int offset) {
         Instruction instruction = new Instruction(Opcodes.LDWX, register);
-        instruction.setUnsignedImm(offset);
+        instruction.addUnsignedImm(offset);
         addInstruction(instruction);
         return this;
     }
@@ -502,7 +586,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addAdd(int value) {
         Instruction instruction = new Instruction(Opcodes.ADD);
-        instruction.setSignedImm(value);
+        instruction.addUnsignedImm(value);
         addInstruction(instruction);
         return this;
     }
@@ -512,7 +596,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addMul(int value) {
         Instruction instruction = new Instruction(Opcodes.MUL);
-        instruction.setSignedImm(value);
+        instruction.addUnsignedImm(value);
         addInstruction(instruction);
         return this;
     }
@@ -522,7 +606,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addDiv(int value) {
         Instruction instruction = new Instruction(Opcodes.DIV);
-        instruction.setSignedImm(value);
+        instruction.addUnsignedImm(value);
         addInstruction(instruction);
         return this;
     }
@@ -532,7 +616,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addAnd(int value) {
         Instruction instruction = new Instruction(Opcodes.AND);
-        instruction.setUnsignedImm(value);
+        instruction.addUnsignedImm(value);
         addInstruction(instruction);
         return this;
     }
@@ -542,7 +626,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addOr(int value) {
         Instruction instruction = new Instruction(Opcodes.OR);
-        instruction.setUnsignedImm(value);
+        instruction.addUnsignedImm(value);
         addInstruction(instruction);
         return this;
     }
@@ -552,7 +636,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addLeftShift(int value) {
         Instruction instruction = new Instruction(Opcodes.SH);
-        instruction.setSignedImm(value);
+        instruction.addSignedImm(value);
         addInstruction(instruction);
         return this;
     }
@@ -563,7 +647,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addRightShift(int value) {
         Instruction instruction = new Instruction(Opcodes.SH);
-        instruction.setSignedImm(-value);
+        instruction.addSignedImm(-value);
         addInstruction(instruction);
         return this;
     }
@@ -630,7 +714,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addLoadImmediate(Register register, int value) {
         Instruction instruction = new Instruction(Opcodes.LI, register);
-        instruction.setSignedImm(value);
+        instruction.addSignedImm(value);
         addInstruction(instruction);
         return this;
     }
@@ -641,7 +725,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addJumpIfR0Equals(int value, String target) {
         Instruction instruction = new Instruction(Opcodes.JEQ);
-        instruction.setUnsignedImm(value);
+        instruction.addUnsignedImm(value);
         instruction.setTargetLabel(target);
         addInstruction(instruction);
         return this;
@@ -653,7 +737,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addJumpIfR0NotEquals(int value, String target) {
         Instruction instruction = new Instruction(Opcodes.JNE);
-        instruction.setUnsignedImm(value);
+        instruction.addUnsignedImm(value);
         instruction.setTargetLabel(target);
         addInstruction(instruction);
         return this;
@@ -665,7 +749,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addJumpIfR0GreaterThan(int value, String target) {
         Instruction instruction = new Instruction(Opcodes.JGT);
-        instruction.setUnsignedImm(value);
+        instruction.addUnsignedImm(value);
         instruction.setTargetLabel(target);
         addInstruction(instruction);
         return this;
@@ -677,7 +761,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addJumpIfR0LessThan(int value, String target) {
         Instruction instruction = new Instruction(Opcodes.JLT);
-        instruction.setUnsignedImm(value);
+        instruction.addUnsignedImm(value);
         instruction.setTargetLabel(target);
         addInstruction(instruction);
         return this;
@@ -689,7 +773,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addJumpIfR0AnyBitsSet(int value, String target) {
         Instruction instruction = new Instruction(Opcodes.JSET);
-        instruction.setUnsignedImm(value);
+        instruction.addUnsignedImm(value);
         instruction.setTargetLabel(target);
         addInstruction(instruction);
         return this;
@@ -760,7 +844,7 @@ public class ApfGenerator {
             throw new IllegalInstructionException("JNEBS fails with R1");
         }
         Instruction instruction = new Instruction(Opcodes.JNEBS, register);
-        instruction.setUnsignedImm(bytes.length);
+        instruction.addUnsignedImm(bytes.length);
         instruction.setTargetLabel(target);
         instruction.setCompareBytes(bytes);
         addInstruction(instruction);
@@ -777,7 +861,7 @@ public class ApfGenerator {
             throw new IllegalInstructionException("illegal memory slot number: " + slot);
         }
         Instruction instruction = new Instruction(Opcodes.EXT, register);
-        instruction.setUnsignedImm(ExtendedOpcodes.LDM.value + slot);
+        instruction.addUnsignedImm(ExtendedOpcodes.LDM.value + slot);
         addInstruction(instruction);
         return this;
     }
@@ -792,7 +876,7 @@ public class ApfGenerator {
             throw new IllegalInstructionException("illegal memory slot number: " + slot);
         }
         Instruction instruction = new Instruction(Opcodes.EXT, register);
-        instruction.setUnsignedImm(ExtendedOpcodes.STM.value + slot);
+        instruction.addUnsignedImm(ExtendedOpcodes.STM.value + slot);
         addInstruction(instruction);
         return this;
     }
@@ -802,7 +886,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addNot(Register register) {
         Instruction instruction = new Instruction(Opcodes.EXT, register);
-        instruction.setUnsignedImm(ExtendedOpcodes.NOT.value);
+        instruction.addUnsignedImm(ExtendedOpcodes.NOT.value);
         addInstruction(instruction);
         return this;
     }
@@ -812,7 +896,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addNeg(Register register) {
         Instruction instruction = new Instruction(Opcodes.EXT, register);
-        instruction.setUnsignedImm(ExtendedOpcodes.NEG.value);
+        instruction.addUnsignedImm(ExtendedOpcodes.NEG.value);
         addInstruction(instruction);
         return this;
     }
@@ -822,7 +906,7 @@ public class ApfGenerator {
      */
     public ApfGenerator addSwap() {
         Instruction instruction = new Instruction(Opcodes.EXT);
-        instruction.setUnsignedImm(ExtendedOpcodes.SWAP.value);
+        instruction.addUnsignedImm(ExtendedOpcodes.SWAP.value);
         addInstruction(instruction);
         return this;
     }
@@ -833,9 +917,215 @@ public class ApfGenerator {
      */
     public ApfGenerator addMove(Register register) {
         Instruction instruction = new Instruction(Opcodes.EXT, register);
-        instruction.setUnsignedImm(ExtendedOpcodes.MOVE.value);
+        instruction.addUnsignedImm(ExtendedOpcodes.MOVE.value);
         addInstruction(instruction);
         return this;
+    }
+
+    /**
+     * Add an instruction to the end of the program to let the program immediately return PASS.
+     */
+    public ApfGenerator addPass() throws IllegalInstructionException {
+        Instruction instruction = new Instruction(Opcodes.PASS, Register.R0);
+        addInstruction(instruction);
+        return this;
+    }
+
+    /**
+     * Add an instruction to the end of the program to let the program immediately return DROP.
+     */
+    public ApfGenerator addDrop() throws IllegalInstructionException {
+        requireApfVersion(MIN_APF_VERSION_IN_DEV);
+        Instruction instruction = new Instruction(Opcodes.DROP, Register.R1);
+        addInstruction(instruction);
+        return this;
+    }
+
+    /**
+     * Add an instruction to the end of the program to call the apf_allocate_buffer() function.
+     *
+     * @param register the register value contains the buffer size.
+     */
+    public ApfGenerator addAlloc(Register register) throws IllegalInstructionException {
+        requireApfVersion(5);
+        Instruction instruction = new Instruction(Opcodes.EXT, register);
+        instruction.addUnsignedImm(ExtendedOpcodes.ALLOC.value);
+        addInstruction(instruction);
+        return this;
+    }
+
+    /**
+     * Add an instruction to the end of the program to call the apf_transmit_buffer() function.
+     *
+     * @param register the register value contains the packet type.
+     */
+    public ApfGenerator addTrans(Register register) throws IllegalInstructionException {
+        requireApfVersion(5);
+        Instruction instruction = new Instruction(Opcodes.EXT, register);
+        instruction.addUnsignedImm(ExtendedOpcodes.TRANS.value);
+        addInstruction(instruction);
+        return this;
+    }
+
+    /**
+     * Add an instruction to the end of the program to write 1, 2 or 4 bytes value to output buffer.
+     *
+     * @param value the value to write
+     * @param size the size of the value
+     * @return the ApfGenerator object
+     * @throws IllegalInstructionException throws when size is not 1, 2 or 4
+     */
+    public ApfGenerator addWrite(int value, byte size) throws IllegalInstructionException {
+        requireApfVersion(5);
+        if (!(size == 1 || size == 2 || size == 4)) {
+            throw new IllegalInstructionException("length field must be 1, 2 or 4");
+        }
+        if (size < calculateImmSize(value, false)) {
+            throw new IllegalInstructionException(
+                    String.format("the value %d is unfit into size: %d", value, size));
+        }
+        Instruction instruction = new Instruction(Opcodes.WRITE);
+        instruction.addUnsignedImm(value, size);
+        addInstruction(instruction);
+        return this;
+    }
+
+    /**
+     * Add an instruction to the end of the program to write 1, 2 or 4 bytes value from register
+     * to output buffer.
+     *
+     * @param register the register contains the value to be written
+     * @param size the size of the value
+     * @return the ApfGenerator object
+     * @throws IllegalInstructionException throws when size is not 1, 2 or 4
+     */
+    public ApfGenerator addWrite(Register register, byte size)
+            throws IllegalInstructionException {
+        requireApfVersion(5);
+        if (!(size == 1 || size == 2 || size == 4)) {
+            throw new IllegalInstructionException(
+                    "length field must be 1, 2 or 4");
+        }
+        Instruction instruction = new Instruction(Opcodes.EXT, register);
+        if (size == 1) {
+            instruction.addUnsignedImm(ExtendedOpcodes.EWRITE1.value);
+        } else if (size == 2) {
+            instruction.addUnsignedImm(ExtendedOpcodes.EWRITE2.value);
+        } else {
+            instruction.addUnsignedImm(ExtendedOpcodes.EWRITE4.value);
+        }
+        addInstruction(instruction);
+        return this;
+    }
+
+    /**
+     * Add an instruction to the end of the program to copy data from APF data region to output
+     * buffer.
+     *
+     * @param srcOffset the offset inside the APF data region for where to start copy
+     * @param length the length of bytes needed to be copied, only <= 255 bytes can be copied at
+     *               one time.
+     * @return the ApfGenerator object
+     * @throws IllegalInstructionException throws when imm size is incorrectly set.
+     */
+    public ApfGenerator addDataCopy(int srcOffset, int length)
+            throws IllegalInstructionException {
+        return addMemCopy(srcOffset, length, Register.R1);
+    }
+
+    /**
+     * Add an instruction to the end of the program to copy data from input packet to output buffer.
+     *
+     * @param srcOffset the offset inside the input packet for where to start copy
+     * @param length the length of bytes needed to be copied, only <= 255 bytes can be copied at
+     *               one time.
+     * @return the ApfGenerator object
+     * @throws IllegalInstructionException throws when imm size is incorrectly set.
+     */
+    public ApfGenerator addPacketCopy(int srcOffset, int length)
+            throws IllegalInstructionException {
+        return addMemCopy(srcOffset, length, Register.R0);
+    }
+
+    private ApfGenerator addMemCopy(int srcOffset, int length, Register register)
+            throws IllegalInstructionException {
+        requireApfVersion(5);
+        checkCopyLength(length);
+        checkCopyOffset(srcOffset);
+        Instruction instruction = new Instruction(Opcodes.MEMCOPY,
+                register, 2 /* maxSupportedImms */);
+        // if the offset == 0, it should still be encoded with 1 byte size.
+        if (srcOffset == 0) {
+            instruction.addUnsignedImm(srcOffset, (byte) 1 /* size */);
+        } else {
+            instruction.addUnsignedImm(srcOffset);
+        }
+        instruction.addUnsignedImm(length, (byte) 1 /* size */);
+        addInstruction(instruction);
+        return this;
+    }
+
+    /**
+     * Add an instruction to the end of the program to copy data from APF data region to output
+     * buffer.
+     *
+     * @param register the register that stored the base offset value.
+     * @param relativeOffset the offset inside the APF data region for where to start copy
+     * @param length the length of bytes needed to be copied, only <= 255 bytes can be copied at
+     *               one time.
+     * @return the ApfGenerator object
+     * @throws IllegalInstructionException throws when imm size is incorrectly set.
+     */
+    public ApfGenerator addDataCopy(Register register, int relativeOffset, int length)
+            throws IllegalInstructionException {
+        return addMemcopy(register, relativeOffset, length, ExtendedOpcodes.EDATACOPY.value);
+    }
+
+    /**
+     * Add an instruction to the end of the program to copy data from input packet to output buffer.
+     *
+     * @param register the register that stored the base offset value.
+     * @param relativeOffset the offset inside the input packet for where to start copy
+     * @param length the length of bytes needed to be copied, only <= 255 bytes can be copied at
+     *               one time.
+     * @return the ApfGenerator object
+     * @throws IllegalInstructionException throws when imm size is incorrectly set.
+     */
+    public ApfGenerator addPacketCopy(Register register, int relativeOffset, int length)
+            throws IllegalInstructionException {
+        return addMemcopy(register, relativeOffset, length, ExtendedOpcodes.EPKTCOPY.value);
+    }
+
+    private ApfGenerator addMemcopy(Register register, int relativeOffset, int length, int opcode)
+            throws IllegalInstructionException {
+        requireApfVersion(5);
+        checkCopyLength(length);
+        checkCopyOffset(relativeOffset);
+        Instruction instruction = new Instruction(Opcodes.EXT, register, 3 /* maxSupportedImms */);
+        instruction.addUnsignedImm(opcode);
+        // if the offset == 0, it should still be encoded with 1 byte size.
+        if (relativeOffset == 0) {
+            instruction.addUnsignedImm(relativeOffset, (byte) 1 /* size */);
+        } else {
+            instruction.addUnsignedImm(relativeOffset);
+        }
+        instruction.addUnsignedImm(length, (byte) 1 /* size */);
+        addInstruction(instruction);
+        return this;
+    }
+
+    private void checkCopyLength(int length) {
+        if (length < 0 || length > 255) {
+            throw new IllegalArgumentException(
+                    "copy length must between 0 to 255, length: " + length);
+        }
+    }
+
+    private void checkCopyOffset(int offset) {
+        if (offset < 0) {
+            throw new IllegalArgumentException(
+                    "offset must be non less than zero, offset: " + offset);
+        }
     }
 
     /**
@@ -848,7 +1138,7 @@ public class ApfGenerator {
             throws IllegalInstructionException {
         requireApfVersion(3);
         Instruction instruction = new Instruction(Opcodes.LDDW, destinationRegister);
-        instruction.setSignedImm(offset);
+        instruction.addSignedImm(offset);
         addInstruction(instruction);
         return this;
     }
@@ -863,7 +1153,7 @@ public class ApfGenerator {
             throws IllegalInstructionException {
         requireApfVersion(3);
         Instruction instruction = new Instruction(Opcodes.STDW, sourceRegister);
-        instruction.setSignedImm(offset);
+        instruction.addSignedImm(offset);
         addInstruction(instruction);
         return this;
     }
@@ -879,6 +1169,22 @@ public class ApfGenerator {
             offset += instruction.size();
         }
         return offset;
+    }
+
+    /**
+     * Calculate the size of the imm.
+     */
+    private static byte calculateImmSize(int imm, boolean signed) {
+        if (imm == 0) {
+            return 0;
+        }
+        if (signed && (imm >= -128 && imm <= 127) || !signed && (imm >= 0 && imm <= 255)) {
+            return 1;
+        }
+        if (signed && (imm >= -32768 && imm <= 32767) || !signed && (imm >= 0 && imm <= 65535)) {
+            return 2;
+        }
+        return 4;
     }
 
     /**

@@ -13,17 +13,23 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package android.net.apf;
 
-package com.android.networkstack.apishim.api33;
+import android.system.ErrnoException;
 
-import android.net.Ikev2VpnProfile;
+import java.io.IOException;
 
 /**
- * A shim for Ikev2VpnProfile
+ * The interface for TestAndroidPacketFilter
  */
-public class Ikev2VpnProfileShimImpl
-        extends com.android.networkstack.apishim.api30.Ikev2VpnProfileShimImpl {
-    protected Ikev2VpnProfileShimImpl(Ikev2VpnProfile profile) {
-        super(profile);
-    }
+public interface TestAndroidPacketFilter extends AndroidPacketFilter {
+    /**
+     * Pretend an RA packet has been received and show it to ApfFilter.
+     */
+    void pretendPacketReceived(byte[] packet) throws IOException, ErrnoException;
+
+    /**
+     * Generate and install a new filter program.
+     */
+    void installNewProgramLocked();
 }

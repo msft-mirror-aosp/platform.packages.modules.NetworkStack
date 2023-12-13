@@ -53,7 +53,6 @@ import static com.android.net.module.util.NetworkStackConstants.IPV4_CONFLICT_AN
 import static com.android.net.module.util.NetworkStackConstants.IPV4_CONFLICT_PROBE_NUM;
 import static com.android.net.module.util.SocketUtils.closeSocketQuietly;
 import static com.android.networkstack.util.NetworkStackUtils.DHCP_INIT_REBOOT_VERSION;
-import static com.android.networkstack.util.NetworkStackUtils.DHCP_IPV6_ONLY_PREFERRED_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.DHCP_IP_CONFLICT_DETECT_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.DHCP_RAPID_COMMIT_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.DHCP_SLOW_RETRANSMISSION_VERSION;
@@ -75,7 +74,6 @@ import android.net.metrics.IpConnectivityLog;
 import android.net.networkstack.aidl.dhcp.DhcpOption;
 import android.net.util.HostnameTransliterator;
 import android.net.util.SocketUtils;
-import android.os.Build;
 import android.os.Handler;
 import android.os.Message;
 import android.os.PowerManager;
@@ -105,7 +103,6 @@ import com.android.net.module.util.arp.ArpPacket;
 import com.android.networkstack.R;
 import com.android.networkstack.apishim.CaptivePortalDataShimImpl;
 import com.android.networkstack.apishim.SocketUtilsShimImpl;
-import com.android.networkstack.apishim.common.ShimUtils;
 import com.android.networkstack.metrics.IpProvisioningMetrics;
 import com.android.networkstack.util.NetworkStackUtils;
 
@@ -304,9 +301,7 @@ public class DhcpClient extends StateMachine {
         if (isCapportApiEnabled()) {
             params.write(DHCP_CAPTIVE_PORTAL);
         }
-        if (isIPv6OnlyPreferredModeEnabled()) {
-            params.write(DHCP_IPV6_ONLY_PREFERRED);
-        }
+        params.write(DHCP_IPV6_ONLY_PREFERRED);
         // Customized DHCP options to be put in PRL.
         for (DhcpOption option : mConfiguration.options) {
             if (option.value == null) params.write(option.type);
@@ -446,12 +441,18 @@ public class DhcpClient extends StateMachine {
 
         /**
          * Return whether a feature guarded by a feature flag is enabled.
-         * @see DeviceConfigUtils#isFeatureEnabled(Context, String, String)
+         * @see DeviceConfigUtils#isNetworkStackFeatureEnabled(Context, String)
          */
-        public boolean isFeatureEnabled(final Context context, final String name,
-                boolean defaultEnabled) {
-            return DeviceConfigUtils.isFeatureEnabled(context, NAMESPACE_CONNECTIVITY, name,
-                    defaultEnabled);
+        public boolean isFeatureEnabled(final Context context, final String name) {
+            return DeviceConfigUtils.isNetworkStackFeatureEnabled(context, name);
+        }
+
+        /**
+         * Check whether one specific feature is not disabled.
+         * @see DeviceConfigUtils#isNetworkStackFeatureNotChickenedOut(Context, String)
+         */
+        public boolean isFeatureNotChickenedOut(final Context context, final String name) {
+            return DeviceConfigUtils.isNetworkStackFeatureNotChickenedOut(context, name);
         }
 
         /**
@@ -543,43 +544,23 @@ public class DhcpClient extends StateMachine {
 
     /**
      * check whether or not to support caching the last lease info and INIT-REBOOT state.
-     *
-     * INIT-REBOOT state is supported on Android R by default if there is no experiment flag set to
-     * disable this feature explicitly, meanwhile turning this feature on/off by pushing experiment
-     * flag makes it possible to do A/B test and metrics collection on both of Android Q and R, but
-     * it's disabled on Android Q by default.
      */
     public boolean isDhcpLeaseCacheEnabled() {
-        final boolean defaultEnabled =
-                ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.Q);
-        return mDependencies.isFeatureEnabled(mContext, DHCP_INIT_REBOOT_VERSION, defaultEnabled);
+        return mDependencies.isFeatureNotChickenedOut(mContext, DHCP_INIT_REBOOT_VERSION);
     }
 
     /**
      * check whether or not to support DHCP Rapid Commit option.
      */
     public boolean isDhcpRapidCommitEnabled() {
-        return mDependencies.isFeatureEnabled(mContext, DHCP_RAPID_COMMIT_VERSION,
-                false /* defaultEnabled */);
+        return mDependencies.isFeatureEnabled(mContext, DHCP_RAPID_COMMIT_VERSION);
     }
 
     /**
      * check whether or not to support IP address conflict detection and DHCPDECLINE.
      */
     public boolean isDhcpIpConflictDetectEnabled() {
-        return mDependencies.isFeatureEnabled(mContext, DHCP_IP_CONFLICT_DETECT_VERSION,
-                false /* defaultEnabled */);
-    }
-
-    /**
-     * check whether or not to support IPv6-only preferred option.
-     *
-     * IPv6-only preferred option is enabled by default if there is no experiment flag set to
-     * disable this feature explicitly.
-     */
-    public boolean isIPv6OnlyPreferredModeEnabled() {
-        return mDependencies.isFeatureEnabled(mContext, DHCP_IPV6_ONLY_PREFERRED_VERSION,
-                true /* defaultEnabled */);
+        return mDependencies.isFeatureEnabled(mContext, DHCP_IP_CONFLICT_DETECT_VERSION);
     }
 
     /**
@@ -587,8 +568,7 @@ public class DhcpClient extends StateMachine {
      * suggested in RFC2131 section 4.4.5.
      */
     public boolean isSlowRetransmissionEnabled() {
-        return mDependencies.isFeatureEnabled(mContext, DHCP_SLOW_RETRANSMISSION_VERSION,
-                false /* defaultEnabled */);
+        return mDependencies.isFeatureEnabled(mContext, DHCP_SLOW_RETRANSMISSION_VERSION);
     }
 
     private void recordMetricEnabledFeatures() {
@@ -655,7 +635,6 @@ public class DhcpClient extends StateMachine {
     private byte[] getOptionsToSkip() {
         final ByteArrayOutputStream optionsToSkip = new ByteArrayOutputStream(2);
         if (!isCapportApiEnabled()) optionsToSkip.write(DHCP_CAPTIVE_PORTAL);
-        if (!isIPv6OnlyPreferredModeEnabled()) optionsToSkip.write(DHCP_IPV6_ONLY_PREFERRED);
         return optionsToSkip.toByteArray();
     }
 
@@ -1299,7 +1278,6 @@ public class DhcpClient extends StateMachine {
     }
 
     private boolean maybeTransitionToIpv6OnlyWaitState(@NonNull final DhcpPacket packet) {
-        if (!isIPv6OnlyPreferredModeEnabled()) return false;
         if (packet.getIpv6OnlyWaitTimeMillis() == DhcpPacket.V6ONLY_PREFERRED_ABSENCE) return false;
 
         mIpv6OnlyWaitTimeMs = packet.getIpv6OnlyWaitTimeMillis();
