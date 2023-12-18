@@ -89,7 +89,7 @@ java_defaults {
     sdk_version: module_34_version,
     libs: [
         "framework-configinfrastructure",
-        "framework-connectivity",
+        "framework-connectivity.stubs.module_lib",
         "framework-connectivity-t",
         "framework-statsd",
         "framework-wifi",
@@ -193,7 +193,6 @@ java_library {
         "framework-connectivity",
         "framework-connectivity-t.stubs.module_lib",
         "framework-tethering",
-        "android.net.ipsec.ike.stubs.module_lib",
     ],
     sdk_version: "module_33",
     visibility: ["//visibility:private"],
@@ -215,7 +214,6 @@ java_library {
         "framework-connectivity",
         "framework-connectivity-t.stubs.module_lib",
         "framework-tethering",
-        "android.net.ipsec.ike.stubs.module_lib"
     ],
     sdk_version: module_34_version,
     visibility: ["//visibility:private"],
@@ -307,13 +305,13 @@ java_defaults {
     name: "NetworkStackAndroidLibraryDefaults",
     srcs: [
         ":framework-networkstack-shared-srcs",
-        ":services-connectivity-shared-srcs",
     ],
     libs: ["unsupportedappusage"],
     static_libs: [
         "androidx.annotation_annotation",
         "modules-utils-build_system",
         "modules-utils-preconditions",
+        "modules-utils-shell-command-handler",
         "modules-utils-statemachine",
         "netd_aidl_interface-lateststable-java",
         "networkstack-client",
@@ -322,9 +320,9 @@ java_defaults {
         "datastallprotosnano",
         "statsprotos",
         "captiveportal-lib",
-        "net-utils-device-common",
         "net-utils-device-common-ip",
         "net-utils-device-common-netlink",
+        "net-utils-device-common-struct",
     ],
 }
 
@@ -340,7 +338,9 @@ android_library {
         "src/**/*.java",
         ":statslog-networkstack-java-gen-current"
     ],
-    static_libs: ["NetworkStackApiCurrentShims"],
+    static_libs: [
+        "NetworkStackApiCurrentShims",
+    ],
     manifest: "AndroidManifestBase.xml",
     visibility: [
         "//frameworks/base/tests/net/integration",
@@ -358,7 +358,9 @@ android_library {
         "src/**/*.java",
         ":statslog-networkstack-java-gen-stable",
     ],
-    static_libs: ["NetworkStackApiStableShims"],
+    static_libs: [
+        "NetworkStackApiStableShims",
+    ],
     manifest: "AndroidManifestBase.xml",
     visibility: [
         "//frameworks/base/packages/Connectivity/tests/integration",
@@ -386,10 +388,14 @@ java_library {
         "modules-utils-build",
         "net-utils-framework-common",
         "networkstack-client",
+        "net-utils-device-common",
     ],
     // If this library is ever used outside of tests, it should not use "Dhcp*Packet", and specify
     // its contents explicitly.
-    visibility: ["//packages/modules/Connectivity/tests/cts/net"],
+    visibility: [
+        "//packages/modules/Connectivity/Tethering/tests/integration",
+        "//packages/modules/Connectivity/tests/cts/net",
+    ],
 }
 
 java_genrule {
@@ -505,6 +511,9 @@ cc_library_shared {
     name: "libnetworkstackutilsjni",
     srcs: [
         "jni/network_stack_utils_jni.cpp"
+    ],
+    header_libs: [
+        "bpf_headers",
     ],
     sdk_version: "30",
     min_sdk_version: "30",
