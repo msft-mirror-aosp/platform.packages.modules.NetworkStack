@@ -20,6 +20,7 @@ import static android.net.dhcp.DhcpPacket.DHCP_BROADCAST_ADDRESS;
 import static android.net.dhcp.DhcpPacket.DHCP_CAPTIVE_PORTAL;
 import static android.net.dhcp.DhcpPacket.DHCP_DNS_SERVER;
 import static android.net.dhcp.DhcpPacket.DHCP_DOMAIN_NAME;
+import static android.net.dhcp.DhcpPacket.DHCP_DOMAIN_SEARCHLIST;
 import static android.net.dhcp.DhcpPacket.DHCP_IPV6_ONLY_PREFERRED;
 import static android.net.dhcp.DhcpPacket.DHCP_LEASE_TIME;
 import static android.net.dhcp.DhcpPacket.DHCP_MTU;
@@ -53,7 +54,6 @@ import static com.android.net.module.util.NetworkStackConstants.IPV4_CONFLICT_AN
 import static com.android.net.module.util.NetworkStackConstants.IPV4_CONFLICT_PROBE_NUM;
 import static com.android.net.module.util.SocketUtils.closeSocketQuietly;
 import static com.android.networkstack.util.NetworkStackUtils.DHCP_INIT_REBOOT_VERSION;
-import static com.android.networkstack.util.NetworkStackUtils.DHCP_IPV6_ONLY_PREFERRED_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.DHCP_IP_CONFLICT_DETECT_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.DHCP_RAPID_COMMIT_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.DHCP_SLOW_RETRANSMISSION_VERSION;
@@ -295,19 +295,28 @@ public class DhcpClient extends StateMachine {
     @NonNull
     private byte[] getRequestedParams() {
         // Set an initial size large enough for all optional parameters that we might request.
-        final int numOptionalParams = 2;
+        // mCreatorId + the size is changed
+        final int numOptionalParams;
+        if (mConfiguration.isWifiManagedProfile) {
+            numOptionalParams = 3 + mConfiguration.options.size();
+        } else {
+            numOptionalParams = 2 + mConfiguration.options.size();
+        }
+
         final ByteArrayOutputStream params =
                 new ByteArrayOutputStream(DEFAULT_REQUESTED_PARAMS.length + numOptionalParams);
         params.write(DEFAULT_REQUESTED_PARAMS, 0, DEFAULT_REQUESTED_PARAMS.length);
         if (isCapportApiEnabled()) {
             params.write(DHCP_CAPTIVE_PORTAL);
         }
-        if (isIPv6OnlyPreferredModeEnabled()) {
-            params.write(DHCP_IPV6_ONLY_PREFERRED);
-        }
+        params.write(DHCP_IPV6_ONLY_PREFERRED);
         // Customized DHCP options to be put in PRL.
         for (DhcpOption option : mConfiguration.options) {
             if (option.value == null) params.write(option.type);
+        }
+        // Check if the target network is managed by user.
+        if (mConfiguration.isWifiManagedProfile) {
+            params.write(DHCP_DOMAIN_SEARCHLIST);
         }
         return params.toByteArray();
     }
@@ -567,16 +576,6 @@ public class DhcpClient extends StateMachine {
     }
 
     /**
-     * check whether or not to support IPv6-only preferred option.
-     *
-     * IPv6-only preferred option is enabled by default if there is no experiment flag set to
-     * disable this feature explicitly.
-     */
-    public boolean isIPv6OnlyPreferredModeEnabled() {
-        return mDependencies.isFeatureNotChickenedOut(mContext, DHCP_IPV6_ONLY_PREFERRED_VERSION);
-    }
-
-    /**
      * Check whether to adopt slow DHCPREQUEST retransmission approach in Renewing/Rebinding state
      * suggested in RFC2131 section 4.4.5.
      */
@@ -648,7 +647,9 @@ public class DhcpClient extends StateMachine {
     private byte[] getOptionsToSkip() {
         final ByteArrayOutputStream optionsToSkip = new ByteArrayOutputStream(2);
         if (!isCapportApiEnabled()) optionsToSkip.write(DHCP_CAPTIVE_PORTAL);
-        if (!isIPv6OnlyPreferredModeEnabled()) optionsToSkip.write(DHCP_IPV6_ONLY_PREFERRED);
+        if (!mConfiguration.isWifiManagedProfile) {
+            optionsToSkip.write(DHCP_DOMAIN_SEARCHLIST);
+        }
         return optionsToSkip.toByteArray();
     }
 
@@ -1006,12 +1007,15 @@ public class DhcpClient extends StateMachine {
         public final boolean isPreconnectionEnabled;
         @NonNull
         public final List<DhcpOption> options;
+        public final boolean isWifiManagedProfile;
 
         public Configuration(@Nullable final String l2Key, final boolean isPreconnectionEnabled,
-                @NonNull final List<DhcpOption> options) {
+                @NonNull final List<DhcpOption> options,
+                final boolean isWifiManagedProfile) {
             this.l2Key = l2Key;
             this.isPreconnectionEnabled = isPreconnectionEnabled;
             this.options = options;
+            this.isWifiManagedProfile = isWifiManagedProfile;
         }
     }
 
@@ -1292,7 +1296,6 @@ public class DhcpClient extends StateMachine {
     }
 
     private boolean maybeTransitionToIpv6OnlyWaitState(@NonNull final DhcpPacket packet) {
-        if (!isIPv6OnlyPreferredModeEnabled()) return false;
         if (packet.getIpv6OnlyWaitTimeMillis() == DhcpPacket.V6ONLY_PREFERRED_ABSENCE) return false;
 
         mIpv6OnlyWaitTimeMs = packet.getIpv6OnlyWaitTimeMillis();

@@ -32,6 +32,7 @@ import static android.net.INetworkMonitor.NETWORK_VALIDATION_RESULT_VALID;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED;
+import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VCN_MANAGED;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_OEM_PAID;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_TRUSTED;
@@ -62,6 +63,7 @@ import static com.android.networkstack.util.NetworkStackUtils.CAPTIVE_PORTAL_OTH
 import static com.android.networkstack.util.NetworkStackUtils.CAPTIVE_PORTAL_USE_HTTPS;
 import static com.android.networkstack.util.NetworkStackUtils.DEFAULT_CAPTIVE_PORTAL_DNS_PROBE_TIMEOUT;
 import static com.android.networkstack.util.NetworkStackUtils.DNS_PROBE_PRIVATE_IP_NO_INTERNET_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.REEVALUATE_WHEN_RESUME;
 import static com.android.server.connectivity.NetworkMonitor.INITIAL_REEVALUATE_DELAY_MS;
 import static com.android.server.connectivity.NetworkMonitor.extractCharset;
 
@@ -319,9 +321,16 @@ public class NetworkMonitorTest {
         return lp;
     }
 
-    private static final NetworkCapabilities CELL_METERED_CAPABILITIES = new NetworkCapabilities()
+    private static final NetworkCapabilities CELL_SUSPENDED_METERED_CAPABILITIES =
+            new NetworkCapabilities()
             .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
             .addCapability(NET_CAPABILITY_INTERNET);
+
+    private static final NetworkCapabilities CELL_METERED_CAPABILITIES =
+            new NetworkCapabilities()
+            .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+            .addCapability(NET_CAPABILITY_INTERNET)
+            .addCapability(NET_CAPABILITY_NOT_SUSPENDED);
 
     private static final NetworkCapabilities CELL_NOT_METERED_CAPABILITIES =
             new NetworkCapabilities()
@@ -554,6 +563,7 @@ public class NetworkMonitorTest {
         initHttpConnection(mHttpConnection);
         initHttpConnection(mHttpsConnection);
         initHttpConnection(mFallbackConnection);
+        initHttpConnection(mOtherFallbackConnection);
 
         mFakeDns = new FakeDns();
         mFakeDns.startMocking();
@@ -2290,6 +2300,63 @@ public class NetworkMonitorTest {
     }
 
     @Test
+    public void testReevaluationInterval_networkResume() throws Exception {
+        // Setup nothing and expect validation to fail.
+        doReturn(true).when(mDependencies).isFeatureEnabled(any(), eq(REEVALUATE_WHEN_RESUME));
+        final NetworkMonitor nm = runFailedNetworkTest();
+        verifyNetworkTested(VALIDATION_RESULT_INVALID, 0 /* probesSucceeded */,
+                1 /* interactions */);
+        // Reevaluation delay doubled right after 1st validation failure.
+        assertEquals(INITIAL_REEVALUATE_DELAY_MS * 2, nm.getReevaluationDelayMs());
+
+        // Suspend the network. Verify re-evaluation count does not increase.
+        setNetworkCapabilities(nm, CELL_SUSPENDED_METERED_CAPABILITIES);
+        verifyNetworkTested(VALIDATION_RESULT_INVALID, 0 /* probesSucceeded */,
+                1 /* interactions */);
+        // Verify the count does not increase.
+        assertEquals(INITIAL_REEVALUATE_DELAY_MS * 2, nm.getReevaluationDelayMs());
+
+        // Resume the network, verify re-evaluation runs immediately and the timer resets.
+        setNetworkCapabilities(nm, CELL_METERED_CAPABILITIES);
+        // Wait for another idle to prevent from flaky because the handler fires another message
+        // to re-evaluate.
+        HandlerUtils.waitForIdle(nm.getHandler(), HANDLER_TIMEOUT_MS);
+        assertEquals(INITIAL_REEVALUATE_DELAY_MS, nm.getReevaluationDelayMs());
+        verifyNetworkTested(VALIDATION_RESULT_INVALID, 0 /* probesSucceeded */,
+                2 /* interactions */);
+    }
+
+    @Test
+    public void testReevaluationInterval_verifiedNetwork() throws Exception {
+        final WrappedNetworkMonitor wnm = prepareValidatedStateNetworkMonitor(
+                CELL_METERED_CAPABILITIES);
+        assertEquals(INITIAL_REEVALUATE_DELAY_MS, wnm.getReevaluationDelayMs());
+
+        // Suspend the network. Verify re-evaluation count does not increase.
+        setNetworkCapabilities(wnm, CELL_SUSPENDED_METERED_CAPABILITIES);
+        verifyNetworkTestedValidFromHttps(1 /* interactions */);
+        assertEquals(INITIAL_REEVALUATE_DELAY_MS, wnm.getReevaluationDelayMs());
+
+        // Resume the network. Verify re-evaluation count does not increase.
+        setNetworkCapabilities(wnm, CELL_METERED_CAPABILITIES);
+        verifyNetworkTestedValidFromHttps(1 /* interactions */);
+        assertEquals(INITIAL_REEVALUATE_DELAY_MS, wnm.getReevaluationDelayMs());
+    }
+
+    @Test
+    public void testTcpSocketTracker_setCapabilities() throws Exception {
+        setDataStallEvaluationType(DATA_STALL_EVALUATION_TYPE_TCP);
+        final InOrder inOrder = inOrder(mTst);
+        final WrappedNetworkMonitor wnm = prepareValidatedStateNetworkMonitor(
+                CELL_METERED_CAPABILITIES);
+        inOrder.verify(mTst).setNetworkCapabilities(eq(CELL_METERED_CAPABILITIES));
+
+        // Suspend the network. Verify the capabilities would be passed to TcpSocketTracker.
+        setNetworkCapabilities(wnm, CELL_SUSPENDED_METERED_CAPABILITIES);
+        inOrder.verify(mTst).setNetworkCapabilities(eq(CELL_SUSPENDED_METERED_CAPABILITIES));
+    }
+
+    @Test
     public void testDataStall_setOpportunisticMode() {
         setDataStallEvaluationType(DATA_STALL_EVALUATION_TYPE_TCP);
         WrappedNetworkMonitor wnm = makeCellNotMeteredNetworkMonitor();
@@ -2328,7 +2395,7 @@ public class NetworkMonitorTest {
     private void testDataStall_StallDnsSuspectedAndSendMetrics(int transport,
             NetworkCapabilities nc) throws Exception {
         // NM suspects data stall from DNS signal and sends data stall metrics.
-        final WrappedNetworkMonitor nm = prepareNetworkMonitorForVerifyDataStall(nc);
+        final WrappedNetworkMonitor nm = prepareValidatedStateNetworkMonitor(nc);
         makeDnsTimeoutEvent(nm, 5);
         // Trigger a dns signal to start evaluate data stall and upload metrics.
         nm.notifyDnsResponse(RETURN_CODE_DNS_TIMEOUT);
@@ -2338,7 +2405,7 @@ public class NetworkMonitorTest {
 
     @Test
     public void testDataStall_NoStallSuspectedAndSendMetrics() throws Exception {
-        final WrappedNetworkMonitor nm = prepareNetworkMonitorForVerifyDataStall(
+        final WrappedNetworkMonitor nm = prepareValidatedStateNetworkMonitor(
                 CELL_METERED_CAPABILITIES);
         // Setup no data stall dns signal.
         makeDnsTimeoutEvent(nm, 3);
@@ -2360,12 +2427,11 @@ public class NetworkMonitorTest {
 
     private void testDataStall_StallTcpSuspectedAndSendMetrics(NetworkCapabilities nc)
             throws Exception {
-        assumeTrue(ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.Q));
         setupTcpDataStall();
-        setTcpPollingInterval(0);
+        setTcpPollingInterval(1);
         // NM suspects data stall from TCP signal and sends data stall metrics.
         setDataStallEvaluationType(DATA_STALL_EVALUATION_TYPE_TCP);
-        final WrappedNetworkMonitor nm = prepareNetworkMonitorForVerifyDataStall(nc);
+        final WrappedNetworkMonitor nm = prepareValidatedStateNetworkMonitor(nc);
         // Trigger a tcp event immediately.
         nm.sendTcpPollingEvent();
         // Allow only one transport type in the context of this test for simplification.
@@ -2374,7 +2440,7 @@ public class NetworkMonitorTest {
         verifySendDataStallDetectionStats(nm, DATA_STALL_EVALUATION_TYPE_TCP, transports[0]);
     }
 
-    private WrappedNetworkMonitor prepareNetworkMonitorForVerifyDataStall(NetworkCapabilities nc)
+    private WrappedNetworkMonitor prepareValidatedStateNetworkMonitor(NetworkCapabilities nc)
             throws Exception {
         // Connect a VALID network to simulate the data stall detection because data stall
         // evaluation will only start from validated state.
@@ -2411,7 +2477,9 @@ public class NetworkMonitorTest {
                 ArgumentCaptor.forClass(CaptivePortalProbeResult.class);
         final ArgumentCaptor<DataStallDetectionStats> statsCaptor =
                 ArgumentCaptor.forClass(DataStallDetectionStats.class);
-        verify(mDependencies, timeout(HANDLER_TIMEOUT_MS).times(1))
+        // TCP data stall detection may be triggered more than once because NM stays in the
+        // ValidatedState and polling timer is set to 0.
+        verify(mDependencies, timeout(HANDLER_TIMEOUT_MS).atLeast(1))
                 .writeDataStallDetectionStats(statsCaptor.capture(), probeResultCaptor.capture());
         // Ensure probe will not stop due to rate-limiting mechanism.
         nm.setLastProbeTime(SystemClock.elapsedRealtime() - STALL_EXPECTED_LAST_PROBE_TIME_MS);
@@ -2566,26 +2634,22 @@ public class NetworkMonitorTest {
 
     @Test
     public void testCollectDataStallMetrics_TcpWithCellular() {
-        assumeTrue(ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.Q));
         testDataStallMetricsWithCellular(DATA_STALL_EVALUATION_TYPE_TCP);
     }
 
     @Test
     public void testCollectDataStallMetrics_TcpWithWiFi() {
-        assumeTrue(ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.Q));
         testDataStallMetricsWithWiFi(DATA_STALL_EVALUATION_TYPE_TCP);
     }
 
     @Test
     public void testCollectDataStallMetrics_TcpAndDnsWithWifi() {
-        assumeTrue(ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.Q));
         testDataStallMetricsWithWiFi(
                 DATA_STALL_EVALUATION_TYPE_TCP | DATA_STALL_EVALUATION_TYPE_DNS);
     }
 
     @Test
     public void testCollectDataStallMetrics_TcpAndDnsWithCellular() {
-        assumeTrue(ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.Q));
         testDataStallMetricsWithCellular(
                 DATA_STALL_EVALUATION_TYPE_TCP | DATA_STALL_EVALUATION_TYPE_DNS);
     }
@@ -2672,19 +2736,17 @@ public class NetworkMonitorTest {
 
     @Test
     public void testNotifyNetwork_WithforceReevaluation() throws Exception {
+        // Set validated result for both HTTP and HTTPS probes.
         setValidProbes();
         final NetworkMonitor nm = runValidatedNetworkTest();
         // Verify forceReevaluation will not reset the validation result but only probe result until
         // getting the validation result.
         setSslException(mHttpsConnection);
-        setStatus(mHttpConnection, 500);
-        setStatus(mFallbackConnection, 204);
         nm.forceReevaluation(Process.myUid());
         // Expect to send HTTP, HTTPs, FALLBACK and evaluation results.
-        verifyNetworkTested(VALIDATION_RESULT_INVALID,
-                NETWORK_VALIDATION_PROBE_DNS | NETWORK_VALIDATION_PROBE_FALLBACK,
+        verifyNetworkTested(NETWORK_VALIDATION_RESULT_PARTIAL,
+                NETWORK_VALIDATION_PROBE_DNS | NETWORK_VALIDATION_PROBE_HTTP,
                 1 /* interactions */);
-        HandlerUtils.waitForIdle(nm.getHandler(), HANDLER_TIMEOUT_MS);
     }
 
     @Test

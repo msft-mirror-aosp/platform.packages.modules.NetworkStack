@@ -34,7 +34,6 @@ import java.io.IOException;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
-import java.net.SocketException;
 import java.net.UnknownHostException;
 
 /**
@@ -152,21 +151,6 @@ public class NetworkStackUtils {
             new String [] {"https://www.google.com/generate_204"};
 
     /**
-     * @deprecated Considering boolean experiment flag is likely to cause misconfiguration
-     *             particularly when NetworkStack module rolls back to previous version. It's
-     *             much safer to determine whether or not to enable one specific experimental
-     *             feature by comparing flag version with module version.
-     */
-    @Deprecated
-    public static final String DHCP_INIT_REBOOT_ENABLED = "dhcp_init_reboot_enabled";
-
-    /**
-     * @deprecated See above explanation.
-     */
-    @Deprecated
-    public static final String DHCP_RAPID_COMMIT_ENABLED = "dhcp_rapid_commit_enabled";
-
-    /**
      * Minimum module version at which to enable the DHCP INIT-REBOOT state.
      */
     public static final String DHCP_INIT_REBOOT_VERSION = "dhcp_init_reboot_version";
@@ -180,12 +164,6 @@ public class NetworkStackUtils {
      * Minimum module version at which to enable the IP address conflict detection feature.
      */
     public static final String DHCP_IP_CONFLICT_DETECT_VERSION = "dhcp_ip_conflict_detect_version";
-
-    /**
-     * Minimum module version at which to enable the IPv6-Only preferred option.
-     */
-    public static final String DHCP_IPV6_ONLY_PREFERRED_VERSION =
-            "dhcp_ipv6_only_preferred_version";
 
     /**
      * Minimum module version at which to enable slow DHCP retransmission approach in renew/rebind
@@ -219,13 +197,6 @@ public class NetworkStackUtils {
     public static final String IPCLIENT_GRATUITOUS_NA_VERSION = "ipclient_gratuitous_na_version";
 
     /**
-     * Experiment flag to send multicast NS from the global IPv6 GUA to the solicited-node
-     * multicast address based on the default router's IPv6 link-local address, which helps
-     * flush the first-hop routers' neighbor cache entry for the global IPv6 GUA.
-     */
-    public static final String IPCLIENT_MULTICAST_NS_VERSION = "ipclient_multicast_ns_version";
-
-    /**
      * Experiment flag to enable sending Gratuitous APR and Gratuitous Neighbor Advertisement for
      * all assigned IPv4 and IPv6 GUAs after completing L2 roaming.
      */
@@ -239,13 +210,6 @@ public class NetworkStackUtils {
      */
     public static final String IPCLIENT_ACCEPT_IPV6_LINK_LOCAL_DNS_VERSION =
             "ipclient_accept_ipv6_link_local_dns_version";
-
-    /**
-     * Experiment flag to enable "mcast_resolicit" neighbor parameter in IpReachabilityMonitor,
-     * set it to 3 by default.
-     */
-    public static final String IP_REACHABILITY_MCAST_RESOLICIT_VERSION =
-            "ip_reachability_mcast_resolicit_version";
 
     /**
      * Experiment flag to attempt to ignore the on-link IPv6 DNS server which fails to respond to
@@ -271,6 +235,12 @@ public class NetworkStackUtils {
      * Experiment flag to enable new ra filter.
      */
     public static final String APF_NEW_RA_FILTER_VERSION = "apf_new_ra_filter_version";
+    /**
+     * Experiment flag to enable the feature of ignoring any individual RA section with lifetime
+     * below accept_ra_min_lft sysctl.
+     */
+    public static final String IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION =
+            "ipclient_ignore_low_ra_lifetime_version";
 
     /**** BEGIN Feature Kill Switch Flags ****/
 
@@ -282,17 +252,34 @@ public class NetworkStackUtils {
             "ipclient_parse_netlink_events_force_disable";
 
     /**
-     * Kill switch flag to disable the feature of ignoring any individual RA section with lifetime
-     * below accept_ra_min_lft sysctl.
+     * Kill switch flag to disable the feature of handle light doze mode in Apf.
      */
-    public static final String IPCLIENT_IGNORE_LOW_RA_LIFETIME_FORCE_DISABLE =
-            "ipclient_ignore_low_ra_lifetime_force_disable";
+    public static final String APF_HANDLE_LIGHT_DOZE_FORCE_DISABLE =
+            "apf_handle_light_doze_force_disable";
+
+    /**
+     * Kill switch flag to disable the feature of polling counters in Apf.
+     */
+    public static final String APF_POLLING_COUNTERS_FORCE_DISABLE =
+            "apf_polling_counters_force_disable";
 
     /**
      * Kill switch flag to disable the feature of skipping Tcp socket info polling when light
      * doze mode is enabled.
      */
     public static final String SKIP_TCP_POLL_IN_LIGHT_DOZE = "skip_tcp_poll_in_light_doze_mode";
+
+    /**
+     * Experiment flag to enable the feature of re-evaluate when network resumes.
+     */
+    public static final String REEVALUATE_WHEN_RESUME = "reevaluate_when_resume";
+
+    /**
+     * Kill switch flag to disable the feature of ignoring Tcp socket info for uids which
+     * networking are blocked.
+     */
+    public static final String IGNORE_TCP_INFO_FOR_BLOCKED_UIDS =
+            "ignore_tcp_info_for_blocked_uids";
 
     static {
         System.loadLibrary("networkstackutilsjni");
