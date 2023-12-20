@@ -197,13 +197,6 @@ public class NetworkStackUtils {
     public static final String IPCLIENT_GRATUITOUS_NA_VERSION = "ipclient_gratuitous_na_version";
 
     /**
-     * Experiment flag to send multicast NS from the global IPv6 GUA to the solicited-node
-     * multicast address based on the default router's IPv6 link-local address, which helps
-     * flush the first-hop routers' neighbor cache entry for the global IPv6 GUA.
-     */
-    public static final String IPCLIENT_MULTICAST_NS_VERSION = "ipclient_multicast_ns_version";
-
-    /**
      * Experiment flag to enable sending Gratuitous APR and Gratuitous Neighbor Advertisement for
      * all assigned IPv4 and IPv6 GUAs after completing L2 roaming.
      */
@@ -217,13 +210,6 @@ public class NetworkStackUtils {
      */
     public static final String IPCLIENT_ACCEPT_IPV6_LINK_LOCAL_DNS_VERSION =
             "ipclient_accept_ipv6_link_local_dns_version";
-
-    /**
-     * Experiment flag to enable "mcast_resolicit" neighbor parameter in IpReachabilityMonitor,
-     * set it to 3 by default.
-     */
-    public static final String IP_REACHABILITY_MCAST_RESOLICIT_VERSION =
-            "ip_reachability_mcast_resolicit_version";
 
     /**
      * Experiment flag to attempt to ignore the on-link IPv6 DNS server which fails to respond to
@@ -250,6 +236,10 @@ public class NetworkStackUtils {
      */
     public static final String APF_NEW_RA_FILTER_VERSION = "apf_new_ra_filter_version";
     /**
+     * Experiment flag to enable the feature of polling counters in Apf.
+     */
+    public static final String APF_POLLING_COUNTERS_VERSION = "apf_polling_counters_version";
+    /**
      * Experiment flag to enable the feature of ignoring any individual RA section with lifetime
      * below accept_ra_min_lft sysctl.
      */
@@ -270,12 +260,6 @@ public class NetworkStackUtils {
      */
     public static final String APF_HANDLE_LIGHT_DOZE_FORCE_DISABLE =
             "apf_handle_light_doze_force_disable";
-
-    /**
-     * Kill switch flag to disable the feature of polling counters in Apf.
-     */
-    public static final String APF_POLLING_COUNTERS_FORCE_DISABLE =
-            "apf_polling_counters_force_disable";
 
     /**
      * Kill switch flag to disable the feature of skipping Tcp socket info polling when light
