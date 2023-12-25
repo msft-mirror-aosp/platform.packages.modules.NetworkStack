@@ -32,7 +32,6 @@ import com.android.net.module.util.structs.IaPrefixOption;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -96,7 +95,6 @@ public class Dhcp6Packet {
      */
     public static final byte DHCP6_STATUS_CODE = 13;
     protected short mStatusCode;
-    protected String mStatusMsg;
 
     public static final short STATUS_SUCCESS           = 0;
     public static final short STATUS_UNSPEC_FAIL       = 1;
@@ -209,14 +207,21 @@ public class Dhcp6Packet {
         public final int t2;
         @NonNull
         public final List<IaPrefixOption> ipos;
+        public final short statusCode;
 
         public PrefixDelegation(int iaid, int t1, int t2,
-                @NonNull final List<IaPrefixOption> ipos) {
+                @NonNull final List<IaPrefixOption> ipos, short statusCode) {
             Objects.requireNonNull(ipos);
             this.iaid = iaid;
             this.t1 = t1;
             this.t2 = t2;
             this.ipos = ipos;
+            this.statusCode = statusCode;
+        }
+
+        public PrefixDelegation(int iaid, int t1, int t2,
+                @NonNull final List<IaPrefixOption> ipos) {
+            this(iaid, t1, t2, ipos, STATUS_SUCCESS /* statusCode */);
         }
 
         /**
@@ -251,6 +256,7 @@ public class Dhcp6Packet {
                 final int t1 = buffer.getInt();
                 final int t2 = buffer.getInt();
                 final List<IaPrefixOption> ipos = new ArrayList<IaPrefixOption>();
+                short statusCode = STATUS_SUCCESS;
                 while (buffer.remaining() > 0) {
                     final int original = buffer.position();
                     final short optionType = buffer.getShort();
@@ -262,12 +268,17 @@ public class Dhcp6Packet {
                             Log.d(TAG, "IA Prefix Option: " + ipo);
                             ipos.add(ipo);
                             break;
-                        // TODO: support DHCP6_STATUS_CODE option
+                        case DHCP6_STATUS_CODE:
+                            statusCode = buffer.getShort();
+                            if (optionLen > 2) {
+                                buffer.position(buffer.position() + (optionLen - 2));
+                            }
+                            break;
                         default:
                             skipOption(buffer, optionLen);
                     }
                 }
-                return new PrefixDelegation(iaid, t1, t2, ipos);
+                return new PrefixDelegation(iaid, t1, t2, ipos, statusCode);
             } catch (BufferUnderflowException e) {
                 throw new ParseException(e.getMessage());
             }
@@ -314,8 +325,8 @@ public class Dhcp6Packet {
 
         @Override
         public String toString() {
-            return "Prefix Delegation: iaid " + iaid + ", t1 " + t1 + ", t2 " + t2
-                    + ", IA prefix options: " + ipos;
+            return String.format("Prefix Delegation, iaid: %s, t1: %s, t2: %s, status code: %s,"
+                    + " IA prefix options: %s", iaid, t1, t2, statusCodeToString(statusCode), ipos);
         }
 
         /**
@@ -366,40 +377,32 @@ public class Dhcp6Packet {
         }
     }
 
+    private static String statusCodeToString(short statusCode) {
+        switch (statusCode) {
+            case STATUS_SUCCESS:
+                return "Success";
+            case STATUS_UNSPEC_FAIL:
+                return "UnspecFail";
+            case STATUS_NO_ADDR_AVAI:
+                return "NoAddrsAvail";
+            case STATUS_NO_BINDING:
+                return "NoBinding";
+            case STATUS_PREFIX_NOT_ONLINK:
+                return "NotOnLink";
+            case STATUS_USE_MULTICAST:
+                return "UseMulticast";
+            case STATUS_NO_PREFIX_AVAI:
+                return "NoPrefixAvail";
+            default:
+                return "Unknown";
+        }
+    }
+
     private static void skipOption(@NonNull final ByteBuffer packet, int optionLen)
             throws BufferUnderflowException {
         for (int i = 0; i < optionLen; i++) {
             packet.get();
         }
-    }
-
-    /**
-     * Reads a string of specified length from the buffer.
-     *
-     * TODO: move to a common place which can be shared with DhcpClient.
-     */
-    private static String readAsciiString(@NonNull final ByteBuffer buf, int byteCount,
-            boolean isNullOk) {
-        final byte[] bytes = new byte[byteCount];
-        buf.get(bytes);
-        return readAsciiString(bytes, isNullOk);
-    }
-
-    private static String readAsciiString(@NonNull final byte[] payload, boolean isNullOk) {
-        final byte[] bytes = payload;
-        int length = bytes.length;
-        if (!isNullOk) {
-            // Stop at the first null byte. This is because some DHCP options (e.g., the domain
-            // name) are passed to netd via FrameworkListener, which refuses arguments containing
-            // null bytes. We don't do this by default because vendorInfo is an opaque string which
-            // could in theory contain null bytes.
-            for (length = 0; length < bytes.length; length++) {
-                if (bytes[length] == 0) {
-                    break;
-                }
-            }
-        }
-        return new String(bytes, 0, length, StandardCharsets.US_ASCII);
     }
 
     /**
@@ -426,7 +429,6 @@ public class Dhcp6Packet {
         byte[] serverDuid = null;
         byte[] clientDuid = null;
         short statusCode = STATUS_SUCCESS;
-        String statusMsg = null;
         boolean rapidCommit = false;
         int solMaxRt = 0;
         PrefixDelegation pd = null;
@@ -487,7 +489,12 @@ public class Dhcp6Packet {
                     case DHCP6_STATUS_CODE:
                         expectedLen = optionLen;
                         statusCode = packet.getShort();
-                        statusMsg = readAsciiString(packet, expectedLen - 2, false /* isNullOk */);
+                        // Skip the status message (if any), which is a UTF-8 encoded text string
+                        // suitable for display to the end user, but is not useful for Dhcp6Client
+                        // to decide how to properly handle the status code.
+                        if (optionLen - 2 > 0) {
+                            packet.position(packet.position() + (optionLen - 2));
+                        }
                         break;
                     case DHCP6_SOL_MAX_RT:
                         expectedLen = 4;
@@ -545,7 +552,6 @@ public class Dhcp6Packet {
             throw new ParseException("Missing IA_PD option");
         }
         newPacket.mStatusCode = statusCode;
-        newPacket.mStatusMsg = statusMsg;
         newPacket.mRapidCommit = rapidCommit;
         newPacket.mSolMaxRt =
                 (solMaxRt >= 60 && solMaxRt <= 86400)
