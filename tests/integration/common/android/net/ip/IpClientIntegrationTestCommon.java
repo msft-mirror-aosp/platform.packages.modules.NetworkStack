@@ -27,7 +27,6 @@ import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_TRUSTED;
 import static android.net.NetworkCapabilities.TRANSPORT_TEST;
 import static android.net.RouteInfo.RTN_UNICAST;
-import static android.net.RouteInfo.RTN_UNREACHABLE;
 import static android.net.dhcp.DhcpClient.EXPIRED_LEASE;
 import static android.net.dhcp.DhcpPacket.DHCP_BOOTREQUEST;
 import static android.net.dhcp.DhcpPacket.DHCP_CLIENT;
@@ -190,6 +189,7 @@ import androidx.test.filters.SmallTest;
 
 import com.android.internal.util.HexDump;
 import com.android.internal.util.StateMachine;
+import com.android.modules.utils.build.SdkLevel;
 import com.android.net.module.util.ArrayTrackRecord;
 import com.android.net.module.util.InterfaceParams;
 import com.android.net.module.util.Ipv6Utils;
@@ -226,7 +226,6 @@ import com.android.testutils.DevSdkIgnoreRule;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreAfter;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo;
 import com.android.testutils.HandlerUtils;
-import com.android.testutils.SkipPresubmit;
 import com.android.testutils.TapPacketReader;
 import com.android.testutils.TestableNetworkAgent;
 import com.android.testutils.TestableNetworkCallback;
@@ -299,6 +298,10 @@ public abstract class IpClientIntegrationTestCommon {
 
     // TODO: move to NetlinkConstants, NetworkStackConstants, or OsConstants.
     private static final int IFA_F_STABLE_PRIVACY = 0x800;
+    // To fix below AndroidLint warning:
+    // [InlinedApi] Field requires version 3 of the U Extensions SDK (current min is 0).
+    private static final int RTN_UNREACHABLE =
+            SdkLevel.isAtLeastT() ? RouteInfo.RTN_UNREACHABLE : 7;
 
     protected static final long TEST_TIMEOUT_MS = 2_000L;
     private static final long TEST_WAIT_ENOBUFS_TIMEOUT_MS = 30_000L;
@@ -5105,9 +5108,8 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @SignatureRequiredTest(reason = "Need to mock the DHCP6 renew/rebind alarms")
-    @SkipPresubmit(reason = "Out of SLO flakiness")
     @Test
-    public void testDhcp6Pd_prefixMismatchOnRenew() throws Exception {
+    public void testDhcp6Pd_prefixMismatchOnRenew_newPrefix() throws Exception {
         prepareDhcp6PdRenewTest();
 
         final InOrder inOrder = inOrder(mAlarm);
@@ -5120,17 +5122,225 @@ public abstract class IpClientIntegrationTestCommon {
         Dhcp6Packet packet = getNextDhcp6Packet();
         assertTrue(packet instanceof Dhcp6RenewPacket);
 
-        // Reply with a different prefix with requested one, per RFC8415#section-18.2.10.1
+        // Reply with a new prefix apart of the requested one, per RFC8415#section-18.2.10.1
         // any new prefix should be added.
+        final IpPrefix prefix = new IpPrefix("2001:db8:1::/64");
+        final IpPrefix prefix1 = new IpPrefix("2001:db8:2::/64");
+        final IaPrefixOption ipo = buildIaPrefixOption(prefix, 4500 /* preferred */,
+                7200 /* valid */);
+        final IaPrefixOption ipo1 = buildIaPrefixOption(prefix1, 5000 /* preferred */,
+                6000 /* valid */);
+        final PrefixDelegation pd = new PrefixDelegation(packet.getIaId(), 3600 /* t1 */,
+                4500 /* t2 */, Arrays.asList(ipo, ipo1));
+        final ByteBuffer iapd = pd.build();
+        mPacketReader.sendResponse(buildDhcp6Reply(packet, iapd.array(), mClientMac,
+                (Inet6Address) mClientIpAddress, false /* rapidCommit */));
+        verify(mCb, never()).onProvisioningFailure(any());
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onLinkPropertiesChange(argThat(
+                x -> x.isIpv6Provisioned()
+                        && hasIpv6AddressPrefixedWith(x, prefix)
+                        && hasIpv6AddressPrefixedWith(x, prefix1)
+                        && hasRouteTo(x, "2001:db8:1::/64", RTN_UNREACHABLE)
+                        && hasRouteTo(x, "2001:db8:2::/64", RTN_UNREACHABLE)
+                        // IPv6 link-local, four global delegated IPv6 addresses
+                        && x.getLinkAddresses().size() == 5
+        ));
+    }
+
+    @SignatureRequiredTest(reason = "Need to mock the DHCP6 renew/rebind alarms")
+    @Test
+    public void testDhcp6Pd_prefixMismatchOnRenew_requestedPrefixAbsent() throws Exception {
+        prepareDhcp6PdRenewTest();
+
+        final InOrder inOrder = inOrder(mAlarm);
+        final Handler handler = mDependencies.mDhcp6Client.getHandler();
+        final OnAlarmListener renewAlarm = expectAlarmSet(inOrder, "RENEW", 3600, handler);
+
+        handler.post(() -> renewAlarm.onAlarm());
+        HandlerUtils.waitForIdle(handler, TEST_TIMEOUT_MS);
+
+        Dhcp6Packet packet = getNextDhcp6Packet();
+        assertTrue(packet instanceof Dhcp6RenewPacket);
+
+        // Reply with a new prefix but the requested one is absent, per RFC8415#section-18.2.10.1
+        // the new prefix should be added and the absent prefix will expire in nature.
+        final IpPrefix prefix = new IpPrefix("2001:db8:1::/64");
         final IpPrefix prefix1 = new IpPrefix("2001:db8:2::/64");
         final IaPrefixOption ipo = buildIaPrefixOption(prefix1, 4500 /* preferred */,
                 7200 /* valid */);
         final PrefixDelegation pd = new PrefixDelegation(packet.getIaId(), 3600 /* t1 */,
-                4500 /* t2 */, Collections.singletonList(ipo));
+                4500 /* t2 */, Arrays.asList(ipo));
         final ByteBuffer iapd = pd.build();
         mPacketReader.sendResponse(buildDhcp6Reply(packet, iapd.array(), mClientMac,
                 (Inet6Address) mClientIpAddress, false /* rapidCommit */));
-        verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningFailure(any());
+        verify(mCb, never()).onProvisioningFailure(any());
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onLinkPropertiesChange(argThat(
+                x -> x.isIpv6Provisioned()
+                        && hasIpv6AddressPrefixedWith(x, prefix)
+                        && hasIpv6AddressPrefixedWith(x, prefix1)
+                        && hasRouteTo(x, "2001:db8:1::/64", RTN_UNREACHABLE)
+                        && hasRouteTo(x, "2001:db8:2::/64", RTN_UNREACHABLE)
+                        // IPv6 link-local, four global delegated IPv6 addresses
+                        && x.getLinkAddresses().size() == 5
+        ));
+    }
+
+    @SignatureRequiredTest(reason = "Need to mock the DHCP6 renew/rebind alarms")
+    @Test
+    public void testDhcp6Pd_prefixMismatchOnRenew_allPrefixesAbsent() throws Exception {
+        prepareDhcp6PdRenewTest();
+
+        final InOrder inOrder = inOrder(mAlarm);
+        final Handler handler = mDependencies.mDhcp6Client.getHandler();
+        final OnAlarmListener renewAlarm = expectAlarmSet(inOrder, "RENEW", 3600, handler);
+
+        handler.post(() -> renewAlarm.onAlarm());
+        HandlerUtils.waitForIdle(handler, TEST_TIMEOUT_MS);
+
+        Dhcp6Packet packet = getNextDhcp6Packet();
+        assertTrue(packet instanceof Dhcp6RenewPacket);
+
+        clearInvocations(mCb);
+
+        // Reply with IA_PD but IA_Prefix is absent, client should still stay at the RenewState
+        // and restransmit the Renew message, that should not result in any LinkProperties update.
+        final PrefixDelegation pd = new PrefixDelegation(packet.getIaId(), 3600 /* t1 */,
+                4500 /* t2 */, new ArrayList<IaPrefixOption>(0));
+        final ByteBuffer iapd = pd.build();
+        mPacketReader.sendResponse(buildDhcp6Reply(packet, iapd.array(), mClientMac,
+                (Inet6Address) mClientIpAddress, false /* rapidCommit */));
+        verify(mCb, never()).onLinkPropertiesChange(any());
+    }
+
+    @SignatureRequiredTest(reason = "Need to mock the DHCP6 renew/rebind alarms")
+    @Test
+    public void testDhcp6Pd_renewInvalidPrefixes_zeroPreferredAndValidLifetime() throws Exception {
+        prepareDhcp6PdRenewTest();
+
+        final InOrder inOrder = inOrder(mAlarm);
+        final Handler handler = mDependencies.mDhcp6Client.getHandler();
+        final OnAlarmListener renewAlarm = expectAlarmSet(inOrder, "RENEW", 3600, handler);
+
+        handler.post(() -> renewAlarm.onAlarm());
+        HandlerUtils.waitForIdle(handler, TEST_TIMEOUT_MS);
+
+        Dhcp6Packet packet = getNextDhcp6Packet();
+        assertTrue(packet instanceof Dhcp6RenewPacket);
+
+        // Reply with the requested prefix with preferred/valid lifetime of 0.
+        final IpPrefix prefix = new IpPrefix("2001:db8:1::/64");
+        final IpPrefix prefix1 = new IpPrefix("2001:db8:2::/64");
+        final IaPrefixOption ipo = buildIaPrefixOption(prefix, 0 /* preferred */,
+                0 /* valid */);
+        final IaPrefixOption ipo1 = buildIaPrefixOption(prefix1, 5000 /* preferred */,
+                6000 /* valid */);
+        final PrefixDelegation pd = new PrefixDelegation(packet.getIaId(), 3600 /* t1 */,
+                4500 /* t2 */, Arrays.asList(ipo, ipo1));
+        final ByteBuffer iapd = pd.build();
+        mPacketReader.sendResponse(buildDhcp6Reply(packet, iapd.array(), mClientMac,
+                (Inet6Address) mClientIpAddress, false /* rapidCommit */));
+        verify(mCb, never()).onProvisioningFailure(any());
+        // IPv6 addresses derived from prefix with 0 preferred/valid lifetime should be deleted.
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onLinkPropertiesChange(argThat(
+                x -> x.isIpv6Provisioned()
+                        && !hasIpv6AddressPrefixedWith(x, prefix)
+                        && hasIpv6AddressPrefixedWith(x, prefix1)
+                        && !hasRouteTo(x, "2001:db8:1::/64", RTN_UNREACHABLE)
+                        && hasRouteTo(x, "2001:db8:2::/64", RTN_UNREACHABLE)
+                        // IPv6 link-local, two global delegated IPv6 addresses with prefix1
+                        && x.getLinkAddresses().size() == 3
+        ));
+
+        handler.post(() -> renewAlarm.onAlarm());
+        HandlerUtils.waitForIdle(handler, TEST_TIMEOUT_MS);
+
+        packet = getNextDhcp6Packet();
+        assertTrue(packet instanceof Dhcp6RenewPacket);
+        final List<IaPrefixOption> renewIpos = packet.getPrefixDelegation().ipos;
+        assertEquals(1, renewIpos.size()); // don't renew prefix 2001:db8:1::/64 with 0
+                                           // preferred/valid lifetime
+        assertEquals(prefix1, renewIpos.get(0).getIpPrefix());
+    }
+
+    @SignatureRequiredTest(reason = "Need to mock the DHCP6 renew/rebind alarms")
+    @Test
+    public void testDhcp6Pd_renewInvalidPrefixes_theSameT1T2ValidLifetime() throws Exception {
+        prepareDhcp6PdRenewTest();
+
+        final InOrder inOrder = inOrder(mAlarm);
+        final Handler handler = mDependencies.mDhcp6Client.getHandler();
+        final OnAlarmListener renewAlarm = expectAlarmSet(inOrder, "RENEW", 3600, handler);
+
+        handler.post(() -> renewAlarm.onAlarm());
+        HandlerUtils.waitForIdle(handler, TEST_TIMEOUT_MS);
+
+        Dhcp6Packet packet = getNextDhcp6Packet();
+        assertTrue(packet instanceof Dhcp6RenewPacket);
+
+        clearInvocations(mCb);
+
+        // Reply with the requested prefix with preferred/valid lifetime of 0.
+        final IpPrefix prefix = new IpPrefix("2001:db8:1::/64");
+        final IaPrefixOption ipo = buildIaPrefixOption(prefix, 3600 /* preferred */,
+                3600 /* valid */);
+        final PrefixDelegation pd = new PrefixDelegation(packet.getIaId(), 3600 /* t1 */,
+                3600 /* t2 */, Collections.singletonList(ipo));
+        final ByteBuffer iapd = pd.build();
+        mPacketReader.sendResponse(buildDhcp6Reply(packet, iapd.array(), mClientMac,
+                (Inet6Address) mClientIpAddress, false /* rapidCommit */));
+        // The prefix doesn't change only the lifetime is updated, therefore, LinkProperties update
+        // isn't expected.
+        verify(mCb, never()).onProvisioningFailure(any());
+        verify(mCb, never()).onLinkPropertiesChange(any());
+
+        handler.post(() -> renewAlarm.onAlarm());
+        HandlerUtils.waitForIdle(handler, TEST_TIMEOUT_MS);
+
+        packet = getNextDhcp6Packet(TEST_TIMEOUT_MS);
+        assertNull(packet);
+    }
+
+    @Test
+    public void testDhcp6Pd_multipleIaPrefixOptions() throws Exception {
+        final InOrder inOrder = inOrder(mCb);
+        final IpPrefix prefix1 = new IpPrefix("2001:db8:1::/64");
+        final IpPrefix prefix2 = new IpPrefix("2400:db8:100::/64");
+        final IpPrefix prefix3 = new IpPrefix("fd7c:9df8:7f39:dc89::/64");
+        final IaPrefixOption ipo1 = buildIaPrefixOption(prefix1, 4500 /* preferred */,
+                7200 /* valid */);
+        final IaPrefixOption ipo2 = buildIaPrefixOption(prefix2, 5600 /* preferred */,
+                6000 /* valid */);
+        final IaPrefixOption ipo3 = buildIaPrefixOption(prefix3, 7200 /* preferred */,
+                14400 /* valid */);
+        prepareDhcp6PdTest();
+        handleDhcp6Packets(Arrays.asList(ipo1, ipo2, ipo3), 3600 /* t1 */, 4500 /* t2 */,
+                true /* shouldReplyRapidCommit */);
+
+        final ArgumentCaptor<LinkProperties> captor = ArgumentCaptor.forClass(LinkProperties.class);
+        verifyWithTimeout(inOrder, mCb).onProvisioningSuccess(captor.capture());
+        LinkProperties lp = captor.getValue();
+
+        // Sometimes privacy address or route may appear later along with onLinkPropertiesChange
+        // callback, in this case we wait a bit longer to see all of these properties appeared and
+        // then verify if they are what we are looking for.
+        if (lp.getLinkAddresses().size() < 5 || lp.getRoutes().size() < 4) {
+            final CompletableFuture<LinkProperties> lpFuture = new CompletableFuture<>();
+            verifyWithTimeout(inOrder, mCb).onLinkPropertiesChange(argThat(x -> {
+                if (!x.isIpv6Provisioned()) return false;
+                if (x.getLinkAddresses().size() != 5) return false;
+                if (x.getRoutes().size() != 4) return false;
+                lpFuture.complete(x);
+                return true;
+            }));
+            lp = lpFuture.get(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        }
+        assertNotNull(lp);
+        assertTrue(hasIpv6AddressPrefixedWith(lp, prefix1));
+        assertTrue(hasIpv6AddressPrefixedWith(lp, prefix2));
+        assertFalse(hasIpv6AddressPrefixedWith(lp, prefix3));
+        assertTrue(hasRouteTo(lp, prefix1.toString(), RTN_UNREACHABLE));
+        assertTrue(hasRouteTo(lp, prefix2.toString(), RTN_UNREACHABLE));
+        assertFalse(hasRouteTo(lp, prefix3.toString(), RTN_UNREACHABLE));
     }
 
     @Test
