@@ -20,9 +20,7 @@ import static android.net.dhcp6.Dhcp6Packet.IAID;
 import static android.net.dhcp6.Dhcp6Packet.PrefixDelegation;
 import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
 import static android.system.OsConstants.AF_INET6;
-import static android.system.OsConstants.IFA_F_NODAD;
 import static android.system.OsConstants.IPPROTO_UDP;
-import static android.system.OsConstants.RT_SCOPE_UNIVERSE;
 import static android.system.OsConstants.SOCK_DGRAM;
 import static android.system.OsConstants.SOCK_NONBLOCK;
 
@@ -31,14 +29,8 @@ import static com.android.net.module.util.NetworkStackConstants.DHCP6_CLIENT_POR
 import static com.android.net.module.util.NetworkStackConstants.DHCP6_SERVER_PORT;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ANY;
 import static com.android.net.module.util.NetworkStackConstants.RFC7421_PREFIX_LENGTH;
-import static com.android.networkstack.apishim.ConstantsShim.IFA_F_MANAGETEMPADDR;
-import static com.android.networkstack.apishim.ConstantsShim.IFA_F_NOPREFIXROUTE;
-import static com.android.networkstack.util.NetworkStackUtils.createInet6AddressFromEui64;
-import static com.android.networkstack.util.NetworkStackUtils.macAddressToEui64;
 
 import android.content.Context;
-import android.net.IpPrefix;
-import android.net.LinkAddress;
 import android.net.ip.IpClient;
 import android.net.util.SocketUtils;
 import android.os.Handler;
@@ -58,16 +50,14 @@ import com.android.internal.util.WakeupMessage;
 import com.android.net.module.util.DeviceConfigUtils;
 import com.android.net.module.util.InterfaceParams;
 import com.android.net.module.util.PacketReader;
-import com.android.net.module.util.netlink.NetlinkUtils;
 import com.android.net.module.util.structs.IaPrefixOption;
 
 import java.io.FileDescriptor;
 import java.io.IOException;
-import java.net.Inet6Address;
 import java.net.SocketException;
 import java.nio.ByteBuffer;
-import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.Random;
 import java.util.function.IntSupplier;
 
@@ -95,8 +85,6 @@ public class Dhcp6Client extends StateMachine {
     // Message.arg1 arguments to CMD_DHCP6_RESULT notification
     public static final int DHCP6_PD_SUCCESS = 1;
     public static final int DHCP6_PD_PREFIX_EXPIRED = 2;
-    public static final int DHCP6_PD_PREFIX_CHANGED = 3;
-    public static final int DHCP6_PD_PREFIX_MSG_EXCHANGE_TERMINATED = 4;
 
     // Notification from DHCPv6 state machine before quitting
     public static final int CMD_ON_QUIT = PUBLIC_BASE + 4;
@@ -385,8 +373,9 @@ public class Dhcp6Client extends StateMachine {
     }
 
     private void scheduleLeaseTimers() {
-        // TODO: validate t1, t2, valid and preferred lifetimes before the timers are scheduled to
-        // prevent packet storms due to low timeouts.
+        // TODO: validate t1, t2, valid and preferred lifetimes before the timers are scheduled
+        // to prevent packet storms due to low timeouts. Preferred/valid lifetime of 0 should be
+        // excluded before scheduling the lease timer.
         int renewTimeout = mReply.t1;
         int rebindTimeout = mReply.t2;
         final long preferredTimeout = mReply.getMinimalPreferredLifetime();
@@ -435,8 +424,8 @@ public class Dhcp6Client extends StateMachine {
         Log.d(TAG, "Scheduling IA_PD expiry in " + expirationTimeout + "s");
     }
 
-    private void notifyPrefixDelegation(int result, @Nullable final PrefixDelegation pd) {
-        mController.sendMessage(CMD_DHCP6_RESULT, result, 0, pd);
+    private void notifyPrefixDelegation(int result, @Nullable final List<IaPrefixOption> ipos) {
+        mController.sendMessage(CMD_DHCP6_RESULT, result, 0, ipos);
     }
 
     private void clearDhcp6State() {
@@ -556,10 +545,15 @@ public class Dhcp6Client extends StateMachine {
             return sendSolicitPacket(transId, elapsedTimeMs, pd.build());
         }
 
-        // TODO: support multiple prefixes.
         @Override
         protected void receivePacket(Dhcp6Packet packet) {
             final PrefixDelegation pd = packet.mPrefixDelegation;
+            // Ignore any Advertise or Reply for Solicit(with Rapid Commit) with NoPrefixAvail
+            // status code, retransmit Solicit to see if any valid response from other Servers.
+            if (pd.statusCode == Dhcp6Packet.STATUS_NO_PREFIX_AVAI) {
+                Log.w(TAG, "Server responded to Solicit without available prefix, ignoring");
+                return;
+            }
             if (packet instanceof Dhcp6AdvertisePacket) {
                 Log.d(TAG, "Get prefix delegation option from Advertise: " + pd);
                 mAdvertise = pd;
@@ -620,7 +614,7 @@ public class Dhcp6Client extends StateMachine {
         public boolean processMessage(Message message) {
             switch (message.what) {
                 case CMD_DHCP6_PD_EXPIRE:
-                    notifyPrefixDelegation(DHCP6_PD_PREFIX_EXPIRED, null);
+                    notifyPrefixDelegation(DHCP6_PD_PREFIX_EXPIRED, mReply.getValidIaPrefixes());
                     transitionTo(mSolicitState);
                     return HANDLED;
                 default:
@@ -647,40 +641,9 @@ public class Dhcp6Client extends StateMachine {
         public void enter() {
             super.enter();
             scheduleLeaseTimers();
-
-            // TODO: roll back to SOLICIT state after a delay if something wrong happens
-            // instead of returning directly.
-            // The server may assign a prefix with length less than 64. To support automatic address
-            // generation (with IFA_F_MANAGETEMPADDR), we always set the address prefix length to
-            // 64, even if the delegated prefix length is less than 64. However, the unreachable
-            // route should still use the assigned prefix length.
-            final IpPrefix routePrefix = mReply.ipos.get(0).getIpPrefix();
-            final IpPrefix addressPrefix = new IpPrefix(routePrefix.getAddress(),
-                    RFC7421_PREFIX_LENGTH);
-            // Create EUI-64, so we don't need to remember IPv6 addresses that need to extend the
-            // lifetime every time it enters BoundState.
-            final Inet6Address address = createInet6AddressFromEui64(addressPrefix,
-                    macAddressToEui64(mIface.macAddr));
-            final int flags = IFA_F_NOPREFIXROUTE | IFA_F_MANAGETEMPADDR | IFA_F_NODAD;
-            final long now = SystemClock.elapsedRealtime();
-            final IaPrefixOption ipo = mReply.ipos.get(0);
-            final long deprecationTime = now + ipo.preferred;
-            final long expirationTime = now + ipo.valid;
-            final LinkAddress la = new LinkAddress(address, RFC7421_PREFIX_LENGTH, flags,
-                    RT_SCOPE_UNIVERSE /* scope */, deprecationTime, expirationTime);
-            if (!la.isGlobalPreferred()) {
-                Log.e(TAG, la + " is not a global IPv6 address, ignoring");
-                return;
-            }
-            if (!NetlinkUtils.sendRtmNewAddressRequest(mIface.index, address,
-                    (short) RFC7421_PREFIX_LENGTH,
-                    flags, (byte) RT_SCOPE_UNIVERSE /* scope */,
-                    ipo.preferred, ipo.valid)) {
-                Log.e(TAG, "Failed to set IPv6 address " + address.getHostAddress()
-                        + "%" + mIface.index);
-                return;
-            }
-            notifyPrefixDelegation(DHCP6_PD_SUCCESS, mReply);
+            // Pass valid delegated prefix(es) to IpClient for IPv6 address configuration and
+            // active prefix(es) maintenance.
+            notifyPrefixDelegation(DHCP6_PD_SUCCESS, mReply.getValidIaPrefixes());
         }
 
         @Override
@@ -696,6 +659,27 @@ public class Dhcp6Client extends StateMachine {
         }
     }
 
+
+    /**
+     *  Per RFC8415 section 18.2.10.1: Reply for renew or Rebind.
+     * - If all binding IA_PDs were renewed/rebound(so far we only support one IA_PD option per
+     *   interface), then move to BoundState to update the existing global IPv6 addresses lifetime
+     *   or install new global IPv6 address depending on the response from server.
+     * - Server may add new IA prefix option in Reply message(e.g. due to renumbering events), or
+     *   may choose to deprecate some prefixes if it cannot extend the lifetime by:
+     *     - either not including these requested IA prefixes in Reply message
+     *     - or setting the valid lifetime equals to T1/T2
+     *   That forces previous delegated prefixes to expire in a natural way, and client should
+     *   also stop trying to extend the lifetime for them. That being said, the global IPv6 address
+     *   lifetime won't be updated in BoundState if corresponding prefix doesn't appear in Reply
+     *   message, resulting in these global IPv6 addresses eventually and IpClient obtains these
+     *   updates via netlink message and remove the delegated prefix(es) from LinkProperties.
+     * - If some binding IA_PDs were absent in Reply message, client should still stay at RenewState
+     *   or RebindState and retransmit Renew/Rebind messages to see if it can get all later. So far
+     *   we only support one IA_PD option per interface, if the received Reply message doesn't take
+     *   any IA_Prefix option, then treat it as if IA_PD is absent, since there's no point in
+     *   returning BoundState again.
+     */
     abstract class ReacquireState extends MessageExchangeState {
         ReacquireState(final int irt, final int mrt) {
             super(0 /* delay */, irt, 0 /* MRC */, () -> mrt /* MRT */);
@@ -709,18 +693,11 @@ public class Dhcp6Client extends StateMachine {
         @Override
         protected void receivePacket(Dhcp6Packet packet) {
             if (!(packet instanceof Dhcp6ReplyPacket)) return;
+            // TODO: send a Request message to the server that responded if any of the IA_PDs in
+            // Reply message contain NoBinding status code.
             final PrefixDelegation pd = packet.mPrefixDelegation;
-            final IaPrefixOption request = mReply.ipos.get(0);
-            final IaPrefixOption response = pd.ipos.get(0);
-            if (!(Arrays.equals(request.prefix, response.prefix)
-                    && request.prefixLen == response.prefixLen)) {
-                Log.i(TAG, "Renewal prefix " + HexDump.toHexString(response.prefix)
-                        + " does not match current prefix "
-                        + HexDump.toHexString(request.prefix));
-                notifyPrefixDelegation(DHCP6_PD_PREFIX_CHANGED, null);
-                transitionTo(mSolicitState);
-                return;
-            }
+            Log.d(TAG, "Get prefix delegation option from Reply as response to Renew/Rebind " + pd);
+            if (pd.ipos.isEmpty()) return;
             mReply = pd;
             mServerDuid = packet.mServerDuid;
             // Once the delegated prefix gets refreshed successfully we have to extend the
@@ -759,7 +736,9 @@ public class Dhcp6Client extends StateMachine {
 
         @Override
         protected boolean sendPacket(int transId, long elapsedTimeMs) {
-            return sendRenewPacket(transId, elapsedTimeMs, mReply.build());
+            final List<IaPrefixOption> toBeRenewed = mReply.getRenewableIaPrefixes();
+            if (toBeRenewed.isEmpty()) return false;
+            return sendRenewPacket(transId, elapsedTimeMs, mReply.build(toBeRenewed));
         }
     }
 
@@ -775,7 +754,9 @@ public class Dhcp6Client extends StateMachine {
 
         @Override
         protected boolean sendPacket(int transId, long elapsedTimeMs) {
-            return sendRebindPacket(transId, elapsedTimeMs, mReply.build());
+            final List<IaPrefixOption> toBeRebound = mReply.getRenewableIaPrefixes();
+            if (toBeRebound.isEmpty()) return false;
+            return sendRebindPacket(transId, elapsedTimeMs, mReply.build(toBeRebound));
         }
     }
 

@@ -2302,8 +2302,7 @@ public class NetworkMonitorTest {
     @Test
     public void testReevaluationInterval_networkResume() throws Exception {
         // Setup nothing and expect validation to fail.
-        doReturn(true).when(mDependencies)
-                .isFeatureNotChickenedOut(any(), eq(REEVALUATE_WHEN_RESUME));
+        doReturn(true).when(mDependencies).isFeatureEnabled(any(), eq(REEVALUATE_WHEN_RESUME));
         final NetworkMonitor nm = runFailedNetworkTest();
         verifyNetworkTested(VALIDATION_RESULT_INVALID, 0 /* probesSucceeded */,
                 1 /* interactions */);
@@ -2342,6 +2341,19 @@ public class NetworkMonitorTest {
         setNetworkCapabilities(wnm, CELL_METERED_CAPABILITIES);
         verifyNetworkTestedValidFromHttps(1 /* interactions */);
         assertEquals(INITIAL_REEVALUATE_DELAY_MS, wnm.getReevaluationDelayMs());
+    }
+
+    @Test
+    public void testTcpSocketTracker_setCapabilities() throws Exception {
+        setDataStallEvaluationType(DATA_STALL_EVALUATION_TYPE_TCP);
+        final InOrder inOrder = inOrder(mTst);
+        final WrappedNetworkMonitor wnm = prepareValidatedStateNetworkMonitor(
+                CELL_METERED_CAPABILITIES);
+        inOrder.verify(mTst).setNetworkCapabilities(eq(CELL_METERED_CAPABILITIES));
+
+        // Suspend the network. Verify the capabilities would be passed to TcpSocketTracker.
+        setNetworkCapabilities(wnm, CELL_SUSPENDED_METERED_CAPABILITIES);
+        inOrder.verify(mTst).setNetworkCapabilities(eq(CELL_SUSPENDED_METERED_CAPABILITIES));
     }
 
     @Test
