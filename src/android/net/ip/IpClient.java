@@ -46,7 +46,7 @@ import static com.android.networkstack.apishim.ConstantsShim.IFA_F_MANAGETEMPADD
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_NOPREFIXROUTE;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_LIGHT_DOZE_FORCE_DISABLE;
 import static com.android.networkstack.util.NetworkStackUtils.APF_NEW_RA_FILTER_VERSION;
-import static com.android.networkstack.util.NetworkStackUtils.APF_POLLING_COUNTERS_FORCE_DISABLE;
+import static com.android.networkstack.util.NetworkStackUtils.APF_POLLING_COUNTERS_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_GRATUITOUS_NA_VERSION;
@@ -704,7 +704,7 @@ public class IpClient extends StateMachine {
     private final boolean mUseNewApfFilter;
     private final boolean mEnableIpClientIgnoreLowRaLifetime;
     private final boolean mApfShouldHandleLightDoze;
-    private final boolean mApfShouldPollingCounters;
+    private final boolean mEnableApfPollingCounters;
 
     private InterfaceParams mInterfaceParams;
 
@@ -937,13 +937,13 @@ public class IpClient extends StateMachine {
                 CONFIG_APF_COUNTER_POLLING_INTERVAL_SECS,
                 DEFAULT_APF_COUNTER_POLLING_INTERVAL_SECS) * DateUtils.SECOND_IN_MILLIS;
         mUseNewApfFilter = mDependencies.isFeatureEnabled(context, APF_NEW_RA_FILTER_VERSION);
+        mEnableApfPollingCounters = mDependencies.isFeatureEnabled(context,
+                APF_POLLING_COUNTERS_VERSION);
         mEnableIpClientIgnoreLowRaLifetime = mDependencies.isFeatureEnabled(context,
                 IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION);
         // Light doze mode status checking API is only available at T or later releases.
         mApfShouldHandleLightDoze = SdkLevel.isAtLeastT() && mDependencies.isFeatureNotChickenedOut(
                 mContext, APF_HANDLE_LIGHT_DOZE_FORCE_DISABLE);
-        mApfShouldPollingCounters = mDependencies.isFeatureNotChickenedOut(
-                mContext, APF_POLLING_COUNTERS_FORCE_DISABLE);
 
         IpClientLinkObserver.Configuration config = new IpClientLinkObserver.Configuration(
                 mMinRdnssLifetimeSec);
@@ -957,6 +957,23 @@ public class IpClient extends StateMachine {
                         sendMessage(EVENT_NETLINK_LINKPROPERTIES_CHANGED, linkState
                                 ? ARG_LINKPROP_CHANGED_LINKSTATE_UP
                                 : ARG_LINKPROP_CHANGED_LINKSTATE_DOWN);
+                    }
+
+                    @Override
+                    public void onIpv6AddressRemoved(final Inet6Address address) {
+                        // The update of Gratuitous NA target addresses set or unsolicited
+                        // multicast NS source addresses set should be only accessed from the
+                        // handler thread of IpClient StateMachine, keeping the behaviour
+                        // consistent with relying on the non-blocking NetworkObserver callbacks,
+                        // see {@link registerObserverForNonblockingCallback}. This can be done
+                        // by either sending a message to StateMachine or posting a handler.
+                        if (address.isLinkLocalAddress()) return;
+                        getHandler().post(() -> {
+                            mLog.log("Remove IPv6 GUA " + address
+                                    + " from both Gratuituous NA and Multicast NS sets");
+                            mGratuitousNaTargetAddresses.remove(address);
+                            mMulticastNsSourceAddresses.remove(address);
+                        });
                     }
 
                     @Override
@@ -1731,29 +1748,25 @@ public class IpClient extends StateMachine {
         // Check if any link address update from netlink.
         final CompareResult<LinkAddress> results =
                 LinkPropertiesUtils.compareAddresses(mLinkProperties, newLp);
-        for (LinkAddress la : results.added) {
-            if (mDhcp6PrefixDelegationEnabled && isIpv6StableDelegatedAddress(la)) {
-                final IpPrefix prefix = new IpPrefix(la.getAddress(), RFC7421_PREFIX_LENGTH);
-                mDelegatedPrefixes.add(prefix);
-            }
-        }
-
+        // In the case that there are multiple netlink update events about a global IPv6 address
+        // derived from the delegated prefix, a flag-only change event(e.g. due to the duplicate
+        // address detection) will cause an identical IP address to be put into both Added and
+        // Removed list based on the CompareResult implementation. To prevent a prefix from being
+        // mistakenly removed from the delegate prefix list, it is better to always check the
+        // removed list before checking the added list(e.g. anyway we can add the removed prefix
+        // back again).
         for (LinkAddress la : results.removed) {
             if (mDhcp6PrefixDelegationEnabled && isIpv6StableDelegatedAddress(la)) {
                 final IpPrefix prefix = new IpPrefix(la.getAddress(), RFC7421_PREFIX_LENGTH);
                 mDelegatedPrefixes.remove(prefix);
             }
-            // Also remove the global IPv6 address from the Gratuitous NA target addresses set or
-            // unsolicited multicast NS source addresses set if the address is present.
-            if (la.isIpv6()) {
-                final Inet6Address address = (Inet6Address) la.getAddress();
-                if (address.isLinkLocalAddress()) continue;
-                if (DBG) {
-                    mLog.log("Remove IPv6 GUA " + address
-                            + " from Gratuituous NA and Multicast NS sets");
-                }
-                mGratuitousNaTargetAddresses.remove(address);
-                mMulticastNsSourceAddresses.remove(address);
+            // TODO: remove onIpv6AddressRemoved callback.
+        }
+
+        for (LinkAddress la : results.added) {
+            if (mDhcp6PrefixDelegationEnabled && isIpv6StableDelegatedAddress(la)) {
+                final IpPrefix prefix = new IpPrefix(la.getAddress(), RFC7421_PREFIX_LENGTH);
+                mDelegatedPrefixes.add(prefix);
             }
         }
 
@@ -2932,7 +2945,7 @@ public class IpClient extends StateMachine {
             if (mApfFilter == null) {
                 mCallback.setFallbackMulticastFilter(mMulticastFiltering);
             }
-            if (mApfShouldPollingCounters) {
+            if (mEnableApfPollingCounters) {
                 sendMessageDelayed(CMD_UPDATE_APF_DATA_SNAPSHOT, mApfCounterPollingIntervalMs);
             }
 
