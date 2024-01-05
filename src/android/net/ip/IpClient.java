@@ -19,7 +19,6 @@ package android.net.ip;
 import static android.net.RouteInfo.RTN_UNICAST;
 import static android.net.RouteInfo.RTN_UNREACHABLE;
 import static android.net.dhcp.DhcpResultsParcelableUtil.toStableParcelable;
-import static android.net.dhcp6.Dhcp6Packet.PrefixDelegation;
 import static android.net.ip.IIpClient.PROV_IPV4_DISABLED;
 import static android.net.ip.IIpClient.PROV_IPV6_DISABLED;
 import static android.net.ip.IIpClient.PROV_IPV6_LINKLOCAL;
@@ -32,26 +31,35 @@ import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
 import static android.system.OsConstants.AF_PACKET;
 import static android.system.OsConstants.ETH_P_ARP;
 import static android.system.OsConstants.ETH_P_IPV6;
+import static android.system.OsConstants.IFA_F_NODAD;
+import static android.system.OsConstants.RT_SCOPE_UNIVERSE;
 import static android.system.OsConstants.SOCK_NONBLOCK;
 import static android.system.OsConstants.SOCK_RAW;
 
+import static com.android.net.module.util.LinkPropertiesUtils.CompareResult;
 import static com.android.net.module.util.NetworkStackConstants.ARP_REPLY;
 import static com.android.net.module.util.NetworkStackConstants.ETHER_BROADCAST;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ALL_ROUTERS_MULTICAST;
 import static com.android.net.module.util.NetworkStackConstants.RFC7421_PREFIX_LENGTH;
 import static com.android.net.module.util.NetworkStackConstants.VENDOR_SPECIFIC_IE_ID;
+import static com.android.networkstack.apishim.ConstantsShim.IFA_F_MANAGETEMPADDR;
+import static com.android.networkstack.apishim.ConstantsShim.IFA_F_NOPREFIXROUTE;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_LIGHT_DOZE_FORCE_DISABLE;
 import static com.android.networkstack.util.NetworkStackUtils.APF_NEW_RA_FILTER_VERSION;
-import static com.android.networkstack.util.NetworkStackUtils.APF_POLLING_COUNTERS_FORCE_DISABLE;
+import static com.android.networkstack.util.NetworkStackUtils.APF_POLLING_COUNTERS_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_GRATUITOUS_NA_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION;
-import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_MULTICAST_NS_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.createInet6AddressFromEui64;
+import static com.android.networkstack.util.NetworkStackUtils.macAddressToEui64;
 import static com.android.server.util.PermissionUtil.enforceNetworkStackCallingPermission;
 
 import android.annotation.SuppressLint;
+import android.app.admin.DevicePolicyManager;
+import android.content.ComponentName;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.content.res.Resources;
 import android.net.ConnectivityManager;
 import android.net.DhcpResults;
@@ -94,6 +102,7 @@ import android.os.Message;
 import android.os.RemoteException;
 import android.os.ServiceSpecificException;
 import android.os.SystemClock;
+import android.os.UserHandle;
 import android.stats.connectivity.DisconnectCode;
 import android.stats.connectivity.NetworkQuirkEvent;
 import android.stats.connectivity.NudEventType;
@@ -119,8 +128,10 @@ import com.android.internal.util.StateMachine;
 import com.android.internal.util.WakeupMessage;
 import com.android.modules.utils.build.SdkLevel;
 import com.android.net.module.util.CollectionUtils;
+import com.android.net.module.util.ConnectivityUtils;
 import com.android.net.module.util.DeviceConfigUtils;
 import com.android.net.module.util.InterfaceParams;
+import com.android.net.module.util.LinkPropertiesUtils;
 import com.android.net.module.util.SharedLog;
 import com.android.net.module.util.SocketUtils;
 import com.android.net.module.util.arp.ArpPacket;
@@ -150,7 +161,6 @@ import java.net.MalformedURLException;
 import java.net.SocketAddress;
 import java.net.SocketException;
 import java.net.URL;
-import java.net.UnknownHostException;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -537,6 +547,8 @@ public class IpClient extends StateMachine {
 
     // IpClient shares a handler with Dhcp6Client: commands must not overlap
     public static final int DHCP6CLIENT_CMD_BASE = 2000;
+    private static final int DHCPV6_PREFIX_DELEGATION_ADDRESS_FLAGS =
+            IFA_F_MANAGETEMPADDR | IFA_F_NOPREFIXROUTE | IFA_F_NODAD;
 
     // Settings and default values.
     private static final int MAX_LOG_RECORDS = 500;
@@ -673,6 +685,10 @@ public class IpClient extends StateMachine {
     private final Set<Inet6Address> mGratuitousNaTargetAddresses = new HashSet<>();
     // Set of IPv6 addresses from which multicast NS packets have been sent.
     private final Set<Inet6Address> mMulticastNsSourceAddresses = new HashSet<>();
+    // Set of delegated prefixes.
+    private final Set<IpPrefix> mDelegatedPrefixes = new HashSet<>();
+    @Nullable
+    private final DevicePolicyManager mDevicePolicyManager;
 
     // Ignore nonzero RDNSS option lifetimes below this value. 0 = disabled.
     private final int mMinRdnssLifetimeSec;
@@ -688,7 +704,7 @@ public class IpClient extends StateMachine {
     private final boolean mUseNewApfFilter;
     private final boolean mEnableIpClientIgnoreLowRaLifetime;
     private final boolean mApfShouldHandleLightDoze;
-    private final boolean mApfShouldPollingCounters;
+    private final boolean mEnableApfPollingCounters;
 
     private InterfaceParams mInterfaceParams;
 
@@ -706,6 +722,7 @@ public class IpClient extends StateMachine {
     private AndroidPacketFilter mApfFilter;
     private String mL2Key; // The L2 key for this network, for writing into the memory store
     private String mCluster; // The cluster for this network, for writing into the memory store
+    private int mCreatorUid; // Uid of app creating the wifi configuration
     private boolean mMulticastFiltering;
     private long mStartTimeMillis;
     private long mIPv6ProvisioningDtimGracePeriodMillis;
@@ -714,7 +731,6 @@ public class IpClient extends StateMachine {
     private Integer mDadTransmits = null;
     private int mMaxDtimMultiplier = DTIM_MULTIPLIER_RESET;
     private ApfCapabilities mCurrentApfCapabilities;
-    private PrefixDelegation mPrefixDelegation;
     private WakeupMessage mIpv6AutoconfTimeoutAlarm = null;
 
     /**
@@ -861,6 +877,14 @@ public class IpClient extends StateMachine {
             final File sysctl = new File(path);
             return sysctl.exists();
         }
+         /**
+         * Get the configuration from RRO to check whether or not to send domain search list
+         * option in DHCPDISCOVER/DHCPREQUEST message.
+         */
+        public boolean getSendDomainSearchListOption(final Context context) {
+            return context.getResources().getBoolean(R.bool.config_dhcp_client_domain_search_list);
+        }
+
     }
 
     public IpClient(Context context, String ifName, IIpClientCallbacks callback,
@@ -878,6 +902,8 @@ public class IpClient extends StateMachine {
 
         mTag = getName();
 
+        mDevicePolicyManager = (DevicePolicyManager)
+                context.getSystemService(Context.DEVICE_POLICY_SERVICE);
         mContext = context;
         mInterfaceName = ifName;
         mDependencies = deps;
@@ -911,13 +937,13 @@ public class IpClient extends StateMachine {
                 CONFIG_APF_COUNTER_POLLING_INTERVAL_SECS,
                 DEFAULT_APF_COUNTER_POLLING_INTERVAL_SECS) * DateUtils.SECOND_IN_MILLIS;
         mUseNewApfFilter = mDependencies.isFeatureEnabled(context, APF_NEW_RA_FILTER_VERSION);
+        mEnableApfPollingCounters = mDependencies.isFeatureEnabled(context,
+                APF_POLLING_COUNTERS_VERSION);
         mEnableIpClientIgnoreLowRaLifetime = mDependencies.isFeatureEnabled(context,
                 IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION);
         // Light doze mode status checking API is only available at T or later releases.
         mApfShouldHandleLightDoze = SdkLevel.isAtLeastT() && mDependencies.isFeatureNotChickenedOut(
                 mContext, APF_HANDLE_LIGHT_DOZE_FORCE_DISABLE);
-        mApfShouldPollingCounters = mDependencies.isFeatureNotChickenedOut(
-                mContext, APF_POLLING_COUNTERS_FORCE_DISABLE);
 
         IpClientLinkObserver.Configuration config = new IpClientLinkObserver.Configuration(
                 mMinRdnssLifetimeSec);
@@ -1118,10 +1144,6 @@ public class IpClient extends StateMachine {
         return mDependencies.isFeatureEnabled(mContext, IPCLIENT_GARP_NA_ROAMING_VERSION);
     }
 
-    private boolean isMulticastNsEnabled() {
-        return mDependencies.isFeatureNotChickenedOut(mContext, IPCLIENT_MULTICAST_NS_VERSION);
-    }
-
     @VisibleForTesting
     static MacAddress getInitialBssid(final Layer2Information layer2Info,
             final ScanResultInfo scanResultInfo, boolean isAtLeastS) {
@@ -1172,6 +1194,7 @@ public class IpClient extends StateMachine {
         mCurrentBssid = getInitialBssid(req.mLayer2Info, req.mScanResultInfo,
                 ShimUtils.isAtLeastS());
         mCurrentApfCapabilities = req.mApfCapabilities;
+        mCreatorUid = req.mCreatorUid;
         if (req.mLayer2Info != null) {
             mL2Key = req.mLayer2Info.mL2Key;
             mCluster = req.mLayer2Info.mCluster;
@@ -1442,7 +1465,6 @@ public class IpClient extends StateMachine {
         mDhcpResults = null;
         mTcpBufferSizes = "";
         mHttpProxy = null;
-        mPrefixDelegation = null;
 
         mLinkProperties = new LinkProperties();
         mLinkProperties.setInterfaceName(mInterfaceName);
@@ -1723,6 +1745,31 @@ public class IpClient extends StateMachine {
         addAllReachableDnsServers(newLp, netlinkLinkProperties.getDnsServers());
         mShim.setNat64Prefix(newLp, mShim.getNat64Prefix(netlinkLinkProperties));
 
+        // Check if any link address update from netlink.
+        final CompareResult<LinkAddress> results =
+                LinkPropertiesUtils.compareAddresses(mLinkProperties, newLp);
+        // In the case that there are multiple netlink update events about a global IPv6 address
+        // derived from the delegated prefix, a flag-only change event(e.g. due to the duplicate
+        // address detection) will cause an identical IP address to be put into both Added and
+        // Removed list based on the CompareResult implementation. To prevent a prefix from being
+        // mistakenly removed from the delegate prefix list, it is better to always check the
+        // removed list before checking the added list(e.g. anyway we can add the removed prefix
+        // back again).
+        for (LinkAddress la : results.removed) {
+            if (mDhcp6PrefixDelegationEnabled && isIpv6StableDelegatedAddress(la)) {
+                final IpPrefix prefix = new IpPrefix(la.getAddress(), RFC7421_PREFIX_LENGTH);
+                mDelegatedPrefixes.remove(prefix);
+            }
+            // TODO: remove onIpv6AddressRemoved callback.
+        }
+
+        for (LinkAddress la : results.added) {
+            if (mDhcp6PrefixDelegationEnabled && isIpv6StableDelegatedAddress(la)) {
+                final IpPrefix prefix = new IpPrefix(la.getAddress(), RFC7421_PREFIX_LENGTH);
+                mDelegatedPrefixes.add(prefix);
+            }
+        }
+
         // [3] Add in data from DHCPv4, if available.
         //
         // mDhcpResults is never shared with any other owner so we don't have
@@ -1734,7 +1781,12 @@ public class IpClient extends StateMachine {
                 newLp.addRoute(route);
             }
             addAllReachableDnsServers(newLp, mDhcpResults.dnsServers);
-            newLp.setDomains(mDhcpResults.domains);
+            if (mDhcpResults.dmnsrchList.size() == 0) {
+                newLp.setDomains(mDhcpResults.domains);
+            } else {
+                final String domainsString = mDhcpResults.appendDomainsSearchList();
+                newLp.setDomains(TextUtils.isEmpty(domainsString) ? null : domainsString);
+            }
 
             if (mDhcpResults.mtu != 0) {
                 newLp.setMtu(mDhcpResults.mtu);
@@ -1754,26 +1806,22 @@ public class IpClient extends StateMachine {
             // TODO: also look at the IPv6 RA (netlink) for captive portal URL
         }
 
-        // [4] Add in data from DHCPv6 Prefix Delegation, if available.
-        if (mPrefixDelegation != null) {
-            for (IaPrefixOption ipo : mPrefixDelegation.ipos) {
-                try {
-                    final IpPrefix destination =
-                            new IpPrefix(Inet6Address.getByAddress(ipo.prefix), ipo.prefixLen);
-                    // Direct-connected route to delegated prefix. Add RTN_UNREACHABLE to this route
-                    // based on the delegated prefix. To prevent the traffic loop between host and
-                    // upstream delegated router. Because we specify the IFA_F_NOPREFIXROUTE when
-                    // adding the IPv6 address, the kernel does not create a delegated prefix route,
-                    // as a result, the user space won't receive any RTM_NEWROUTE message about the
-                    // delegated prefix, we still need to install an unreachable route for the
-                    // delegated prefix manually in LinkProperties to notify the caller this update.
-                    // TODO: support RTN_BLACKHOLE in netd and use that on newer Android versions.
-                    final RouteInfo route = new RouteInfo(destination, null /* gateway */,
-                            mInterfaceName, RTN_UNREACHABLE);
-                    newLp.addRoute(route);
-                } catch (UnknownHostException e) {
-                    Log.wtf(mTag, "Invalid delegated prefix " + HexDump.toHexString(ipo.prefix));
-                }
+        // [4] Add route with delegated prefix according to the global address update.
+        if (mDhcp6PrefixDelegationEnabled) {
+            for (IpPrefix destination : mDelegatedPrefixes) {
+                // Direct-connected route to delegated prefix. Add RTN_UNREACHABLE to
+                // this route based on the delegated prefix. To prevent the traffic loop
+                // between host and upstream delegated router. Because we specify the
+                // IFA_F_NOPREFIXROUTE when adding the IPv6 address, the kernel does not
+                // create a delegated prefix route, as a result, the user space won't
+                // receive any RTM_NEWROUTE message about the delegated prefix, we still
+                // need to install an unreachable route for the delegated prefix manually
+                // in LinkProperties to notify the caller this update.
+                // TODO: support RTN_BLACKHOLE in netd and use that on newer Android
+                // versions.
+                final RouteInfo route = new RouteInfo(destination,
+                        null /* gateway */, mInterfaceName, RTN_UNREACHABLE);
+                newLp.addRoute(route);
             }
         }
 
@@ -1971,6 +2019,24 @@ public class IpClient extends StateMachine {
         }
     }
 
+    private static boolean hasFlag(@NonNull final LinkAddress la, final int flags) {
+        return (la.getFlags() & flags) == flags;
+
+    }
+
+    // Check whether a global IPv6 stable address is derived from DHCPv6 prefix delegation.
+    // Address derived from delegated prefix should be:
+    // - unicast global routable address
+    // - with prefix length of 64
+    // - has IFA_F_MANAGETEMPADDR, IFA_F_NOPREFIXROUTE and IFA_F_NODAD flags
+    private static boolean isIpv6StableDelegatedAddress(@NonNull final LinkAddress la) {
+        return la.isIpv6()
+                && !ConnectivityUtils.isIPv6ULA(la.getAddress())
+                && (la.getPrefixLength() == RFC7421_PREFIX_LENGTH)
+                && (la.getScope() == (byte) RT_SCOPE_UNIVERSE)
+                && hasFlag(la, DHCPV6_PREFIX_DELEGATION_ADDRESS_FLAGS);
+    }
+
     // Returns false if we have lost provisioning, true otherwise.
     private boolean handleLinkPropertiesUpdate(boolean sendCallbacks) {
         final LinkProperties newLp = assembleLinkProperties();
@@ -2012,9 +2078,7 @@ public class IpClient extends StateMachine {
         //
         // TODO: stop sending this multicast NS after deployment of RFC9131 in the field, leverage
         // the gratuitous NA to update the first-hop router's neighbor cache entry.
-        if (isMulticastNsEnabled()) {
-            maybeSendMulticastNSes(newLp);
-        }
+        maybeSendMulticastNSes(newLp);
 
         // Either success IPv4 or IPv6 provisioning triggers new LinkProperties update,
         // wait for the provisioning completion and record the latency.
@@ -2418,6 +2482,7 @@ public class IpClient extends StateMachine {
             mHasDisabledAcceptRaDefrtrOnProvLoss = false;
             mGratuitousNaTargetAddresses.clear();
             mMulticastNsSourceAddresses.clear();
+            mDelegatedPrefixes.clear();
 
             resetLinkProperties();
             if (mStartTimeMillis > 0) {
@@ -2593,8 +2658,92 @@ public class IpClient extends StateMachine {
         // registerForPreDhcpNotification is called later when processing the CMD_*_PRECONNECTION
         // messages.
         if (!isUsingPreconnection()) mDhcpClient.registerForPreDhcpNotification();
+        boolean isManagedWifiProfile = false;
+        if (mDependencies.getSendDomainSearchListOption(mContext)
+                && (mCreatorUid > 0) && (isDeviceOwnerNetwork(mCreatorUid)
+                || isProfileOwner(mCreatorUid))) {
+            isManagedWifiProfile = true;
+        }
         mDhcpClient.sendMessage(DhcpClient.CMD_START_DHCP, new DhcpClient.Configuration(mL2Key,
-                isUsingPreconnection(), options));
+                isUsingPreconnection(), options, isManagedWifiProfile));
+    }
+
+    private boolean hasPermission(String permissionName) {
+        return (mContext.checkCallingOrSelfPermission(permissionName)
+                == PackageManager.PERMISSION_GRANTED);
+    }
+
+    private boolean isDeviceOwnerNetwork(int creatorUid) {
+        if (mDevicePolicyManager == null) return false;
+        if (!hasPermission(android.Manifest.permission.MANAGE_USERS)) return false;
+        final ComponentName devicecmpName = mDevicePolicyManager.getDeviceOwnerComponentOnAnyUser();
+        if (devicecmpName == null) return false;
+        final String deviceOwnerPackageName = devicecmpName.getPackageName();
+        if (deviceOwnerPackageName == null) return false;
+
+        final String[] packages = mContext.getPackageManager().getPackagesForUid(creatorUid);
+
+        for (String pkg : packages) {
+            if (pkg.equals(deviceOwnerPackageName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @Nullable
+    private Context createPackageContextAsUser(int uid) {
+        Context userContext = null;
+        try {
+            userContext = mContext.createPackageContextAsUser(mContext.getPackageName(), 0,
+                    UserHandle.getUserHandleForUid(uid));
+        } catch (PackageManager.NameNotFoundException e) {
+            Log.e(TAG, "Unknown package name");
+            return null;
+        }
+        return userContext;
+    }
+
+    /**
+     * Returns the DevicePolicyManager from context
+     */
+    private DevicePolicyManager retrieveDevicePolicyManagerFromContext(Context context) {
+        DevicePolicyManager devicePolicyManager =
+                context.getSystemService(DevicePolicyManager.class);
+        if (devicePolicyManager == null
+                && context.getPackageManager().hasSystemFeature(
+                PackageManager.FEATURE_DEVICE_ADMIN)) {
+            Log.wtf(TAG, "Error retrieving DPM service");
+        }
+        return devicePolicyManager;
+    }
+
+    private DevicePolicyManager retrieveDevicePolicyManagerFromUserContext(int uid) {
+        Context userContext = createPackageContextAsUser(uid);
+        if (userContext == null) return null;
+        return retrieveDevicePolicyManagerFromContext(userContext);
+    }
+
+    /**
+     * Returns {@code true} if the calling {@code uid} is the profile owner
+     *
+     */
+
+    private boolean isProfileOwner(int uid) {
+        DevicePolicyManager devicePolicyManager = retrieveDevicePolicyManagerFromUserContext(uid);
+        if (devicePolicyManager == null) return false;
+        String[] packages = mContext.getPackageManager().getPackagesForUid(uid);
+        if (packages == null) {
+            Log.w(TAG, "isProfileOwner: could not find packages for uid="
+                    + uid);
+            return false;
+        }
+        for (String packageName : packages) {
+            if (devicePolicyManager.isProfileOwnerApp(packageName)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     class ClearingIpAddressesState extends State {
@@ -2796,7 +2945,7 @@ public class IpClient extends StateMachine {
             if (mApfFilter == null) {
                 mCallback.setFallbackMulticastFilter(mMulticastFiltering);
             }
-            if (mApfShouldPollingCounters) {
+            if (mEnableApfPollingCounters) {
                 sendMessageDelayed(CMD_UPDATE_APF_DATA_SNAPSHOT, mApfCounterPollingIntervalMs);
             }
 
@@ -2891,27 +3040,68 @@ public class IpClient extends StateMachine {
             }
         }
 
-        private void clearIpv6PrefixDelegationAddresses() {
-            if (mPrefixDelegation == null) {
-                Log.wtf(mTag, "PrefixDelegation shouldn't be null when DHCPv6 PD fails.");
-                return;
-            }
-            final IaPrefixOption ipo = mPrefixDelegation.ipos.get(0);
-            final IpPrefix prefix;
-            try {
-                prefix = new IpPrefix(Inet6Address.getByAddress(ipo.prefix), RFC7421_PREFIX_LENGTH);
-            } catch (UnknownHostException e) {
-                Log.wtf(TAG, "Invalid delegated prefix " + HexDump.toHexString(ipo.prefix));
-                return;
-            }
-
-            // Delete the global IPv6 address based on delegated prefix from interface.
+        private void deleteIpv6PrefixDelegationAddresses(final IpPrefix prefix) {
             for (LinkAddress la : mLinkProperties.getLinkAddresses()) {
                 final InetAddress address = la.getAddress();
                 if (prefix.contains(address)) {
-                    NetlinkUtils.sendRtmDelAddressRequest(mInterfaceParams.index,
-                            (Inet6Address) address, (short) la.getPrefixLength());
+                    if (!NetlinkUtils.sendRtmDelAddressRequest(mInterfaceParams.index,
+                            (Inet6Address) address, (short) la.getPrefixLength())) {
+                        Log.e(TAG, "Failed to delete IPv6 address " + address.getHostAddress());
+                    }
                 }
+            }
+        }
+
+        private void addInterfaceAddress(@NonNull final Inet6Address address,
+                @NonNull final IaPrefixOption ipo) {
+            final int flags = IFA_F_NOPREFIXROUTE | IFA_F_MANAGETEMPADDR | IFA_F_NODAD;
+            final long now = SystemClock.elapsedRealtime();
+            final long deprecationTime = now + ipo.preferred;
+            final long expirationTime = now + ipo.valid;
+            final LinkAddress la = new LinkAddress(address, RFC7421_PREFIX_LENGTH, flags,
+                    RT_SCOPE_UNIVERSE /* scope */, deprecationTime, expirationTime);
+            if (!la.isGlobalPreferred()) {
+                Log.w(TAG, la + " is not a global IPv6 address");
+                return;
+            }
+            if (!NetlinkUtils.sendRtmNewAddressRequest(mInterfaceParams.index, address,
+                    (short) RFC7421_PREFIX_LENGTH,
+                    flags, (byte) RT_SCOPE_UNIVERSE /* scope */,
+                    ipo.preferred, ipo.valid)) {
+                Log.e(TAG, "Failed to set IPv6 address on " + address.getHostAddress()
+                        + "%" + mInterfaceParams.index);
+            }
+        }
+
+        private void updateDelegatedAddresses(@NonNull final List<IaPrefixOption> valid) {
+            if (valid.isEmpty()) return;
+            for (IaPrefixOption ipo : valid) {
+                final IpPrefix prefix = ipo.getIpPrefix();
+                // The prefix with preferred/valid lifetime of 0 is considered as a valid prefix,
+                // it can be passed to IpClient from Dhcp6Client, however, client should stop using
+                // the global addresses derived from this prefix immediately.
+                if (ipo.withZeroLifetimes()) {
+                    Log.d(TAG, "Delete IPv6 address derived from prefix " + prefix
+                            + " with 0 preferred/valid lifetime");
+                    deleteIpv6PrefixDelegationAddresses(prefix);
+                }
+                // Otherwise, configure IPv6 addresses derived from the delegated prefix(es) on
+                // the interface. We've checked that delegated prefix is valid upon receiving the
+                // response from DHCPv6 server, and the server may assign a prefix with length less
+                // than 64. So for SLAAC use case we always set the prefix length to 64 even if the
+                // delegated prefix length is less than 64.
+                final Inet6Address address = createInet6AddressFromEui64(prefix,
+                        macAddressToEui64(mInterfaceParams.macAddr));
+                addInterfaceAddress(address, ipo);
+            }
+        }
+
+        private void removeExpiredDelegatedAddresses(@NonNull final List<IaPrefixOption> expired) {
+            if (expired.isEmpty()) return;
+            for (IaPrefixOption ipo : expired) {
+                final IpPrefix prefix = ipo.getIpPrefix();
+                Log.d(TAG, "Delete IPv6 address derived from expired prefix " + prefix);
+                deleteIpv6PrefixDelegationAddresses(prefix);
             }
         }
 
@@ -3109,15 +3299,14 @@ public class IpClient extends StateMachine {
                 case Dhcp6Client.CMD_DHCP6_RESULT:
                     switch(msg.arg1) {
                         case Dhcp6Client.DHCP6_PD_SUCCESS:
-                            mPrefixDelegation = (PrefixDelegation) msg.obj;
+                            final List<IaPrefixOption> toBeUpdated = (List<IaPrefixOption>) msg.obj;
+                            updateDelegatedAddresses(toBeUpdated);
                             handleLinkPropertiesUpdate(SEND_CALLBACKS);
                             break;
 
                         case Dhcp6Client.DHCP6_PD_PREFIX_EXPIRED:
-                        case Dhcp6Client.DHCP6_PD_PREFIX_CHANGED:
-                        case Dhcp6Client.DHCP6_PD_PREFIX_MSG_EXCHANGE_TERMINATED:
-                            clearIpv6PrefixDelegationAddresses();
-                            mPrefixDelegation = null;
+                            final List<IaPrefixOption> toBeRemoved = (List<IaPrefixOption>) msg.obj;
+                            removeExpiredDelegatedAddresses(toBeRemoved);
                             handleLinkPropertiesUpdate(SEND_CALLBACKS);
                             break;
 
