@@ -59,6 +59,16 @@ class ApfV5Test {
         assertFailsWith<IllegalInstructionException> { gen.addDataCopyFromR0LenR1() }
         assertFailsWith<IllegalInstructionException> { gen.addPacketCopyFromR0(10) }
         assertFailsWith<IllegalInstructionException> { gen.addDataCopyFromR0(10) }
+        assertFailsWith<IllegalInstructionException> {
+            gen.addJumpIfBytesAtR0Equal(byteArrayOf('A'.code.toByte()), ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalInstructionException> { gen.addJumpIfPktAtR0DoesNotContainDnsQ(
+                byteArrayOf(1, 'A'.code.toByte()), 0x0c, ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalInstructionException> { gen.addJumpIfPktAtR0ContainDnsQ(
+                byteArrayOf(1, 'A'.code.toByte()), 0x0c, ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalInstructionException> { gen.addJumpIfPktAtR0DoesNotContainDnsA(
+                byteArrayOf(1, 'A'.code.toByte()), ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalInstructionException> { gen.addJumpIfPktAtR0ContainDnsA(
+                byteArrayOf(1, 'A'.code.toByte()), ApfGenerator.DROP_LABEL) }
     }
 
     @Test
@@ -83,6 +93,78 @@ class ApfV5Test {
         assertFailsWith<IllegalArgumentException> { gen.addDataCopyFromR0(256) }
         assertFailsWith<IllegalArgumentException> { gen.addPacketCopyFromR0(-1) }
         assertFailsWith<IllegalArgumentException> { gen.addDataCopyFromR0(-1) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0DoesNotContainDnsQ(
+                byteArrayOf(1, 'A'.code.toByte(), 0, 0), 256, ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0DoesNotContainDnsQ(
+                byteArrayOf(1, 'a'.code.toByte(), 0, 0), 0x0c, ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0DoesNotContainDnsQ(
+                byteArrayOf(1, '.'.code.toByte(), 0, 0), 0x0c, ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0DoesNotContainDnsQ(
+                byteArrayOf(0, 0), 0xc0, ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0DoesNotContainDnsQ(
+                byteArrayOf(1, 'A'.code.toByte()), 0xc0, ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0DoesNotContainDnsQ(
+                byteArrayOf(64) + ByteArray(64) { 'A'.code.toByte() } + byteArrayOf(0, 0),
+                0xc0, ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0DoesNotContainDnsQ(
+                byteArrayOf(1, 'A'.code.toByte(), 1, 'B'.code.toByte(), 0),
+                0xc0, ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0DoesNotContainDnsQ(
+                byteArrayOf(1, 'A'.code.toByte(), 1, 'B'.code.toByte()),
+                0xc0, ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0ContainDnsQ(
+                byteArrayOf(1, 'A'.code.toByte(), 0, 0), 256, ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0ContainDnsQ(
+                byteArrayOf(1, 'a'.code.toByte(), 0, 0), 0x0c, ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0ContainDnsQ(
+                byteArrayOf(1, '.'.code.toByte(), 0, 0), 0x0c, ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0ContainDnsQ(
+                byteArrayOf(0, 0), 0xc0, ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0ContainDnsQ(
+                byteArrayOf(1, 'A'.code.toByte()), 0xc0, ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0ContainDnsQ(
+                byteArrayOf(64) + ByteArray(64) { 'A'.code.toByte() } + byteArrayOf(0, 0),
+                0xc0, ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0ContainDnsQ(
+                byteArrayOf(1, 'A'.code.toByte(), 1, 'B'.code.toByte(), 0),
+                0xc0, ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0ContainDnsQ(
+                byteArrayOf(1, 'A'.code.toByte(), 1, 'B'.code.toByte()),
+                0xc0, ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0DoesNotContainDnsA(
+                byteArrayOf(1, 'a'.code.toByte(), 0, 0), ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0DoesNotContainDnsA(
+                byteArrayOf(1, '.'.code.toByte(), 0, 0), ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0DoesNotContainDnsA(
+                byteArrayOf(0, 0), ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0DoesNotContainDnsA(
+                byteArrayOf(1, 'A'.code.toByte()), ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0DoesNotContainDnsA(
+                byteArrayOf(64) + ByteArray(64) { 'A'.code.toByte() } + byteArrayOf(0, 0),
+                 ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0DoesNotContainDnsA(
+                byteArrayOf(1, 'A'.code.toByte(), 1, 'B'.code.toByte(), 0),
+                ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0DoesNotContainDnsA(
+                byteArrayOf(1, 'A'.code.toByte(), 1, 'B'.code.toByte()),
+                ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0ContainDnsA(
+                byteArrayOf(1, 'a'.code.toByte(), 0, 0), ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0ContainDnsA(
+                byteArrayOf(1, '.'.code.toByte(), 0, 0), ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0ContainDnsA(
+                byteArrayOf(0, 0), ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0ContainDnsA(
+                byteArrayOf(1, 'A'.code.toByte()), ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0ContainDnsA(
+                byteArrayOf(64) + ByteArray(64) { 'A'.code.toByte() } + byteArrayOf(0, 0),
+                ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0ContainDnsA(
+                byteArrayOf(1, 'A'.code.toByte(), 1, 'B'.code.toByte(), 0),
+                ApfGenerator.DROP_LABEL) }
+        assertFailsWith<IllegalArgumentException> { gen.addJumpIfPktAtR0ContainDnsA(
+                byteArrayOf(1, 'A'.code.toByte(), 1, 'B'.code.toByte()),
+                ApfGenerator.DROP_LABEL) }
     }
 
     @Test
@@ -245,6 +327,34 @@ class ApfV5Test {
 //        assertContentEquals(arrayOf(
 //                "       0: dcopy [r1+0], 5",
 //                "       4: pcopy [r0+1000], 255"), ApfJniUtils.disassembleApf(program))
+
+        gen = ApfGenerator(ApfGenerator.MIN_APF_VERSION_IN_DEV)
+        gen.addJumpIfBytesAtR0Equal(byteArrayOf('a'.code.toByte()), ApfGenerator.DROP_LABEL)
+        program = gen.generate()
+        assertContentEquals(
+                byteArrayOf(encodeInstruction(opcode = 20, immLength = 1, register = 1),
+                        1, 1, 'a'.code.toByte()), program)
+
+        val qnames = byteArrayOf(1, 'A'.code.toByte(), 1, 'B'.code.toByte(), 0, 0)
+        gen = ApfGenerator(ApfGenerator.MIN_APF_VERSION_IN_DEV)
+        gen.addJumpIfPktAtR0DoesNotContainDnsQ(qnames, 0x0c, ApfGenerator.DROP_LABEL)
+        gen.addJumpIfPktAtR0ContainDnsQ(qnames, 0x0c, ApfGenerator.DROP_LABEL)
+        program = gen.generate()
+        assertContentEquals(byteArrayOf(
+                encodeInstruction(21, 1, 0), 43, 11, 0x0c.toByte(),
+        ) + qnames + byteArrayOf(
+                encodeInstruction(21, 1, 1), 43, 1, 0x0c.toByte(),
+        ) + qnames, program)
+
+        gen = ApfGenerator(ApfGenerator.MIN_APF_VERSION_IN_DEV)
+        gen.addJumpIfPktAtR0DoesNotContainDnsA(qnames, ApfGenerator.DROP_LABEL)
+        gen.addJumpIfPktAtR0ContainDnsA(qnames, ApfGenerator.DROP_LABEL)
+        program = gen.generate()
+        assertContentEquals(byteArrayOf(
+                encodeInstruction(21, 1, 0), 44, 10,
+        ) + qnames + byteArrayOf(
+                encodeInstruction(21, 1, 1), 44, 1,
+        ) + qnames, program)
     }
 
     private fun encodeInstruction(opcode: Int, immLength: Int, register: Int): Byte {
