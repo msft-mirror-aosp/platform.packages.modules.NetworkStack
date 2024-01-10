@@ -22,6 +22,7 @@ import static android.net.apf.ApfGenerator.Register.R1;
 import androidx.annotation.NonNull;
 
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.net.module.util.HexDump;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -134,7 +135,26 @@ public class ApfGenerator {
         // when R=1, the copy length is stored in R1.
         // e.g. "pktcopy r0, 5", "pktcopy r0, r1", "datacopy r0, 5", "datacopy r0, r1"
         EPKTCOPY(41),
-        EDATACOPY(42);
+        EDATACOPY(42),
+        // Jumps if the UDP payload content (starting at R0) does not contain ont
+        // of the specified QNAME, applying case insensitivity.
+        // R0: Offset to UDP payload content
+        // R=0/1 meanining 'does not match' vs 'matches'
+        // imm1: Opcode
+        // imm2: Label offset
+        // imm3(u8): Question type (PTR/SRV/TXT/A/AAAA)
+        // imm4(bytes): TLV-encoded QNAME list (null-terminated)
+        // e.g.: "jdnsqmatch R0,label,0x0c,\002aa\005local\0\0"
+        JDNSQMATCH(43), // Jumps if the UDP payload content (starting at R0) does not contain one
+        // of the specified NAME in answers/authority/additional records, applying
+        // case insensitivity.
+        // R=0/1 meanining 'does not match' vs 'matches'
+        // R0: Offset to UDP payload content
+        // imm1: Opcode
+        // imm2: Label offset
+        // imm3(bytes): TLV-encoded QNAME list (null-terminated)
+        // e.g.: "jdnsamatch R0,label,0x0c,\002aa\005local\0\0"
+        JDNSAMATCH(44);
 
         final int value;
 
@@ -493,12 +513,19 @@ public class ApfGenerator {
             int writingOffset = offset;
             bytecode[writingOffset++] = generateInstructionByte();
             int indeterminateSize = calculateRequiredIndeterminateSize();
+            int startOffset = 0;
+            if (mOpcode == Opcodes.EXT.value) {
+                // For extend opcode, always write the actual opcode first.
+                writingOffset = mIntImms.get(startOffset++).writeValue(bytecode, writingOffset,
+                        indeterminateSize);
+            }
             if (mTargetLabel != null) {
                 writingOffset = writeValue(calculateTargetLabelOffset(), bytecode, writingOffset,
                         indeterminateSize);
             }
-            for (IntImmediate imm : mIntImms) {
-                writingOffset = imm.writeValue(bytecode, writingOffset, indeterminateSize);
+            for (int i = startOffset; i < mIntImms.size(); ++i) {
+                writingOffset = mIntImms.get(i).writeValue(bytecode, writingOffset,
+                        indeterminateSize);
             }
             if (mBytesImm != null) {
                 System.arraycopy(mBytesImm, 0, bytecode, writingOffset, mBytesImm.length);
@@ -902,11 +929,24 @@ public class ApfGenerator {
     }
 
     /**
-     * Add an instruction to the end of the program to jump to {@code target} if the bytes of the
+     * Add an instruction to the end of the program to jump to {@code tgt} if the bytes of the
      * packet at an offset specified by {@code register} don't match {@code bytes}
+     * R=0 means check for not equal
      */
     public ApfGenerator addJumpIfBytesAtR0NotEqual(byte[] bytes, String tgt) {
         return append(new Instruction(Opcodes.JNEBS).addUnsigned(
+                bytes.length).setTargetLabel(tgt).setBytesImm(bytes));
+    }
+
+    /**
+     * Add an instruction to the end of the program to jump to {@code tgt} if the bytes of the
+     * packet at an offset specified by {@code register} match {@code bytes}
+     * R=1 means check for equal.
+     */
+    public ApfGenerator addJumpIfBytesAtR0Equal(byte[] bytes, String tgt)
+            throws IllegalInstructionException {
+        requireApfVersion(MIN_APF_VERSION_IN_DEV);
+        return append(new Instruction(Opcodes.JNEBS, R1).addUnsigned(
                 bytes.length).setTargetLabel(tgt).setBytesImm(bytes));
     }
 
@@ -1179,6 +1219,101 @@ public class ApfGenerator {
     public ApfGenerator addPacketCopyFromR0LenR1() throws IllegalInstructionException {
         requireApfVersion(MIN_APF_VERSION_IN_DEV);
         return append(new Instruction(ExtendedOpcodes.EPKTCOPY, R1));
+    }
+
+    /**
+     * Check if the byte is valid dns character: A-Z,0-9,-,_
+     */
+    private static boolean isValidDnsCharacter(byte c) {
+        return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+    }
+
+    private static void validateNames(@NonNull byte[] names) {
+        final int len = names.length;
+        if (len < 4) {
+            throw new IllegalArgumentException("qnames must have at least length 4");
+        }
+        final String errorMessage = "qname: " + HexDump.toHexString(names)
+                + "is not null-terminated list of TLV-encoded names";
+        int i = 0;
+        while (i < len - 1) {
+            int label_len = names[i++];
+            if (label_len < 1 || label_len > 63) {
+                throw new IllegalArgumentException(
+                        "label len: " + label_len + " must be between 1 and 63");
+            }
+            if (i + label_len >= len - 1) {
+                throw new IllegalArgumentException(errorMessage);
+            }
+            while (label_len-- > 0) {
+                if (!isValidDnsCharacter(names[i++])) {
+                    throw new IllegalArgumentException("qname: " + HexDump.toHexString(names)
+                            + " contains invalid character");
+                }
+            }
+            if (names[i] == 0) {
+                i++; // skip null terminator.
+            }
+        }
+        if (names[len - 1] != 0) {
+            throw new IllegalArgumentException(errorMessage);
+        }
+    }
+
+    /**
+     * Appends a conditional jump instruction to the program: Jumps to {@code tgt} if the UDP
+     * payload's DNS questions do NOT contain the QNAME specified in {@code qnames} and qtype
+     * equals {@code qtype}. Examines the payload starting at the offset in R0.
+     * R = 0 means check for "does not contain".
+     */
+    public ApfGenerator addJumpIfPktAtR0DoesNotContainDnsQ(@NonNull byte[] qnames, int qtype,
+            @NonNull String tgt) throws IllegalInstructionException {
+        requireApfVersion(MIN_APF_VERSION_IN_DEV);
+        validateNames(qnames);
+        return append(new Instruction(ExtendedOpcodes.JDNSQMATCH).setTargetLabel(tgt).addU8(
+                qtype).setBytesImm(qnames));
+    }
+
+    /**
+     * Appends a conditional jump instruction to the program: Jumps to {@code tgt} if the UDP
+     * payload's DNS questions contain the QNAME specified in {@code qnames} and qtype
+     * equals {@code qtype}. Examines the payload starting at the offset in R0.
+     * R = 1 means check for "contain".
+     */
+    public ApfGenerator addJumpIfPktAtR0ContainDnsQ(@NonNull byte[] qnames, int qtype,
+            @NonNull String tgt) throws IllegalInstructionException {
+        requireApfVersion(MIN_APF_VERSION_IN_DEV);
+        validateNames(qnames);
+        return append(new Instruction(ExtendedOpcodes.JDNSQMATCH, R1).setTargetLabel(tgt).addU8(
+                qtype).setBytesImm(qnames));
+    }
+
+    /**
+     * Appends a conditional jump instruction to the program: Jumps to {@code tgt} if the UDP
+     * payload's DNS answers/authority/additional records do NOT contain the NAME
+     * specified in {@code Names}. Examines the payload starting at the offset in R0.
+     * R = 0 means check for "does not contain".
+     */
+    public ApfGenerator addJumpIfPktAtR0DoesNotContainDnsA(@NonNull byte[] names,
+            @NonNull String tgt) throws IllegalInstructionException {
+        requireApfVersion(MIN_APF_VERSION_IN_DEV);
+        validateNames(names);
+        return append(new Instruction(ExtendedOpcodes.JDNSAMATCH).setTargetLabel(tgt).setBytesImm(
+                names));
+    }
+
+    /**
+     * Appends a conditional jump instruction to the program: Jumps to {@code tgt} if the UDP
+     * payload's DNS answers/authority/additional records contain the NAME
+     * specified in {@code Names}. Examines the payload starting at the offset in R0.
+     * R = 1 means check for "contain".
+     */
+    public ApfGenerator addJumpIfPktAtR0ContainDnsA(@NonNull byte[] names,
+            @NonNull String tgt) throws IllegalInstructionException {
+        requireApfVersion(MIN_APF_VERSION_IN_DEV);
+        validateNames(names);
+        return append(new Instruction(ExtendedOpcodes.JDNSAMATCH, R1).setTargetLabel(
+                tgt).setBytesImm(names));
     }
 
     private static void checkRange(@NonNull String variableName, long value, long lowerBound,
