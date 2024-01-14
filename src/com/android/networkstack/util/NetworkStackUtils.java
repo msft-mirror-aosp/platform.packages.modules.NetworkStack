@@ -151,11 +151,6 @@ public class NetworkStackUtils {
             new String [] {"https://www.google.com/generate_204"};
 
     /**
-     * Minimum module version at which to enable the DHCP INIT-REBOOT state.
-     */
-    public static final String DHCP_INIT_REBOOT_VERSION = "dhcp_init_reboot_version";
-
-    /**
      * Minimum module version at which to enable the DHCP Rapid Commit option.
      */
     public static final String DHCP_RAPID_COMMIT_VERSION = "dhcp_rapid_commit_version";
@@ -245,6 +240,12 @@ public class NetworkStackUtils {
      */
     public static final String IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION =
             "ipclient_ignore_low_ra_lifetime_version";
+
+    /**
+     * Feature flag to send private DNS resolution queries and probes on a background thread.
+     */
+    public static final String NETWORKMONITOR_ASYNC_PRIVDNS_RESOLUTION =
+            "networkmonitor_async_privdns_resolution";
 
     /**** BEGIN Feature Kill Switch Flags ****/
 
