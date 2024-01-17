@@ -151,11 +151,6 @@ public class NetworkStackUtils {
             new String [] {"https://www.google.com/generate_204"};
 
     /**
-     * Minimum module version at which to enable the DHCP INIT-REBOOT state.
-     */
-    public static final String DHCP_INIT_REBOOT_VERSION = "dhcp_init_reboot_version";
-
-    /**
      * Minimum module version at which to enable the DHCP Rapid Commit option.
      */
     public static final String DHCP_RAPID_COMMIT_VERSION = "dhcp_rapid_commit_version";
@@ -224,6 +219,12 @@ public class NetworkStackUtils {
      */
     public static final String IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION =
             "ip_reachability_ignore_incompleted_ipv6_default_router_version";
+
+    /**
+     * Experiment flag to treat router MAC address changes as a failure only on roam.
+     */
+    public static final String IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION =
+            "ip_reachability_router_mac_change_failure_only_after_roam_version";
 
     /**
      * Experiment flag to enable DHCPv6 Prefix Delegation(RFC8415) in IpClient.
