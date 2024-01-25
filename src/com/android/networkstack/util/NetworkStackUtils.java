@@ -151,11 +151,6 @@ public class NetworkStackUtils {
             new String [] {"https://www.google.com/generate_204"};
 
     /**
-     * Minimum module version at which to enable the DHCP INIT-REBOOT state.
-     */
-    public static final String DHCP_INIT_REBOOT_VERSION = "dhcp_init_reboot_version";
-
-    /**
      * Minimum module version at which to enable the DHCP Rapid Commit option.
      */
     public static final String DHCP_RAPID_COMMIT_VERSION = "dhcp_rapid_commit_version";
@@ -212,6 +207,13 @@ public class NetworkStackUtils {
             "ipclient_accept_ipv6_link_local_dns_version";
 
     /**
+     * Experiment flag to enable "mcast_resolicit" neighbor parameter in IpReachabilityMonitor,
+     * set it to 3 by default.
+     */
+    public static final String IP_REACHABILITY_MCAST_RESOLICIT_VERSION =
+            "ip_reachability_mcast_resolicit_version";
+
+    /**
      * Experiment flag to attempt to ignore the on-link IPv6 DNS server which fails to respond to
      * address resolution.
      */
@@ -224,6 +226,12 @@ public class NetworkStackUtils {
      */
     public static final String IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION =
             "ip_reachability_ignore_incompleted_ipv6_default_router_version";
+
+    /**
+     * Experiment flag to treat router MAC address changes as a failure only on roam.
+     */
+    public static final String IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION =
+            "ip_reachability_router_mac_change_failure_only_after_roam_version";
 
     /**
      * Experiment flag to enable DHCPv6 Prefix Delegation(RFC8415) in IpClient.
@@ -245,6 +253,12 @@ public class NetworkStackUtils {
      */
     public static final String IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION =
             "ipclient_ignore_low_ra_lifetime_version";
+
+    /**
+     * Feature flag to send private DNS resolution queries and probes on a background thread.
+     */
+    public static final String NETWORKMONITOR_ASYNC_PRIVDNS_RESOLUTION =
+            "networkmonitor_async_privdns_resolution";
 
     /**** BEGIN Feature Kill Switch Flags ****/
 
@@ -350,9 +364,10 @@ public class NetworkStackUtils {
      * Generate an IPv6 address based on the given prefix(/64) and stable interface
      * identifier(EUI64).
      */
+    @Nullable
     public static Inet6Address createInet6AddressFromEui64(@NonNull final IpPrefix prefix,
             @NonNull final byte[] eui64) {
-        if (prefix.getPrefixLength() != 64) {
+        if (prefix.getPrefixLength() > 64) {
             Log.e(TAG, "Invalid IPv6 prefix length " + prefix.getPrefixLength());
             return null;
         }
