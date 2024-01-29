@@ -23,6 +23,8 @@ import static android.net.metrics.IpReachabilityEvent.PROVISIONING_LOST_ORGANIC;
 
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_MCAST_RESOLICIT_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION;
 
 import android.content.Context;
 import android.net.ConnectivityManager;
@@ -235,8 +237,10 @@ public class IpReachabilityMonitor {
     private int mInterSolicitIntervalMs;
     @NonNull
     private final Callback mCallback;
+    private final boolean mMulticastResolicitEnabled;
     private final boolean mIgnoreIncompleteIpv6DnsServerEnabled;
     private final boolean mIgnoreIncompleteIpv6DefaultRouterEnabled;
+    private final boolean mMacChangeFailureOnlyAfterRoam;
 
     public IpReachabilityMonitor(
             Context context, InterfaceParams ifParams, Handler h, SharedLog log, Callback callback,
@@ -258,10 +262,14 @@ public class IpReachabilityMonitor {
         mUsingMultinetworkPolicyTracker = usingMultinetworkPolicyTracker;
         mCm = context.getSystemService(ConnectivityManager.class);
         mDependencies = dependencies;
+        mMulticastResolicitEnabled = dependencies.isFeatureNotChickenedOut(context,
+                IP_REACHABILITY_MCAST_RESOLICIT_VERSION);
         mIgnoreIncompleteIpv6DnsServerEnabled = dependencies.isFeatureNotChickenedOut(context,
                 IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION);
         mIgnoreIncompleteIpv6DefaultRouterEnabled = dependencies.isFeatureEnabled(context,
                 IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION);
+        mMacChangeFailureOnlyAfterRoam = dependencies.isFeatureNotChickenedOut(context,
+                IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION);
         mMetricsLog = metricsLog;
         mNetd = netd;
         Preconditions.checkNotNull(mNetd);
@@ -270,8 +278,10 @@ public class IpReachabilityMonitor {
         // In case the overylaid parameters specify an invalid configuration, set the parameters
         // to the hardcoded defaults first, then set them to the values used in the steady state.
         try {
-            setNeighborParameters(MIN_NUD_SOLICIT_NUM, MIN_NUD_SOLICIT_INTERVAL_MS,
-                    NUD_MCAST_RESOLICIT_NUM);
+            int numResolicits = mMulticastResolicitEnabled
+                    ? NUD_MCAST_RESOLICIT_NUM
+                    : INVALID_NUD_MCAST_RESOLICIT_NUM;
+            setNeighborParameters(MIN_NUD_SOLICIT_NUM, MIN_NUD_SOLICIT_INTERVAL_MS, numResolicits);
         } catch (Exception e) {
             Log.e(TAG, "Failed to adjust neighbor parameters with hardcoded defaults");
         }
@@ -349,7 +359,15 @@ public class IpReachabilityMonitor {
 
     private boolean hasDefaultRouterNeighborMacAddressChanged(
             @Nullable final NeighborEvent prev, @NonNull final NeighborEvent event) {
-        if (prev == null || !isNeighborDefaultRouter(event)) return false;
+        // TODO: once this rolls out safely, merge something like aosp/2908139 and remove this code.
+        if (mMacChangeFailureOnlyAfterRoam) {
+            if (!isNeighborDefaultRouter(event)) return false;
+            if (prev == null || prev.nudState != StructNdMsg.NUD_PROBE) return false;
+            if (!isNudFailureDueToRoam()) return false;
+        } else {
+            // Previous, incorrect, behaviour: MAC address changes are a failure at all times.
+            if (prev == null || !isNeighborDefaultRouter(event)) return false;
+        }
         return !event.macAddr.equals(prev.macAddr);
     }
 
@@ -408,7 +426,8 @@ public class IpReachabilityMonitor {
 
     private void handleNeighborReachable(@Nullable final NeighborEvent prev,
             @NonNull final NeighborEvent event) {
-        if (hasDefaultRouterNeighborMacAddressChanged(prev, event)) {
+        if (mMulticastResolicitEnabled
+                && hasDefaultRouterNeighborMacAddressChanged(prev, event)) {
             // This implies device has confirmed the neighbor's reachability from
             // other states(e.g., NUD_PROBE or NUD_STALE), checking if the mac
             // address hasn't changed is required. If Mac address does change, then
@@ -574,7 +593,8 @@ public class IpReachabilityMonitor {
 
     private long getProbeWakeLockDuration() {
         final long gracePeriodMs = 500;
-        final int numSolicits = mNumSolicits + NUD_MCAST_RESOLICIT_NUM;
+        final int numSolicits =
+                mNumSolicits + (mMulticastResolicitEnabled ? NUD_MCAST_RESOLICIT_NUM : 0);
         return (long) (numSolicits * mInterSolicitIntervalMs) + gracePeriodMs;
     }
 
