@@ -154,8 +154,8 @@ import android.telephony.TelephonyManager;
 import android.util.ArrayMap;
 
 import androidx.test.filters.SmallTest;
-import androidx.test.runner.AndroidJUnit4;
 
+import com.android.internal.annotations.GuardedBy;
 import com.android.modules.utils.build.SdkLevel;
 import com.android.net.module.util.SharedLog;
 import com.android.networkstack.NetworkStackNotifier;
@@ -180,6 +180,8 @@ import com.android.server.connectivity.nano.WifiData;
 import com.android.testutils.DevSdkIgnoreRule;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreAfter;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo;
+import com.android.testutils.DevSdkIgnoreRunner;
+import com.android.testutils.FunctionalUtils.ThrowingConsumer;
 import com.android.testutils.HandlerUtils;
 
 import com.google.protobuf.nano.MessageNano;
@@ -194,6 +196,7 @@ import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
+import org.mockito.Mockito;
 import org.mockito.MockitoAnnotations;
 import org.mockito.Spy;
 import org.mockito.invocation.InvocationOnMock;
@@ -223,12 +226,15 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Supplier;
 
 import javax.net.ssl.SSLHandshakeException;
 
-@RunWith(AndroidJUnit4.class)
+@DevSdkIgnoreRunner.MonitorThreadLeak
+@RunWith(DevSdkIgnoreRunner.class)
 @SmallTest
 @SuppressLint("NewApi")  // Uses hidden APIs, which the linter would identify as missing APIs.
 public class NetworkMonitorTest {
@@ -272,8 +278,10 @@ public class NetworkMonitorTest {
     private @Mock TcpSocketTracker.Dependencies mTstDependencies;
     private @Mock INetd mNetd;
     private @Mock TcpSocketTracker mTst;
-    private HashSet<WrappedNetworkMonitor> mCreatedNetworkMonitors;
-    private HashSet<BroadcastReceiver> mRegisteredReceivers;
+    @GuardedBy("mCreatedNetworkMonitors")
+    private final HashSet<WrappedNetworkMonitor> mCreatedNetworkMonitors = new HashSet<>();
+    @GuardedBy("mRegisteredReceivers")
+    private final HashSet<BroadcastReceiver> mRegisteredReceivers = new HashSet<>();
     private @Mock Context mMccContext;
     private @Mock Resources mMccResource;
     private @Mock WifiInfo mWifiInfo;
@@ -321,6 +329,7 @@ public class NetworkMonitorTest {
     private static final NetworkAgentConfigShim TEST_AGENT_CONFIG =
             NetworkAgentConfigShimImpl.newInstance(null);
     private static final LinkProperties TEST_LINK_PROPERTIES = new LinkProperties();
+    private static final int THREAD_QUIT_MAX_RETRY_COUNT = 3;
 
     // Cannot have a static member for the LinkProperties with captive portal API information, as
     // the initializer would crash on Q (the members in LinkProperties were introduced in R).
@@ -564,6 +573,11 @@ public class NetworkMonitorTest {
 
     private FakeDns mFakeDns;
 
+    @GuardedBy("mThreadsToBeCleared")
+    private final ArrayList<Thread> mThreadsToBeCleared = new ArrayList<>();
+    @GuardedBy("mExecutorServiceToBeCleared")
+    private final ArrayList<ExecutorService> mExecutorServiceToBeCleared = new ArrayList<>();
+
     @Before
     public void setUp() throws Exception {
         MockitoAnnotations.initMocks(this);
@@ -578,6 +592,18 @@ public class NetworkMonitorTest {
                 .getSetting(any(), eq(Settings.Global.CAPTIVE_PORTAL_HTTP_URL), any());
         doReturn(TEST_HTTPS_URL).when(mDependencies)
                 .getSetting(any(), eq(Settings.Global.CAPTIVE_PORTAL_HTTPS_URL), any());
+        doAnswer((invocation) -> {
+            synchronized (mThreadsToBeCleared) {
+                mThreadsToBeCleared.add(invocation.getArgument(0));
+            }
+            return null;
+        }).when(mDependencies).onThreadCreated(any());
+        doAnswer((invocation) -> {
+            synchronized (mExecutorServiceToBeCleared) {
+                mExecutorServiceToBeCleared.add(invocation.getArgument(0));
+            }
+            return null;
+        }).when(mDependencies).onExecutorServiceCreated(any());
 
         doReturn(mCleartextDnsNetwork).when(mNetwork).getPrivateDnsBypassingCopy();
 
@@ -657,16 +683,22 @@ public class NetworkMonitorTest {
         mFakeDns.setAnswer(PRIVATE_DNS_PROBE_HOST_SUFFIX, new String[]{"2001:db8::1"}, TYPE_AAAA);
 
         doAnswer((invocation) -> {
-            mRegisteredReceivers.add(invocation.getArgument(0));
+            synchronized (mRegisteredReceivers) {
+                mRegisteredReceivers.add(invocation.getArgument(0));
+            }
             return new Intent();
         }).when(mContext).registerReceiver(any(BroadcastReceiver.class), any());
         doAnswer((invocation) -> {
-            mRegisteredReceivers.add(invocation.getArgument(0));
+            synchronized (mRegisteredReceivers) {
+                mRegisteredReceivers.add(invocation.getArgument(0));
+            }
             return new Intent();
         }).when(mContext).registerReceiver(any(BroadcastReceiver.class), any(), anyInt());
 
         doAnswer((invocation) -> {
-            mRegisteredReceivers.remove(invocation.getArgument(0));
+            synchronized (mRegisteredReceivers) {
+                mRegisteredReceivers.remove(invocation.getArgument(0));
+            }
             return null;
         }).when(mContext).unregisterReceiver(any());
 
@@ -676,25 +708,79 @@ public class NetworkMonitorTest {
         setDataStallEvaluationType(DATA_STALL_EVALUATION_TYPE_DNS);
         setValidDataStallDnsTimeThreshold(TEST_MIN_VALID_STALL_DNS_TIME_THRESHOLD_MS);
         setConsecutiveDnsTimeoutThreshold(5);
-        mCreatedNetworkMonitors = new HashSet<>();
-        mRegisteredReceivers = new HashSet<>();
+    }
+
+    private static <T> void quitResourcesThat(Supplier<List<T>> supplier,
+            ThrowingConsumer terminator) throws Exception {
+        // Run it multiple times since new threads might be generated in a thread
+        // that is about to be terminated, e.g. each thread that runs
+        // isCaptivePortal could generate 2 more probing threads.
+        for (int retryCount = 0; retryCount < THREAD_QUIT_MAX_RETRY_COUNT; retryCount++) {
+            final List<T> resourcesToBeCleared = supplier.get();
+            if (resourcesToBeCleared.isEmpty()) return;
+            for (final T resource : resourcesToBeCleared) {
+                terminator.accept(resource);
+            }
+        }
+
+        assertEquals(Collections.emptyList(), supplier.get());
+    }
+
+    private void quitNetworkMonitors() throws Exception {
+        quitResourcesThat(() -> {
+            synchronized (mCreatedNetworkMonitors) {
+                final ArrayList<WrappedNetworkMonitor> ret =
+                        new ArrayList<>(mCreatedNetworkMonitors);
+                mCreatedNetworkMonitors.clear();
+                return ret;
+            }
+        }, (it) -> {
+            final WrappedNetworkMonitor nm = (WrappedNetworkMonitor) it;
+            nm.notifyNetworkDisconnected();
+            nm.awaitQuit();
+        });
+        synchronized (mRegisteredReceivers) {
+            assertEquals("BroadcastReceiver still registered after disconnect",
+                    0, mRegisteredReceivers.size());
+        }
+        quitThreads();
+        quitExecutorServices();
+    }
+
+    private void quitExecutorServices() throws Exception {
+        quitResourcesThat(() -> {
+            synchronized (mExecutorServiceToBeCleared) {
+                final ArrayList<ExecutorService> ret = new ArrayList<>(mExecutorServiceToBeCleared);
+                mExecutorServiceToBeCleared.clear();
+                return ret;
+            }
+        }, (it) -> {
+            final ExecutorService ecs = (ExecutorService) it;
+            ecs.awaitTermination(HANDLER_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        });
+    }
+
+    private void quitThreads() throws Exception {
+        quitResourcesThat(() -> {
+            synchronized (mThreadsToBeCleared) {
+                final ArrayList<Thread> ret = new ArrayList<>(mThreadsToBeCleared);
+                mThreadsToBeCleared.clear();
+                return ret;
+            }
+        }, (it) -> {
+            final Thread th = (Thread) it;
+            th.interrupt();
+            th.join(HANDLER_TIMEOUT_MS);
+            if (th.isAlive()) fail("Threads did not terminate within timeout.");
+        });
     }
 
     @After
-    public void tearDown() {
+    public void tearDown() throws Exception {
         mFakeDns.clearAll();
-        // Make a local copy of mCreatedNetworkMonitors because during the iteration below,
-        // WrappedNetworkMonitor#onQuitting will delete elements from it on the handler threads.
-        WrappedNetworkMonitor[] networkMonitors = mCreatedNetworkMonitors.toArray(
-                new WrappedNetworkMonitor[0]);
-        for (WrappedNetworkMonitor nm : networkMonitors) {
-            nm.notifyNetworkDisconnected();
-            nm.awaitQuit();
-        }
-        assertEquals("NetworkMonitor still running after disconnect",
-                0, mCreatedNetworkMonitors.size());
-        assertEquals("BroadcastReceiver still registered after disconnect",
-                0, mRegisteredReceivers.size());
+        quitNetworkMonitors();
+        // Clear mocks to prevent from stubs holding instances and cause memory leaks.
+        Mockito.framework().clearInlineMocks();
     }
 
     private void initHttpConnection(HttpURLConnection connection) {
@@ -777,7 +863,6 @@ public class NetworkMonitorTest {
         @Override
         protected void onQuitting() {
             super.onQuitting();
-            assertTrue(mCreatedNetworkMonitors.remove(this));
             mQuitCv.open();
         }
 
@@ -1099,7 +1184,9 @@ public class NetworkMonitorTest {
         verify(mContext, never()).registerReceiver(receiverCaptor.capture(),
                 argThat(receiver -> ACTION_CONFIGURATION_CHANGED.equals(receiver.getAction(0))));
         nm.start();
-        mCreatedNetworkMonitors.add(nm);
+        synchronized (mCreatedNetworkMonitors) {
+            mCreatedNetworkMonitors.add(nm);
+        }
         HandlerUtils.waitForIdle(nm.getHandler(), HANDLER_TIMEOUT_MS);
         verify(mContext, times(1)).registerReceiver(receiverCaptor.capture(),
                 argThat(receiver -> ACTION_CONFIGURATION_CHANGED.equals(receiver.getAction(0))));
@@ -3701,6 +3788,8 @@ public class NetworkMonitorTest {
         // started. If captive portal app receiver is registered, then the size of the registered
         // receivers will be 2. Otherwise, mRegisteredReceivers should only contain 1 configuration
         // change receiver.
-        assertEquals(isPortal ? 2 : 1, mRegisteredReceivers.size());
+        synchronized (mRegisteredReceivers) {
+            assertEquals(isPortal ? 2 : 1, mRegisteredReceivers.size());
+        }
     }
 }
