@@ -239,6 +239,12 @@ public class NetworkStackUtils {
             "ip_reachability_router_mac_change_failure_only_after_roam_version";
 
     /**
+     * Experiment flag to ignore all NUD failures from kernel organic.
+     */
+    public static final String IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION =
+            "ip_reachability_ignore_organic_nud_failure_version";
+
+    /**
      * Experiment flag to enable DHCPv6 Prefix Delegation(RFC8415) in IpClient.
      */
     public static final String IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION =
@@ -248,10 +254,12 @@ public class NetworkStackUtils {
      * Experiment flag to enable new ra filter.
      */
     public static final String APF_NEW_RA_FILTER_VERSION = "apf_new_ra_filter_version";
+
     /**
      * Experiment flag to enable the feature of polling counters in Apf.
      */
     public static final String APF_POLLING_COUNTERS_VERSION = "apf_polling_counters_version";
+
     /**
      * Experiment flag to enable the feature of ignoring any individual RA section with lifetime
      * below accept_ra_min_lft sysctl.
@@ -363,9 +371,10 @@ public class NetworkStackUtils {
      * Generate an IPv6 address based on the given prefix(/64) and stable interface
      * identifier(EUI64).
      */
+    @Nullable
     public static Inet6Address createInet6AddressFromEui64(@NonNull final IpPrefix prefix,
             @NonNull final byte[] eui64) {
-        if (prefix.getPrefixLength() != 64) {
+        if (prefix.getPrefixLength() > 64) {
             Log.e(TAG, "Invalid IPv6 prefix length " + prefix.getPrefixLength());
             return null;
         }

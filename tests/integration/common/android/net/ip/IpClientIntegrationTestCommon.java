@@ -80,7 +80,6 @@ import static com.android.net.module.util.NetworkStackConstants.NEIGHBOR_ADVERTI
 import static com.android.net.module.util.NetworkStackConstants.NEIGHBOR_ADVERTISEMENT_FLAG_SOLICITED;
 import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_AUTONOMOUS;
 import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_ON_LINK;
-import static com.android.net.module.util.NetworkStackConstants.RFC7421_PREFIX_LENGTH;
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION;
 import static com.android.testutils.MiscAsserts.assertThrows;
 import static com.android.testutils.ParcelUtils.parcelingRoundTrip;
@@ -4317,8 +4316,7 @@ public abstract class IpClientIntegrationTestCommon {
                 NudEventType.NUD_POST_ROAMING_MAC_ADDRESS_CHANGED);
     }
 
-    private void doTestIpReachabilityMonitor_replyBroadcastArpRequestWithDiffMacAddresses(
-            boolean disconnect) throws Exception {
+    private void prepareIpReachabilityMonitorIpv4AddressResolutionTest() throws Exception {
         mNetworkAgentThread =
                 new HandlerThread(IpClientIntegrationTestCommon.class.getSimpleName());
         mNetworkAgentThread.start();
@@ -4344,6 +4342,11 @@ public abstract class IpClientIntegrationTestCommon {
         final byte[] data = new byte[100];
         random.nextBytes(data);
         sendUdpPacketToNetwork(mNetworkAgent.getNetwork(), SERVER_ADDR, 1234 /* port */, data);
+    }
+
+    private void doTestIpReachabilityMonitor_replyBroadcastArpRequestWithDiffMacAddresses(
+            boolean disconnect) throws Exception {
+        prepareIpReachabilityMonitorIpv4AddressResolutionTest();
 
         // Respond to the broadcast ARP request.
         final ArpPacket request = getNextArpPacket();
@@ -4387,6 +4390,37 @@ public abstract class IpClientIntegrationTestCommon {
         doTestIpReachabilityMonitor_replyBroadcastArpRequestWithDiffMacAddresses(true);
     }
 
+    @Test
+    public void testIpReachabilityMonitor_ignoreIpv4DefaultRouterOrganicNudFailure()
+            throws Exception {
+        setFeatureEnabled(NetworkStackUtils.IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION,
+                true /* ignoreOrganicNudFailure */);
+        prepareIpReachabilityMonitorIpv4AddressResolutionTest();
+
+        ArpPacket packet;
+        while ((packet = getNextArpPacket(TEST_TIMEOUT_MS)) != null) {
+            // wait address resolution to complete.
+        }
+        verify(mCb, never()).onReachabilityFailure(any());
+    }
+
+    @Test
+    public void testIpReachabilityMonitor_ignoreIpv4DefaultRouterOrganicNudFailure_flagoff()
+            throws Exception {
+        setFeatureEnabled(NetworkStackUtils.IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION,
+                false /* ignoreOrganicNudFailure */);
+        prepareIpReachabilityMonitorIpv4AddressResolutionTest();
+
+        ArpPacket packet;
+        while ((packet = getNextArpPacket(TEST_TIMEOUT_MS)) != null) {
+            // wait address resolution to complete.
+        }
+        final ArgumentCaptor<ReachabilityLossInfoParcelable> lossInfoCaptor =
+                ArgumentCaptor.forClass(ReachabilityLossInfoParcelable.class);
+        verify(mCb).onReachabilityFailure(lossInfoCaptor.capture());
+        assertEquals(ReachabilityLossReason.ORGANIC, lossInfoCaptor.getValue().reason);
+    }
+
     private void sendUdpPacketToNetwork(final Network network, final InetAddress remoteIp,
             int port, final byte[] data) throws Exception {
         final InetAddress laddr =
@@ -4401,6 +4435,7 @@ public abstract class IpClientIntegrationTestCommon {
             final Inet6Address targetIp,
             final boolean isIgnoreIncompleteIpv6DnsServerEnabled,
             final boolean isIgnoreIncompleteIpv6DefaultRouterEnabled,
+            final boolean isIgnoreOrganicNudFailureEnabled,
             final boolean expectNeighborLost) throws Exception {
         mNetworkAgentThread =
                 new HandlerThread(IpClientIntegrationTestCommon.class.getSimpleName());
@@ -4414,6 +4449,9 @@ public abstract class IpClientIntegrationTestCommon {
         setFeatureEnabled(
                 NetworkStackUtils.IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION,
                 isIgnoreIncompleteIpv6DefaultRouterEnabled);
+        setFeatureEnabled(
+                NetworkStackUtils.IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION,
+                isIgnoreOrganicNudFailureEnabled);
         final ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
                 .build();
         startIpClientProvisioning(config);
@@ -4472,6 +4510,7 @@ public abstract class IpClientIntegrationTestCommon {
         runIpReachabilityMonitorAddressResolutionTest(IPV6_ON_LINK_DNS_SERVER, targetIp,
                 true /* isIgnoreIncompleteIpv6DnsServerEnabled */,
                 false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
+                false /* isIgnoreOrganicNudFailureEnabled */,
                 false /* expectNeighborLost */);
     }
 
@@ -4484,6 +4523,7 @@ public abstract class IpClientIntegrationTestCommon {
         runIpReachabilityMonitorAddressResolutionTest(IPV6_ON_LINK_DNS_SERVER, targetIp,
                 false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
                 false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
+                false /* isIgnoreOrganicNudFailureEnabled */,
                 true /* expectNeighborLost */);
     }
 
@@ -4495,6 +4535,7 @@ public abstract class IpClientIntegrationTestCommon {
                 ROUTER_LINK_LOCAL /* targetIp */,
                 false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
                 true /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
+                false /* isIgnoreOrganicNudFailureEnabled */,
                 false /* expectNeighborLost */);
     }
 
@@ -4506,6 +4547,53 @@ public abstract class IpClientIntegrationTestCommon {
                 ROUTER_LINK_LOCAL /* targetIp */,
                 false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
                 false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
+                false /* isIgnoreOrganicNudFailureEnabled */,
+                true /* expectNeighborLost */);
+    }
+
+    @Test
+    public void testIpReachabilityMonitor_ignoreOnLinkIpv6DnsOrganicNudFailure()
+            throws Exception {
+        final Inet6Address targetIp =
+                (Inet6Address) InetAddresses.parseNumericAddress(IPV6_ON_LINK_DNS_SERVER);
+        runIpReachabilityMonitorAddressResolutionTest(IPV6_ON_LINK_DNS_SERVER, targetIp,
+                false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
+                false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
+                true /* isIgnoreOrganicNudFailureEnabled */,
+                false /* expectNeighborLost */);
+    }
+
+    @Test
+    public void testIpReachabilityMonitor_ignoreOnLinkIpv6DnsOrganicNudFailure_flagoff()
+            throws Exception {
+        final Inet6Address targetIp =
+                (Inet6Address) InetAddresses.parseNumericAddress(IPV6_ON_LINK_DNS_SERVER);
+        runIpReachabilityMonitorAddressResolutionTest(IPV6_ON_LINK_DNS_SERVER, targetIp,
+                false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
+                false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
+                false /* isIgnoreOrganicNudFailureEnabled */,
+                true /* expectNeighborLost */);
+    }
+
+    @Test
+    public void testIpReachabilityMonitor_ignoreIpv6DefaultRouterOrganicNudFailure()
+            throws Exception {
+        runIpReachabilityMonitorAddressResolutionTest(IPV6_OFF_LINK_DNS_SERVER,
+                ROUTER_LINK_LOCAL /* targetIp */,
+                false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
+                false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
+                true /* isIgnoreOrganicNudFailureEnabled */,
+                false /* expectNeighborLost */);
+    }
+
+    @Test
+    public void testIpReachabilityMonitor_ignoreIpv6DefaultRouterOrganicNudFailure_flagoff()
+            throws Exception {
+        runIpReachabilityMonitorAddressResolutionTest(IPV6_OFF_LINK_DNS_SERVER,
+                ROUTER_LINK_LOCAL /* targetIp */,
+                false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
+                false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
+                false /* isIgnoreOrganicNudFailureEnabled */,
                 true /* expectNeighborLost */);
     }
 
@@ -4924,7 +5012,7 @@ public abstract class IpClientIntegrationTestCommon {
     private IaPrefixOption buildIaPrefixOption(final IpPrefix prefix, int preferred,
             int valid) {
         return new IaPrefixOption((short) IaPrefixOption.LENGTH, preferred, valid,
-                (byte) RFC7421_PREFIX_LENGTH, prefix.getRawAddress() /* prefix */);
+                (byte) prefix.getPrefixLength(), prefix.getRawAddress() /* prefix */);
     }
 
     private void handleDhcp6Packets(final IpPrefix prefix, boolean shouldReplyRapidCommit)
