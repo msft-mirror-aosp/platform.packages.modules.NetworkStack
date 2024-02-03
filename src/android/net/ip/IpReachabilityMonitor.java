@@ -23,7 +23,9 @@ import static android.net.metrics.IpReachabilityEvent.PROVISIONING_LOST_ORGANIC;
 
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_MCAST_RESOLICIT_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION;
 
 import android.content.Context;
 import android.net.ConnectivityManager;
@@ -239,6 +241,8 @@ public class IpReachabilityMonitor {
     private final boolean mMulticastResolicitEnabled;
     private final boolean mIgnoreIncompleteIpv6DnsServerEnabled;
     private final boolean mIgnoreIncompleteIpv6DefaultRouterEnabled;
+    private final boolean mMacChangeFailureOnlyAfterRoam;
+    private final boolean mIgnoreOrganicNudFailure;
 
     public IpReachabilityMonitor(
             Context context, InterfaceParams ifParams, Handler h, SharedLog log, Callback callback,
@@ -266,6 +270,10 @@ public class IpReachabilityMonitor {
                 IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION);
         mIgnoreIncompleteIpv6DefaultRouterEnabled = dependencies.isFeatureEnabled(context,
                 IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION);
+        mMacChangeFailureOnlyAfterRoam = dependencies.isFeatureNotChickenedOut(context,
+                IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION);
+        mIgnoreOrganicNudFailure = dependencies.isFeatureEnabled(context,
+                IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION);
         mMetricsLog = metricsLog;
         mNetd = netd;
         Preconditions.checkNotNull(mNetd);
@@ -355,7 +363,15 @@ public class IpReachabilityMonitor {
 
     private boolean hasDefaultRouterNeighborMacAddressChanged(
             @Nullable final NeighborEvent prev, @NonNull final NeighborEvent event) {
-        if (prev == null || !isNeighborDefaultRouter(event)) return false;
+        // TODO: once this rolls out safely, merge something like aosp/2908139 and remove this code.
+        if (mMacChangeFailureOnlyAfterRoam) {
+            if (!isNeighborDefaultRouter(event)) return false;
+            if (prev == null || prev.nudState != StructNdMsg.NUD_PROBE) return false;
+            if (!isNudFailureDueToRoam()) return false;
+        } else {
+            // Previous, incorrect, behaviour: MAC address changes are a failure at all times.
+            if (prev == null || !isNeighborDefaultRouter(event)) return false;
+        }
         return !event.macAddr.equals(prev.macAddr);
     }
 
@@ -515,11 +531,22 @@ public class IpReachabilityMonitor {
                 isNudFailureDueToRoam(), lostProvisioning);
 
         if (lostProvisioning) {
-            final String logMsg = "FAILURE: LOST_PROVISIONING, " + event;
+            final boolean isOrganicNudFailureAndToBeIgnored =
+                    ((type == NudEventType.NUD_ORGANIC_FAILED_CRITICAL)
+                            && mIgnoreOrganicNudFailure);
+            final String logMsg = "FAILURE: LOST_PROVISIONING, " + event
+                    + ", NUD event type: " + type.name()
+                    + (isOrganicNudFailureAndToBeIgnored ? ", to be ignored" : "");
             Log.w(TAG, logMsg);
             // TODO: remove |ip| when the callback signature no longer has
             // an InetAddress argument.
-            mCallback.notifyLost(ip, logMsg, type);
+            // Notify critical neighbor lost as long as the NUD failures
+            // are not from kernel organic or the NUD failure event type is
+            // NUD_ORGANIC_FAILED_CRITICAL but the experiment flag is not
+            // enabled. Regardless, the event metrics are still recoreded.
+            if (!isOrganicNudFailureAndToBeIgnored) {
+                mCallback.notifyLost(ip, logMsg, type);
+            }
         }
         logNudFailed(event, type);
     }

@@ -40,7 +40,7 @@ static int run_apf_interpreter(int apf_version, uint8_t* program,
     return accept_packet(program, program_len, ram_len, packet, packet_len,
                          filter_age);
   } else {
-    return apf_run(program, program_len, ram_len, packet, packet_len,
+    return apf_run(nullptr, program, program_len, ram_len, packet, packet_len,
                          filter_age << 14);
   }
 }
@@ -245,8 +245,6 @@ static jboolean com_android_server_ApfTest_dropsAllPackets(
     return true;
 }
 
-static char output_buffer[512];
-
 static jobjectArray com_android_server_ApfTest_disassembleApf(
     JNIEnv* env, jclass, jbyteArray jprogram) {
     uint32_t program_len = env->GetArrayLength(jprogram);
@@ -256,9 +254,7 @@ static jobjectArray com_android_server_ApfTest_disassembleApf(
                             reinterpret_cast<jbyte*>(buf.data()));
     std::vector<std::string> disassemble_output;
     for (uint32_t pc = 0; pc < program_len;) {
-         pc = apf_disassemble(buf.data(), program_len, pc, output_buffer,
-                              sizeof(output_buffer) / sizeof(output_buffer[0]));
-         disassemble_output.emplace_back(output_buffer);
+         disassemble_output.emplace_back(apf_disassemble(buf.data(), program_len, &pc));
     }
     jclass stringClass = env->FindClass("java/lang/String");
     jobjectArray disassembleOutput =
@@ -281,14 +277,14 @@ jbyteArray com_android_server_ApfTest_getTransmittedPacket(JNIEnv* env,
     if (apf_test_tx_packet_len == 0) { return jdata; }
 
     env->SetByteArrayRegion(jdata, 0, (jint) apf_test_tx_packet_len,
-                            reinterpret_cast<jbyte*>(apf_test_tx_packet));
+                            reinterpret_cast<jbyte*>(apf_test_buffer));
 
     return jdata;
 }
 
 void com_android_server_ApfTest_resetTransmittedPacketMemory(JNIEnv, jclass) {
     apf_test_tx_packet_len = 0;
-    memset(apf_test_tx_packet, 0, APF_TX_BUFFER_SIZE);
+    memset(apf_test_buffer, 0xff, sizeof(apf_test_buffer));
 }
 
 extern "C" jint JNI_OnLoad(JavaVM* vm, void*) {

@@ -20,6 +20,7 @@ import static android.net.dhcp.DhcpPacket.DHCP_BROADCAST_ADDRESS;
 import static android.net.dhcp.DhcpPacket.DHCP_CAPTIVE_PORTAL;
 import static android.net.dhcp.DhcpPacket.DHCP_DNS_SERVER;
 import static android.net.dhcp.DhcpPacket.DHCP_DOMAIN_NAME;
+import static android.net.dhcp.DhcpPacket.DHCP_DOMAIN_SEARCHLIST;
 import static android.net.dhcp.DhcpPacket.DHCP_IPV6_ONLY_PREFERRED;
 import static android.net.dhcp.DhcpPacket.DHCP_LEASE_TIME;
 import static android.net.dhcp.DhcpPacket.DHCP_MTU;
@@ -52,7 +53,6 @@ import static com.android.net.module.util.NetworkStackConstants.IPV4_ADDR_ANY;
 import static com.android.net.module.util.NetworkStackConstants.IPV4_CONFLICT_ANNOUNCE_NUM;
 import static com.android.net.module.util.NetworkStackConstants.IPV4_CONFLICT_PROBE_NUM;
 import static com.android.net.module.util.SocketUtils.closeSocketQuietly;
-import static com.android.networkstack.util.NetworkStackUtils.DHCP_INIT_REBOOT_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.DHCP_IP_CONFLICT_DETECT_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.DHCP_RAPID_COMMIT_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.DHCP_SLOW_RETRANSMISSION_VERSION;
@@ -294,7 +294,14 @@ public class DhcpClient extends StateMachine {
     @NonNull
     private byte[] getRequestedParams() {
         // Set an initial size large enough for all optional parameters that we might request.
-        final int numOptionalParams = 2;
+        // mCreatorId + the size is changed
+        final int numOptionalParams;
+        if (mConfiguration.isWifiManagedProfile) {
+            numOptionalParams = 3 + mConfiguration.options.size();
+        } else {
+            numOptionalParams = 2 + mConfiguration.options.size();
+        }
+
         final ByteArrayOutputStream params =
                 new ByteArrayOutputStream(DEFAULT_REQUESTED_PARAMS.length + numOptionalParams);
         params.write(DEFAULT_REQUESTED_PARAMS, 0, DEFAULT_REQUESTED_PARAMS.length);
@@ -305,6 +312,10 @@ public class DhcpClient extends StateMachine {
         // Customized DHCP options to be put in PRL.
         for (DhcpOption option : mConfiguration.options) {
             if (option.value == null) params.write(option.type);
+        }
+        // Check if the target network is managed by user.
+        if (mConfiguration.isWifiManagedProfile) {
+            params.write(DHCP_DOMAIN_SEARCHLIST);
         }
         return params.toByteArray();
     }
@@ -543,13 +554,6 @@ public class DhcpClient extends StateMachine {
     }
 
     /**
-     * check whether or not to support caching the last lease info and INIT-REBOOT state.
-     */
-    public boolean isDhcpLeaseCacheEnabled() {
-        return mDependencies.isFeatureNotChickenedOut(mContext, DHCP_INIT_REBOOT_VERSION);
-    }
-
-    /**
      * check whether or not to support DHCP Rapid Commit option.
      */
     public boolean isDhcpRapidCommitEnabled() {
@@ -572,7 +576,7 @@ public class DhcpClient extends StateMachine {
     }
 
     private void recordMetricEnabledFeatures() {
-        if (isDhcpLeaseCacheEnabled()) mMetrics.setDhcpEnabledFeature(DhcpFeature.DF_INITREBOOT);
+        mMetrics.setDhcpEnabledFeature(DhcpFeature.DF_INITREBOOT);
         if (isDhcpRapidCommitEnabled()) mMetrics.setDhcpEnabledFeature(DhcpFeature.DF_RAPIDCOMMIT);
         if (isDhcpIpConflictDetectEnabled()) mMetrics.setDhcpEnabledFeature(DhcpFeature.DF_DAD);
         if (mConfiguration.isPreconnectionEnabled) {
@@ -635,6 +639,9 @@ public class DhcpClient extends StateMachine {
     private byte[] getOptionsToSkip() {
         final ByteArrayOutputStream optionsToSkip = new ByteArrayOutputStream(2);
         if (!isCapportApiEnabled()) optionsToSkip.write(DHCP_CAPTIVE_PORTAL);
+        if (!mConfiguration.isWifiManagedProfile) {
+            optionsToSkip.write(DHCP_DOMAIN_SEARCHLIST);
+        }
         return optionsToSkip.toByteArray();
     }
 
@@ -840,17 +847,13 @@ public class DhcpClient extends StateMachine {
     }
 
     private void notifySuccess() {
-        if (isDhcpLeaseCacheEnabled()) {
-            maybeSaveLeaseToIpMemoryStore();
-        }
+        maybeSaveLeaseToIpMemoryStore();
         mController.sendMessage(
                 CMD_POST_DHCP_ACTION, DHCP_SUCCESS, 0, new DhcpResults(mDhcpLease));
     }
 
     private void notifyFailure(int arg) {
-        if (isDhcpLeaseCacheEnabled()) {
-            setLeaseExpiredToIpMemoryStore();
-        }
+        setLeaseExpiredToIpMemoryStore();
         mController.sendMessage(CMD_POST_DHCP_ACTION, arg, 0, null);
     }
 
@@ -992,12 +995,15 @@ public class DhcpClient extends StateMachine {
         public final boolean isPreconnectionEnabled;
         @NonNull
         public final List<DhcpOption> options;
+        public final boolean isWifiManagedProfile;
 
         public Configuration(@Nullable final String l2Key, final boolean isPreconnectionEnabled,
-                @NonNull final List<DhcpOption> options) {
+                @NonNull final List<DhcpOption> options,
+                final boolean isWifiManagedProfile) {
             this.l2Key = l2Key;
             this.isPreconnectionEnabled = isPreconnectionEnabled;
             this.options = options;
+            this.isWifiManagedProfile = isWifiManagedProfile;
         }
     }
 
@@ -1010,7 +1016,7 @@ public class DhcpClient extends StateMachine {
                     if (mConfiguration.isPreconnectionEnabled) {
                         transitionTo(mDhcpPreconnectingState);
                     } else {
-                        startInitRebootOrInit();
+                        startInitReboot();
                     }
                     recordMetricEnabledFeatures();
                     return HANDLED;
@@ -1336,13 +1342,8 @@ public class DhcpClient extends StateMachine {
         }
     }
 
-    private void startInitRebootOrInit() {
-        if (isDhcpLeaseCacheEnabled()) {
-            preDhcpTransitionTo(mWaitBeforeObtainingConfigurationState,
-                    mObtainingConfigurationState);
-        } else {
-            preDhcpTransitionTo(mWaitBeforeStartState, mDhcpInitState);
-        }
+    private void startInitReboot() {
+        preDhcpTransitionTo(mWaitBeforeObtainingConfigurationState, mObtainingConfigurationState);
     }
 
     class DhcpPreconnectingState extends TimeoutState {
@@ -1374,7 +1375,7 @@ public class DhcpClient extends StateMachine {
                             mConfiguration.isPreconnectionEnabled);
                     return HANDLED;
                 case CMD_ABORT_PRECONNECTION:
-                    startInitRebootOrInit();
+                    startInitReboot();
                     return HANDLED;
                 default:
                     return NOT_HANDLED;
@@ -1392,7 +1393,7 @@ public class DhcpClient extends StateMachine {
         //   and send a DISCOVER.
         @Override
         public void timeout() {
-            startInitRebootOrInit();
+            startInitReboot();
         }
 
         private void sendPreconnectionPacket() {
@@ -1489,7 +1490,8 @@ public class DhcpClient extends StateMachine {
             // IpClient sees the IP address appear, it will enter provisioned state without any
             // configuration information from DHCP. http://b/146850745.
             notifySuccess();
-            mController.sendMessage(CMD_CONFIGURE_LINKADDRESS, mDhcpLease.ipAddress);
+            mController.sendMessage(CMD_CONFIGURE_LINKADDRESS, mDhcpLease.leaseDuration, 0,
+                    mDhcpLease.ipAddress);
         }
 
         @Override
@@ -2065,7 +2067,7 @@ public class DhcpClient extends StateMachine {
         }
 
         protected void timeout() {
-            startInitRebootOrInit();
+            startInitReboot();
         }
     }
 
