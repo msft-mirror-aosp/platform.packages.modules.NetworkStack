@@ -16,13 +16,14 @@
 
 package android.net.apf;
 
-import static android.net.apf.ApfGenerator.Register.R0;
-import static android.net.apf.ApfGenerator.Register.R1;
+import static android.net.apf.ApfV4Generator.Rbit.Rbit0;
+import static android.net.apf.ApfV4Generator.Rbit.Rbit1;
+import static android.net.apf.ApfV4Generator.Register.R0;
+import static android.net.apf.ApfV4Generator.Register.R1;
 
 import androidx.annotation.NonNull;
 
 import com.android.internal.annotations.VisibleForTesting;
-import com.android.net.module.util.HexDump;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -32,11 +33,11 @@ import java.util.List;
  * APF assembler/generator.  A tool for generating an APF program.
  *
  * Call add*() functions to add instructions to the program, then call
- * {@link ApfGenerator#generate} to get the APF bytecode for the program.
+ * {@link ApfV4Generator#generate} to get the APF bytecode for the program.
  *
  * @hide
  */
-public class ApfGenerator {
+public class ApfV4Generator {
     /**
      * This exception is thrown when an attempt is made to generate an illegal instruction.
      */
@@ -45,7 +46,7 @@ public class ApfGenerator {
             super(msg);
         }
     }
-    private enum Opcodes {
+    enum Opcodes {
         LABEL(-1),
         // Unconditionally pass (if R=0) or drop (if R=1) packet.
         // An optional unsigned immediate value can be provided to encode the counter number.
@@ -54,8 +55,7 @@ public class ApfGenerator {
         // It is a U32 big-endian value and is always incremented by 1.
         // This is more or less equivalent to: lddw R0, -N4; add R0,1; stdw R0, -N4; {pass,drop}
         // e.g. "pass", "pass 1", "drop", "drop 1"
-        PASS(0),
-        DROP(0),
+        PASSDROP(0),
         LDB(1),    // Load 1 byte from immediate offset, e.g. "ldb R0, [5]"
         LDH(2),    // Load 2 bytes from immediate offset, e.g. "ldh R0, [5]"
         LDW(3),    // Load 4 bytes from immediate offset, e.g. "ldw R0, [5]"
@@ -104,7 +104,7 @@ public class ApfGenerator {
     }
     // Extended opcodes. Primary opcode is Opcodes.EXT. ExtendedOpcodes are encoded in the immediate
     // field.
-    private enum ExtendedOpcodes {
+    enum ExtendedOpcodes {
         LDM(0),   // Load from memory, e.g. "ldm R0,5"
         STM(16),  // Store to memory, e.g. "stm R0,5"
         NOT(32),  // Not, e.g. "not R0"
@@ -118,10 +118,9 @@ public class ApfGenerator {
         ALLOCATE(36),
         //  Transmit and deallocate the buffer (transmission can be delayed until the program
         //  terminates). R=0 means discard the buffer, R=1 means transmit the buffer.
-        // "e.g. trans"
+        // "e.g. transmit"
         // "e.g. discard"
-        TRANSMIT(37),
-        DISCARD(37),
+        TRANSMITDISCARD(37),
         // Write 1, 2 or 4 byte value from register to the output buffer and auto-increment the
         // output buffer pointer.
         // e.g. "ewrite1 r0"
@@ -136,19 +135,20 @@ public class ApfGenerator {
         // e.g. "pktcopy r0, 5", "pktcopy r0, r1", "datacopy r0, 5", "datacopy r0, r1"
         EPKTCOPY(41),
         EDATACOPY(42),
-        // Jumps if the UDP payload content (starting at R0) does not contain ont
-        // of the specified QNAME, applying case insensitivity.
+        // Jumps if the UDP payload content (starting at R0) does not contain one
+        // of the specified QNAMEs, applying case insensitivity.
         // R0: Offset to UDP payload content
-        // R=0/1 meanining 'does not match' vs 'matches'
+        // R=0/1 meaning 'does not match'/'matches'
         // imm1: Opcode
         // imm2: Label offset
         // imm3(u8): Question type (PTR/SRV/TXT/A/AAAA)
         // imm4(bytes): TLV-encoded QNAME list (null-terminated)
         // e.g.: "jdnsqmatch R0,label,0x0c,\002aa\005local\0\0"
-        JDNSQMATCH(43), // Jumps if the UDP payload content (starting at R0) does not contain one
-        // of the specified NAME in answers/authority/additional records, applying
+        JDNSQMATCH(43),
+        // Jumps if the UDP payload content (starting at R0) does not contain one
+        // of the specified NAMEs in answers/authority/additional records, applying
         // case insensitivity.
-        // R=0/1 meanining 'does not match' vs 'matches'
+        // R=0/1 meaning 'does not match'/'matches'
         // R0: Offset to UDP payload content
         // imm1: Opcode
         // imm2: Label offset
@@ -163,12 +163,17 @@ public class ApfGenerator {
         }
     }
     public enum Register {
-        R0(0),
-        R1(1);
+        R0,
+        R1;
+    }
+
+    public enum Rbit {
+        Rbit0(0),
+        Rbit1(1);
 
         final int value;
 
-        private Register(int value) {
+        Rbit(int value) {
             this.value = value;
         }
     }
@@ -296,9 +301,9 @@ public class ApfGenerator {
         }
     }
 
-    private class Instruction {
+    class Instruction {
         private final byte mOpcode;   // A "Opcode" value.
-        private final byte mRegister; // A "Register" value.
+        private final Rbit mRbit; // A "Rbit" value.
         public final List<IntImmediate> mIntImms = new ArrayList<>();
         // When mOpcode is a jump:
         private int mTargetLabelSize;
@@ -310,9 +315,18 @@ public class ApfGenerator {
         // Offset in bytes from the beginning of this program. Set by {@link ApfGenerator#generate}.
         int offset;
 
-        Instruction(Opcodes opcode, Register register) {
+        Instruction(Opcodes opcode, Rbit rbit) {
             mOpcode = (byte) opcode.value;
-            mRegister = (byte) register.value;
+            mRbit = rbit;
+        }
+
+        Instruction(Opcodes opcode, Register register) {
+            this(opcode, register == R0 ? Rbit0 : Rbit1);
+        }
+
+        Instruction(ExtendedOpcodes extendedOpcodes, Rbit rbit) {
+            this(Opcodes.EXT, rbit);
+            addUnsigned(extendedOpcodes.value);
         }
 
         Instruction(ExtendedOpcodes extendedOpcodes, Register register) {
@@ -484,7 +498,7 @@ public class ApfGenerator {
          */
         private byte generateInstructionByte() {
             int sizeField = generateImmSizeField();
-            return (byte)((mOpcode << 3) | (sizeField << 1) | mRegister);
+            return (byte) ((mOpcode << 3) | (sizeField << 1) | (byte) mRbit.value);
         }
 
         /**
@@ -629,7 +643,7 @@ public class ApfGenerator {
     public static final int APF_VERSION_4 = 4;
 
 
-    private final ArrayList<Instruction> mInstructions = new ArrayList<Instruction>();
+    final ArrayList<Instruction> mInstructions = new ArrayList<Instruction>();
     private final HashMap<String, Instruction> mLabels = new HashMap<String, Instruction>();
     private final Instruction mDropLabel = new Instruction(Opcodes.LABEL);
     private final Instruction mPassLabel = new Instruction(Opcodes.LABEL);
@@ -642,7 +656,7 @@ public class ApfGenerator {
      * the requested version is unsupported.
      */
     @VisibleForTesting(visibility = VisibleForTesting.Visibility.PACKAGE)
-    public ApfGenerator(int version) throws IllegalInstructionException {
+    public ApfV4Generator(int version) throws IllegalInstructionException {
         mVersion = version;
         requireApfVersion(MIN_APF_VERSION);
     }
@@ -654,13 +668,13 @@ public class ApfGenerator {
         return version >= MIN_APF_VERSION;
     }
 
-    private void requireApfVersion(int minimumVersion) throws IllegalInstructionException {
+    void requireApfVersion(int minimumVersion) throws IllegalInstructionException {
         if (mVersion < minimumVersion) {
             throw new IllegalInstructionException("Requires APF >= " + minimumVersion);
         }
     }
 
-    private ApfGenerator append(Instruction instruction) {
+    ApfV4Generator append(Instruction instruction) {
         if (mGenerated) {
             throw new IllegalStateException("Program already generated");
         }
@@ -672,7 +686,7 @@ public class ApfGenerator {
      * Define a label at the current end of the program. Jumps can jump to this label. Labels are
      * their own separate instructions, though with size 0. This facilitates having labels with
      * no corresponding code to execute, for example a label at the end of a program. For example
-     * an {@link ApfGenerator} might be passed to a function that adds a filter like so:
+     * an {@link ApfV4Generator} might be passed to a function that adds a filter like so:
      * <pre>
      *   load from packet
      *   compare loaded data, jump if not equal to "next_filter"
@@ -683,14 +697,14 @@ public class ApfGenerator {
      * </pre>
      * In this case "next_filter" may not have any generated code associated with it.
      */
-    public ApfGenerator defineLabel(String name) throws IllegalInstructionException {
+    public ApfV4Generator defineLabel(String name) throws IllegalInstructionException {
         return append(new Instruction(Opcodes.LABEL).setLabel(name));
     }
 
     /**
      * Add an unconditional jump instruction to the end of the program.
      */
-    public ApfGenerator addJump(String target) {
+    public ApfV4Generator addJump(String target) {
         return append(new Instruction(Opcodes.JMP).setTargetLabel(target));
     }
 
@@ -698,7 +712,7 @@ public class ApfGenerator {
      * Add an instruction to the end of the program to load the byte at offset {@code offset}
      * bytes from the beginning of the packet into {@code register}.
      */
-    public ApfGenerator addLoad8(Register r, int ofs) {
+    public ApfV4Generator addLoad8(Register r, int ofs) {
         return append(new Instruction(Opcodes.LDB, r).addUnsigned(ofs));
     }
 
@@ -706,7 +720,7 @@ public class ApfGenerator {
      * Add an instruction to the end of the program to load 16-bits at offset {@code offset}
      * bytes from the beginning of the packet into {@code register}.
      */
-    public ApfGenerator addLoad16(Register r, int ofs) {
+    public ApfV4Generator addLoad16(Register r, int ofs) {
         return append(new Instruction(Opcodes.LDH, r).addUnsigned(ofs));
     }
 
@@ -714,7 +728,7 @@ public class ApfGenerator {
      * Add an instruction to the end of the program to load 32-bits at offset {@code offset}
      * bytes from the beginning of the packet into {@code register}.
      */
-    public ApfGenerator addLoad32(Register r, int ofs) {
+    public ApfV4Generator addLoad32(Register r, int ofs) {
         return append(new Instruction(Opcodes.LDW, r).addUnsigned(ofs));
     }
 
@@ -723,7 +737,7 @@ public class ApfGenerator {
      * {@code register}. The offset of the loaded byte from the beginning of the packet is
      * the sum of {@code offset} and the value in register R1.
      */
-    public ApfGenerator addLoad8Indexed(Register r, int ofs) {
+    public ApfV4Generator addLoad8Indexed(Register r, int ofs) {
         return append(new Instruction(Opcodes.LDBX, r).addUnsigned(ofs));
     }
 
@@ -732,7 +746,7 @@ public class ApfGenerator {
      * {@code register}. The offset of the loaded 16-bits from the beginning of the packet is
      * the sum of {@code offset} and the value in register R1.
      */
-    public ApfGenerator addLoad16Indexed(Register r, int ofs) {
+    public ApfV4Generator addLoad16Indexed(Register r, int ofs) {
         return append(new Instruction(Opcodes.LDHX, r).addUnsigned(ofs));
     }
 
@@ -741,42 +755,42 @@ public class ApfGenerator {
      * {@code register}. The offset of the loaded 32-bits from the beginning of the packet is
      * the sum of {@code offset} and the value in register R1.
      */
-    public ApfGenerator addLoad32Indexed(Register r, int ofs) {
+    public ApfV4Generator addLoad32Indexed(Register r, int ofs) {
         return append(new Instruction(Opcodes.LDWX, r).addUnsigned(ofs));
     }
 
     /**
      * Add an instruction to the end of the program to add {@code value} to register R0.
      */
-    public ApfGenerator addAdd(int val) {
+    public ApfV4Generator addAdd(int val) {
         return append(new Instruction(Opcodes.ADD).addTwosCompUnsigned(val));
     }
 
     /**
      * Add an instruction to the end of the program to multiply register R0 by {@code value}.
      */
-    public ApfGenerator addMul(int val) {
+    public ApfV4Generator addMul(int val) {
         return append(new Instruction(Opcodes.MUL).addUnsigned(val));
     }
 
     /**
      * Add an instruction to the end of the program to divide register R0 by {@code value}.
      */
-    public ApfGenerator addDiv(int val) {
+    public ApfV4Generator addDiv(int val) {
         return append(new Instruction(Opcodes.DIV).addUnsigned(val));
     }
 
     /**
      * Add an instruction to the end of the program to logically and register R0 with {@code value}.
      */
-    public ApfGenerator addAnd(int val) {
+    public ApfV4Generator addAnd(int val) {
         return append(new Instruction(Opcodes.AND).addTwosCompUnsigned(val));
     }
 
     /**
      * Add an instruction to the end of the program to logically or register R0 with {@code value}.
      */
-    public ApfGenerator addOr(int val) {
+    public ApfV4Generator addOr(int val) {
         return append(new Instruction(Opcodes.OR).addTwosCompUnsigned(val));
     }
 
@@ -784,7 +798,7 @@ public class ApfGenerator {
      * Add an instruction to the end of the program to shift left register R0 by {@code value} bits.
      */
     // TODO: consider whether should change the argument type to byte
-    public ApfGenerator addLeftShift(int val) {
+    public ApfV4Generator addLeftShift(int val) {
         return append(new Instruction(Opcodes.SH).addSigned(val));
     }
 
@@ -793,28 +807,28 @@ public class ApfGenerator {
      * bits.
      */
     // TODO: consider whether should change the argument type to byte
-    public ApfGenerator addRightShift(int val) {
+    public ApfV4Generator addRightShift(int val) {
         return append(new Instruction(Opcodes.SH).addSigned(-val));
     }
 
     /**
      * Add an instruction to the end of the program to add register R1 to register R0.
      */
-    public ApfGenerator addAddR1() {
+    public ApfV4Generator addAddR1() {
         return append(new Instruction(Opcodes.ADD, R1));
     }
 
     /**
      * Add an instruction to the end of the program to multiply register R0 by register R1.
      */
-    public ApfGenerator addMulR1() {
+    public ApfV4Generator addMulR1() {
         return append(new Instruction(Opcodes.MUL, R1));
     }
 
     /**
      * Add an instruction to the end of the program to divide register R0 by register R1.
      */
-    public ApfGenerator addDivR1() {
+    public ApfV4Generator addDivR1() {
         return append(new Instruction(Opcodes.DIV, R1));
     }
 
@@ -822,7 +836,7 @@ public class ApfGenerator {
      * Add an instruction to the end of the program to logically and register R0 with register R1
      * and store the result back into register R0.
      */
-    public ApfGenerator addAndR1() {
+    public ApfV4Generator addAndR1() {
         return append(new Instruction(Opcodes.AND, R1));
     }
 
@@ -830,7 +844,7 @@ public class ApfGenerator {
      * Add an instruction to the end of the program to logically or register R0 with register R1
      * and store the result back into register R0.
      */
-    public ApfGenerator addOrR1() {
+    public ApfV4Generator addOrR1() {
         return append(new Instruction(Opcodes.OR, R1));
     }
 
@@ -838,14 +852,14 @@ public class ApfGenerator {
      * Add an instruction to the end of the program to shift register R0 left by the value in
      * register R1.
      */
-    public ApfGenerator addLeftShiftR1() {
+    public ApfV4Generator addLeftShiftR1() {
         return append(new Instruction(Opcodes.SH, R1));
     }
 
     /**
      * Add an instruction to the end of the program to move {@code value} into {@code register}.
      */
-    public ApfGenerator addLoadImmediate(Register register, int value) {
+    public ApfV4Generator addLoadImmediate(Register register, int value) {
         return append(new Instruction(Opcodes.LI, register).addSigned(value));
     }
 
@@ -853,7 +867,7 @@ public class ApfGenerator {
      * Add an instruction to the end of the program to jump to {@code target} if register R0's
      * value equals {@code value}.
      */
-    public ApfGenerator addJumpIfR0Equals(int val, String tgt) {
+    public ApfV4Generator addJumpIfR0Equals(int val, String tgt) {
         return append(new Instruction(Opcodes.JEQ).addTwosCompUnsigned(val).setTargetLabel(tgt));
     }
 
@@ -861,7 +875,7 @@ public class ApfGenerator {
      * Add an instruction to the end of the program to jump to {@code target} if register R0's
      * value does not equal {@code value}.
      */
-    public ApfGenerator addJumpIfR0NotEquals(int val, String tgt) {
+    public ApfV4Generator addJumpIfR0NotEquals(int val, String tgt) {
         return append(new Instruction(Opcodes.JNE).addTwosCompUnsigned(val).setTargetLabel(tgt));
     }
 
@@ -869,7 +883,7 @@ public class ApfGenerator {
      * Add an instruction to the end of the program to jump to {@code target} if register R0's
      * value is greater than {@code value}.
      */
-    public ApfGenerator addJumpIfR0GreaterThan(int val, String tgt) {
+    public ApfV4Generator addJumpIfR0GreaterThan(int val, String tgt) {
         return append(new Instruction(Opcodes.JGT).addUnsigned(val).setTargetLabel(tgt));
     }
 
@@ -877,7 +891,7 @@ public class ApfGenerator {
      * Add an instruction to the end of the program to jump to {@code target} if register R0's
      * value is less than {@code value}.
      */
-    public ApfGenerator addJumpIfR0LessThan(int val, String tgt) {
+    public ApfV4Generator addJumpIfR0LessThan(int val, String tgt) {
         return append(new Instruction(Opcodes.JLT).addUnsigned(val).setTargetLabel(tgt));
     }
 
@@ -885,14 +899,14 @@ public class ApfGenerator {
      * Add an instruction to the end of the program to jump to {@code target} if register R0's
      * value has any bits set that are also set in {@code value}.
      */
-    public ApfGenerator addJumpIfR0AnyBitsSet(int val, String tgt) {
+    public ApfV4Generator addJumpIfR0AnyBitsSet(int val, String tgt) {
         return append(new Instruction(Opcodes.JSET).addTwosCompUnsigned(val).setTargetLabel(tgt));
     }
     /**
      * Add an instruction to the end of the program to jump to {@code target} if register R0's
      * value equals register R1's value.
      */
-    public ApfGenerator addJumpIfR0EqualsR1(String tgt) {
+    public ApfV4Generator addJumpIfR0EqualsR1(String tgt) {
         return append(new Instruction(Opcodes.JEQ, R1).setTargetLabel(tgt));
     }
 
@@ -900,7 +914,7 @@ public class ApfGenerator {
      * Add an instruction to the end of the program to jump to {@code target} if register R0's
      * value does not equal register R1's value.
      */
-    public ApfGenerator addJumpIfR0NotEqualsR1(String tgt) {
+    public ApfV4Generator addJumpIfR0NotEqualsR1(String tgt) {
         return append(new Instruction(Opcodes.JNE, R1).setTargetLabel(tgt));
     }
 
@@ -908,7 +922,7 @@ public class ApfGenerator {
      * Add an instruction to the end of the program to jump to {@code target} if register R0's
      * value is greater than register R1's value.
      */
-    public ApfGenerator addJumpIfR0GreaterThanR1(String tgt) {
+    public ApfV4Generator addJumpIfR0GreaterThanR1(String tgt) {
         return append(new Instruction(Opcodes.JGT, R1).setTargetLabel(tgt));
     }
 
@@ -916,7 +930,7 @@ public class ApfGenerator {
      * Add an instruction to the end of the program to jump to {@code target} if register R0's
      * value is less than register R1's value.
      */
-    public ApfGenerator addJumpIfR0LessThanR1(String target) {
+    public ApfV4Generator addJumpIfR0LessThanR1(String target) {
         return append(new Instruction(Opcodes.JLT, R1).setTargetLabel(target));
     }
 
@@ -924,7 +938,7 @@ public class ApfGenerator {
      * Add an instruction to the end of the program to jump to {@code target} if register R0's
      * value has any bits set that are also set in R1's value.
      */
-    public ApfGenerator addJumpIfR0AnyBitsSetR1(String tgt) {
+    public ApfV4Generator addJumpIfR0AnyBitsSetR1(String tgt) {
         return append(new Instruction(Opcodes.JSET, R1).setTargetLabel(tgt));
     }
 
@@ -933,7 +947,7 @@ public class ApfGenerator {
      * packet at an offset specified by {@code register} don't match {@code bytes}
      * R=0 means check for not equal
      */
-    public ApfGenerator addJumpIfBytesAtR0NotEqual(byte[] bytes, String tgt) {
+    public ApfV4Generator addJumpIfBytesAtR0NotEqual(byte[] bytes, String tgt) {
         return append(new Instruction(Opcodes.JNEBS).addUnsigned(
                 bytes.length).setTargetLabel(tgt).setBytesImm(bytes));
     }
@@ -943,7 +957,7 @@ public class ApfGenerator {
      * packet at an offset specified by {@code register} match {@code bytes}
      * R=1 means check for equal.
      */
-    public ApfGenerator addJumpIfBytesAtR0Equal(byte[] bytes, String tgt)
+    public ApfV4Generator addJumpIfBytesAtR0Equal(byte[] bytes, String tgt)
             throws IllegalInstructionException {
         requireApfVersion(MIN_APF_VERSION_IN_DEV);
         return append(new Instruction(Opcodes.JNEBS, R1).addUnsigned(
@@ -954,7 +968,7 @@ public class ApfGenerator {
      * Add an instruction to the end of the program to load memory slot {@code slot} into
      * {@code register}.
      */
-    public ApfGenerator addLoadFromMemory(Register r, int slot)
+    public ApfV4Generator addLoadFromMemory(Register r, int slot)
             throws IllegalInstructionException {
         return append(new Instruction(ExtendedOpcodes.LDM, slot, r));
     }
@@ -963,7 +977,7 @@ public class ApfGenerator {
      * Add an instruction to the end of the program to store {@code register} into memory slot
      * {@code slot}.
      */
-    public ApfGenerator addStoreToMemory(Register r, int slot)
+    public ApfV4Generator addStoreToMemory(Register r, int slot)
             throws IllegalInstructionException {
         return append(new Instruction(ExtendedOpcodes.STM, slot, r));
     }
@@ -971,21 +985,21 @@ public class ApfGenerator {
     /**
      * Add an instruction to the end of the program to logically not {@code register}.
      */
-    public ApfGenerator addNot(Register r) {
+    public ApfV4Generator addNot(Register r) {
         return append(new Instruction(ExtendedOpcodes.NOT, r));
     }
 
     /**
      * Add an instruction to the end of the program to negate {@code register}.
      */
-    public ApfGenerator addNeg(Register r) {
+    public ApfV4Generator addNeg(Register r) {
         return append(new Instruction(ExtendedOpcodes.NEG, r));
     }
 
     /**
      * Add an instruction to swap the values in register R0 and register R1.
      */
-    public ApfGenerator addSwap() {
+    public ApfV4Generator addSwap() {
         return append(new Instruction(ExtendedOpcodes.SWAP));
     }
 
@@ -993,331 +1007,20 @@ public class ApfGenerator {
      * Add an instruction to the end of the program to move the value into
      * {@code register} from the other register.
      */
-    public ApfGenerator addMove(Register r) {
+    public ApfV4Generator addMove(Register r) {
         return append(new Instruction(ExtendedOpcodes.MOVE, r));
     }
 
     /**
      * Add an instruction to the end of the program to let the program immediately return PASS.
      */
-    public ApfGenerator addPass() {
-        // PASS requires using R0 because it shares opcode with DROP
-        return append(new Instruction(Opcodes.PASS));
+    public ApfV4Generator addPass() {
+        // PASS requires using Rbit0 because it shares opcode with DROP
+        return append(new Instruction(Opcodes.PASSDROP, Rbit0));
     }
 
-    /**
-     * Add an instruction to the end of the program to increment the counter value and
-     * immediately return PASS.
-     */
-    public ApfGenerator addCountAndPass(int cnt) throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        checkRange("CounterNumber", cnt /* value */, 1 /* lowerBound */,
-                1000 /* upperBound */);
-        // PASS requires using R0 because it shares opcode with DROP
-        return append(new Instruction(Opcodes.PASS).addUnsigned(cnt));
-    }
-
-    /**
-     * Add an instruction to the end of the program to let the program immediately return DROP.
-     */
-    public ApfGenerator addDrop() throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        // DROP requires using R1 because it shares opcode with PASS
-        return append(new Instruction(Opcodes.DROP, R1));
-    }
-
-    /**
-     * Add an instruction to the end of the program to increment the counter value and
-     * immediately return DROP.
-     */
-    public ApfGenerator addCountAndDrop(int cnt) throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        checkRange("CounterNumber", cnt /* value */, 1 /* lowerBound */,
-                1000 /* upperBound */);
-        // DROP requires using R1 because it shares opcode with PASS
-        return append(new Instruction(Opcodes.DROP, R1).addUnsigned(cnt));
-    }
-
-    /**
-     * Add an instruction to the end of the program to call the apf_allocate_buffer() function.
-     * Buffer length to be allocated is stored in register 0.
-     */
-    public ApfGenerator addAllocateR0() throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        return append(new Instruction(ExtendedOpcodes.ALLOCATE));
-    }
-
-    /**
-     * Add an instruction to the end of the program to call the apf_allocate_buffer() function.
-     *
-     * @param size the buffer length to be allocated.
-     */
-    public ApfGenerator addAllocate(int size) throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        // R1 means the extra be16 immediate is present
-        return append(new Instruction(ExtendedOpcodes.ALLOCATE, R1).addU16(size));
-    }
-
-    /**
-     * Add an instruction to the beginning of the program to reserve the data region.
-     * @param data the actual data byte
-     */
-    public ApfGenerator addData(byte[] data) throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        if (!mInstructions.isEmpty()) {
-            throw new IllegalInstructionException("data instruction has to come first");
-        }
-        return append(new Instruction(Opcodes.JMP, R1).addUnsigned(data.length).setBytesImm(data));
-    }
-
-    /**
-     * Add an instruction to the end of the program to transmit the allocated buffer.
-     */
-    public ApfGenerator addTransmit() throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        // TRANSMIT requires using R0 because it shares opcode with DISCARD
-        return append(new Instruction(ExtendedOpcodes.TRANSMIT));
-    }
-
-    /**
-     * Add an instruction to the end of the program to discard the allocated buffer.
-     */
-    public ApfGenerator addDiscard() throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        // DISCARD requires using R1 because it shares opcode with TRANSMIT
-        return append(new Instruction(ExtendedOpcodes.DISCARD, R1));
-    }
-
-    /**
-     * Add an instruction to the end of the program to write 1 byte value to output buffer.
-     */
-    public ApfGenerator addWriteU8(int val) throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        return append(new Instruction(Opcodes.WRITE).overrideLenField(1).addU8(val));
-    }
-
-    /**
-     * Add an instruction to the end of the program to write 2 bytes value to output buffer.
-     */
-    public ApfGenerator addWriteU16(int val) throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        return append(new Instruction(Opcodes.WRITE).overrideLenField(2).addU16(val));
-    }
-
-    /**
-     * Add an instruction to the end of the program to write 4 bytes value to output buffer.
-     */
-    public ApfGenerator addWriteU32(long val) throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        return append(new Instruction(Opcodes.WRITE).overrideLenField(4).addU32(val));
-    }
-
-    /**
-     * Add an instruction to the end of the program to write 1 byte value from register to output
-     * buffer.
-     */
-    public ApfGenerator addWriteU8(Register reg) throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        return append(new Instruction(ExtendedOpcodes.EWRITE1, reg));
-    }
-
-    /**
-     * Add an instruction to the end of the program to write 2 byte value from register to output
-     * buffer.
-     */
-    public ApfGenerator addWriteU16(Register reg) throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        return append(new Instruction(ExtendedOpcodes.EWRITE2, reg));
-    }
-
-    /**
-     * Add an instruction to the end of the program to write 4 byte value from register to output
-     * buffer.
-     */
-    public ApfGenerator addWriteU32(Register reg) throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        return append(new Instruction(ExtendedOpcodes.EWRITE4, reg));
-    }
-
-    /**
-     * Add an instruction to the end of the program to copy data from APF program/data region to
-     * output buffer and auto-increment the output buffer pointer.
-     *
-     * @param src the offset inside the APF program/data region for where to start copy.
-     * @param len the length of bytes needed to be copied, only <= 255 bytes can be copied at
-     *               one time.
-     * @return the ApfGenerator object
-     */
-    public ApfGenerator addDataCopy(int src, int len)
-            throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        return append(new Instruction(Opcodes.PKTDATACOPY, R1).addUnsigned(src).addU8(len));
-    }
-
-    /**
-     * Add an instruction to the end of the program to copy data from input packet to output
-     * buffer and auto-increment the output buffer pointer.
-     *
-     * @param src the offset inside the input packet for where to start copy.
-     * @param len the length of bytes needed to be copied, only <= 255 bytes can be copied at
-     *               one time.
-     * @return the ApfGenerator object
-     */
-    public ApfGenerator addPacketCopy(int src, int len)
-            throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        return append(new Instruction(Opcodes.PKTDATACOPY, R0).addUnsigned(src).addU8(len));
-    }
-
-    /**
-     * Add an instruction to the end of the program to copy data from APF program/data region to
-     * output buffer and auto-increment the output buffer pointer.
-     * Source offset is stored in R0.
-     *
-     * @param len the number of bytes to be copied, only <= 255 bytes can be copied at once.
-     * @return the ApfGenerator object
-     */
-    public ApfGenerator addDataCopyFromR0(int len) throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        return append(new Instruction(ExtendedOpcodes.EDATACOPY).addU8(len));
-    }
-
-    /**
-     * Add an instruction to the end of the program to copy data from input packet to output
-     * buffer and auto-increment the output buffer pointer.
-     * Source offset is stored in R0.
-     *
-     * @param len the number of bytes to be copied, only <= 255 bytes can be copied at once.
-     * @return the ApfGenerator object
-     */
-    public ApfGenerator addPacketCopyFromR0(int len) throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        return append(new Instruction(ExtendedOpcodes.EPKTCOPY).addU8(len));
-    }
-
-    /**
-     * Add an instruction to the end of the program to copy data from APF program/data region to
-     * output buffer and auto-increment the output buffer pointer.
-     * Source offset is stored in R0.
-     * Copy length is stored in R1.
-     *
-     * @return the ApfGenerator object
-     */
-    public ApfGenerator addDataCopyFromR0LenR1() throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        return append(new Instruction(ExtendedOpcodes.EDATACOPY, R1));
-    }
-
-    /**
-     * Add an instruction to the end of the program to copy data from input packet to output
-     * buffer and auto-increment the output buffer pointer.
-     * Source offset is stored in R0.
-     * Copy length is stored in R1.
-     *
-     * @return the ApfGenerator object
-     */
-    public ApfGenerator addPacketCopyFromR0LenR1() throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        return append(new Instruction(ExtendedOpcodes.EPKTCOPY, R1));
-    }
-
-    /**
-     * Check if the byte is valid dns character: A-Z,0-9,-,_
-     */
-    private static boolean isValidDnsCharacter(byte c) {
-        return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
-    }
-
-    private static void validateNames(@NonNull byte[] names) {
-        final int len = names.length;
-        if (len < 4) {
-            throw new IllegalArgumentException("qnames must have at least length 4");
-        }
-        final String errorMessage = "qname: " + HexDump.toHexString(names)
-                + "is not null-terminated list of TLV-encoded names";
-        int i = 0;
-        while (i < len - 1) {
-            int label_len = names[i++];
-            if (label_len < 1 || label_len > 63) {
-                throw new IllegalArgumentException(
-                        "label len: " + label_len + " must be between 1 and 63");
-            }
-            if (i + label_len >= len - 1) {
-                throw new IllegalArgumentException(errorMessage);
-            }
-            while (label_len-- > 0) {
-                if (!isValidDnsCharacter(names[i++])) {
-                    throw new IllegalArgumentException("qname: " + HexDump.toHexString(names)
-                            + " contains invalid character");
-                }
-            }
-            if (names[i] == 0) {
-                i++; // skip null terminator.
-            }
-        }
-        if (names[len - 1] != 0) {
-            throw new IllegalArgumentException(errorMessage);
-        }
-    }
-
-    /**
-     * Appends a conditional jump instruction to the program: Jumps to {@code tgt} if the UDP
-     * payload's DNS questions do NOT contain the QNAME specified in {@code qnames} and qtype
-     * equals {@code qtype}. Examines the payload starting at the offset in R0.
-     * R = 0 means check for "does not contain".
-     */
-    public ApfGenerator addJumpIfPktAtR0DoesNotContainDnsQ(@NonNull byte[] qnames, int qtype,
-            @NonNull String tgt) throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        validateNames(qnames);
-        return append(new Instruction(ExtendedOpcodes.JDNSQMATCH).setTargetLabel(tgt).addU8(
-                qtype).setBytesImm(qnames));
-    }
-
-    /**
-     * Appends a conditional jump instruction to the program: Jumps to {@code tgt} if the UDP
-     * payload's DNS questions contain the QNAME specified in {@code qnames} and qtype
-     * equals {@code qtype}. Examines the payload starting at the offset in R0.
-     * R = 1 means check for "contain".
-     */
-    public ApfGenerator addJumpIfPktAtR0ContainDnsQ(@NonNull byte[] qnames, int qtype,
-            @NonNull String tgt) throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        validateNames(qnames);
-        return append(new Instruction(ExtendedOpcodes.JDNSQMATCH, R1).setTargetLabel(tgt).addU8(
-                qtype).setBytesImm(qnames));
-    }
-
-    /**
-     * Appends a conditional jump instruction to the program: Jumps to {@code tgt} if the UDP
-     * payload's DNS answers/authority/additional records do NOT contain the NAME
-     * specified in {@code Names}. Examines the payload starting at the offset in R0.
-     * R = 0 means check for "does not contain".
-     */
-    public ApfGenerator addJumpIfPktAtR0DoesNotContainDnsA(@NonNull byte[] names,
-            @NonNull String tgt) throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        validateNames(names);
-        return append(new Instruction(ExtendedOpcodes.JDNSAMATCH).setTargetLabel(tgt).setBytesImm(
-                names));
-    }
-
-    /**
-     * Appends a conditional jump instruction to the program: Jumps to {@code tgt} if the UDP
-     * payload's DNS answers/authority/additional records contain the NAME
-     * specified in {@code Names}. Examines the payload starting at the offset in R0.
-     * R = 1 means check for "contain".
-     */
-    public ApfGenerator addJumpIfPktAtR0ContainDnsA(@NonNull byte[] names,
-            @NonNull String tgt) throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        validateNames(names);
-        return append(new Instruction(ExtendedOpcodes.JDNSAMATCH, R1).setTargetLabel(
-                tgt).setBytesImm(names));
-    }
-
-    private static void checkRange(@NonNull String variableName, long value, long lowerBound,
-            long upperBound) {
+    static void checkRange(@NonNull String variableName, long value, long lowerBound,
+                           long upperBound) {
         if (value >= lowerBound && value <= upperBound) {
             return;
         }
@@ -1332,7 +1035,7 @@ public class ApfGenerator {
      * @{code offset} to the other register.
      * Requires APF v4 or greater.
      */
-    public ApfGenerator addLoadData(Register dst, int ofs)
+    public ApfV4Generator addLoadData(Register dst, int ofs)
             throws IllegalInstructionException {
         requireApfVersion(APF_VERSION_4);
         return append(new Instruction(Opcodes.LDDW, dst).addSigned(ofs));
@@ -1344,7 +1047,7 @@ public class ApfGenerator {
      * @{code offset} to the other register.
      * Requires APF v4 or greater.
      */
-    public ApfGenerator addStoreData(Register src, int ofs)
+    public ApfV4Generator addStoreData(Register src, int ofs)
             throws IllegalInstructionException {
         requireApfVersion(APF_VERSION_4);
         return append(new Instruction(Opcodes.STDW, src).addSigned(ofs));
