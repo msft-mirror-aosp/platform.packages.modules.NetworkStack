@@ -284,9 +284,11 @@ class ApfV5Test {
                 0x03.toByte(), 0xe8.toByte(), 0xff.toByte(),
         ), program)
         assertContentEquals(listOf(
-                "0: dcopy       0, 10",
-                "2: dcopy       1, 5",
-                "5: pcopy       1000, 255"), ApfJniUtils.disassembleApf(program).map { it.trim() })
+                "0: dcopy       src=0, len=10",
+                "2: dcopy       src=1, len=5",
+                "5: pcopy       src=1000, len=255"
+        ),
+        ApfJniUtils.disassembleApf(program).map { it.trim() })
 
         gen = ApfV6Generator()
         gen.addDataCopyFromR0(5)
@@ -301,10 +303,10 @@ class ApfV5Test {
                 encodeInstruction(21, 1, 0), 42,
         ), program)
         assertContentEquals(listOf(
-            "0: edatacopy    r0, 5",
-            "3: epktcopy     r0, 5",
-            "6: edatacopy    r0, r1",
-            "8: epktcopy     r0, r1"), ApfJniUtils.disassembleApf(program).map{ it.trim() })
+            "0: edatacopy    src=r0, len=5",
+            "3: epktcopy     src=r0, len=5",
+            "6: edatacopy    src=r0, len=r1",
+            "8: epktcopy     src=r0, len=r1"), ApfJniUtils.disassembleApf(program).map{ it.trim() })
 
         gen = ApfV6Generator()
         gen.addJumpIfBytesAtR0Equal(byteArrayOf('a'.code.toByte()), ApfV4Generator.DROP_LABEL)
@@ -313,7 +315,7 @@ class ApfV5Test {
                 byteArrayOf(encodeInstruction(opcode = 20, immLength = 1, register = 1),
                         1, 1, 'a'.code.toByte()), program)
         assertContentEquals(listOf(
-            "0: jebs        r0, 0x1, DROP, 61"),
+            "0: jbseq       r0, 0x1, DROP, 61"),
             ApfJniUtils.disassembleApf(program).map{ it.trim() })
 
         val qnames = byteArrayOf(1, 'A'.code.toByte(), 1, 'B'.code.toByte(), 0, 0)
