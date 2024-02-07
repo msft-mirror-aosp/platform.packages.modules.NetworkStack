@@ -170,7 +170,7 @@ public class ApfV6Generator extends ApfV4Generator {
      * @return the ApfGenerator object
      */
     public ApfV4Generator addDataCopy(int src, int len) {
-        return append(new Instruction(Opcodes.PKTDATACOPY, Rbit1).addUnsigned(src).addU8(len));
+        return append(new Instruction(Opcodes.PKTDATACOPY, Rbit1).addDataOffset(src).addU8(len));
     }
 
     /**
@@ -183,7 +183,7 @@ public class ApfV6Generator extends ApfV4Generator {
      * @return the ApfGenerator object
      */
     public ApfV4Generator addPacketCopy(int src, int len) {
-        return append(new Instruction(Opcodes.PKTDATACOPY, Rbit0).addUnsigned(src).addU8(len));
+        return append(new Instruction(Opcodes.PKTDATACOPY, Rbit0).addPacketOffset(src).addU8(len));
     }
 
     /**
@@ -195,7 +195,7 @@ public class ApfV6Generator extends ApfV4Generator {
      * @return the ApfGenerator object
      */
     public ApfV4Generator addDataCopyFromR0(int len) {
-        return append(new Instruction(ExtendedOpcodes.EDATACOPY, Rbit0).addU8(len));
+        return append(new Instruction(ExtendedOpcodes.EPKTDATACOPYIMM, Rbit1).addU8(len));
     }
 
     /**
@@ -207,7 +207,7 @@ public class ApfV6Generator extends ApfV4Generator {
      * @return the ApfGenerator object
      */
     public ApfV4Generator addPacketCopyFromR0(int len) {
-        return append(new Instruction(ExtendedOpcodes.EPKTCOPY, Rbit0).addU8(len));
+        return append(new Instruction(ExtendedOpcodes.EPKTDATACOPYIMM, Rbit0).addU8(len));
     }
 
     /**
@@ -219,7 +219,7 @@ public class ApfV6Generator extends ApfV4Generator {
      * @return the ApfGenerator object
      */
     public ApfV4Generator addDataCopyFromR0LenR1() {
-        return append(new Instruction(ExtendedOpcodes.EDATACOPY, Rbit1));
+        return append(new Instruction(ExtendedOpcodes.EPKTDATACOPYR1, Rbit1));
     }
 
     /**
@@ -231,7 +231,7 @@ public class ApfV6Generator extends ApfV4Generator {
      * @return the ApfGenerator object
      */
     public ApfV4Generator addPacketCopyFromR0LenR1() {
-        return append(new Instruction(ExtendedOpcodes.EPKTCOPY, Rbit1));
+        return append(new Instruction(ExtendedOpcodes.EPKTDATACOPYR1, Rbit0));
     }
 
     /**

@@ -129,12 +129,13 @@ public class ApfV4Generator {
         EWRITE4(40),
         // Copy bytes from input packet/APF program/data region to output buffer and
         // auto-increment the output buffer pointer.
-        // The copy src offset is stored in R0.
-        // when R=0, the copy length is stored in (u8)imm2.
-        // when R=1, the copy length is stored in R1.
-        // e.g. "pktcopy r0, 5", "pktcopy r0, r1", "datacopy r0, 5", "datacopy r0, r1"
-        EPKTCOPY(41),
-        EDATACOPY(42),
+        // Register bit is used to specify the source of data copy.
+        // R=0 means copy from packet.
+        // R=1 means copy from APF program/data region.
+        // The source offset is stored in R0, copy length is stored in u8 imm2 or R1.
+        // e.g. "epktcopy r0, 16", "edatacopy r0, 16", "epktcopy r0, r1", "edatacopy r0, r1"
+        EPKTDATACOPYIMM(41),
+        EPKTDATACOPYR1(42),
         // Jumps if the UDP payload content (starting at R0) does not contain one
         // of the specified QNAMEs, applying case insensitivity.
         // R0: Offset to UDP payload content
@@ -302,8 +303,8 @@ public class ApfV4Generator {
     }
 
     class Instruction {
-        private final byte mOpcode;   // A "Opcode" value.
-        private final Rbit mRbit; // A "Rbit" value.
+        private final Opcodes mOpcode;
+        private final Rbit mRbit;
         public final List<IntImmediate> mIntImms = new ArrayList<>();
         // When mOpcode is a jump:
         private int mTargetLabelSize;
@@ -316,7 +317,7 @@ public class ApfV4Generator {
         int offset;
 
         Instruction(Opcodes opcode, Rbit rbit) {
-            mOpcode = (byte) opcode.value;
+            mOpcode = opcode;
             mRbit = rbit;
         }
 
@@ -356,11 +357,20 @@ public class ApfV4Generator {
             return this;
         }
 
-        Instruction addUnsigned(int imm) {
+        Instruction addUnsigned(long imm) {
             mIntImms.add(IntImmediate.newUnsigned(imm));
             return this;
         }
 
+        // in practice, 'int' always enough for packet offset
+        Instruction addPacketOffset(int imm) {
+            return addUnsigned(imm);
+        }
+
+        // in practice, 'int' always enough for data offset
+        Instruction addDataOffset(int imm) {
+            return addUnsigned(imm);
+        }
 
         Instruction addTwosCompSigned(int imm) {
             mIntImms.add(IntImmediate.newTwosComplementSigned(imm));
@@ -407,7 +417,7 @@ public class ApfV4Generator {
             if (mLabels.containsKey(label)) {
                 throw new IllegalInstructionException("duplicate label " + label);
             }
-            if (mOpcode != Opcodes.LABEL.value) {
+            if (mOpcode != Opcodes.LABEL) {
                 throw new IllegalStateException("adding label to non-label instruction");
             }
             mLabel = label;
@@ -435,7 +445,7 @@ public class ApfV4Generator {
          * @return size of instruction in bytes.
          */
         int size() {
-            if (mOpcode == Opcodes.LABEL.value) {
+            if (mOpcode == Opcodes.LABEL) {
                 return 0;
             }
             int size = 1;
@@ -498,7 +508,7 @@ public class ApfV4Generator {
          */
         private byte generateInstructionByte() {
             int sizeField = generateImmSizeField();
-            return (byte) ((mOpcode << 3) | (sizeField << 1) | (byte) mRbit.value);
+            return (byte) ((mOpcode.value << 3) | (sizeField << 1) | (byte) mRbit.value);
         }
 
         /**
@@ -521,14 +531,14 @@ public class ApfV4Generator {
          * Generate bytecode for this instruction at offset {@link Instruction#offset}.
          */
         void generate(byte[] bytecode) throws IllegalInstructionException {
-            if (mOpcode == Opcodes.LABEL.value) {
+            if (mOpcode == Opcodes.LABEL) {
                 return;
             }
             int writingOffset = offset;
             bytecode[writingOffset++] = generateInstructionByte();
             int indeterminateSize = calculateRequiredIndeterminateSize();
             int startOffset = 0;
-            if (mOpcode == Opcodes.EXT.value) {
+            if (mOpcode == Opcodes.EXT) {
                 // For extend opcode, always write the actual opcode first.
                 writingOffset = mIntImms.get(startOffset++).writeValue(bytecode, writingOffset,
                         indeterminateSize);
@@ -713,7 +723,7 @@ public class ApfV4Generator {
      * bytes from the beginning of the packet into {@code register}.
      */
     public ApfV4Generator addLoad8(Register r, int ofs) {
-        return append(new Instruction(Opcodes.LDB, r).addUnsigned(ofs));
+        return append(new Instruction(Opcodes.LDB, r).addPacketOffset(ofs));
     }
 
     /**
@@ -721,7 +731,7 @@ public class ApfV4Generator {
      * bytes from the beginning of the packet into {@code register}.
      */
     public ApfV4Generator addLoad16(Register r, int ofs) {
-        return append(new Instruction(Opcodes.LDH, r).addUnsigned(ofs));
+        return append(new Instruction(Opcodes.LDH, r).addPacketOffset(ofs));
     }
 
     /**
@@ -729,7 +739,7 @@ public class ApfV4Generator {
      * bytes from the beginning of the packet into {@code register}.
      */
     public ApfV4Generator addLoad32(Register r, int ofs) {
-        return append(new Instruction(Opcodes.LDW, r).addUnsigned(ofs));
+        return append(new Instruction(Opcodes.LDW, r).addPacketOffset(ofs));
     }
 
     /**
@@ -738,7 +748,7 @@ public class ApfV4Generator {
      * the sum of {@code offset} and the value in register R1.
      */
     public ApfV4Generator addLoad8Indexed(Register r, int ofs) {
-        return append(new Instruction(Opcodes.LDBX, r).addUnsigned(ofs));
+        return append(new Instruction(Opcodes.LDBX, r).addPacketOffset(ofs));
     }
 
     /**
@@ -747,7 +757,7 @@ public class ApfV4Generator {
      * the sum of {@code offset} and the value in register R1.
      */
     public ApfV4Generator addLoad16Indexed(Register r, int ofs) {
-        return append(new Instruction(Opcodes.LDHX, r).addUnsigned(ofs));
+        return append(new Instruction(Opcodes.LDHX, r).addPacketOffset(ofs));
     }
 
     /**
@@ -756,7 +766,7 @@ public class ApfV4Generator {
      * the sum of {@code offset} and the value in register R1.
      */
     public ApfV4Generator addLoad32Indexed(Register r, int ofs) {
-        return append(new Instruction(Opcodes.LDWX, r).addUnsigned(ofs));
+        return append(new Instruction(Opcodes.LDWX, r).addPacketOffset(ofs));
     }
 
     /**
@@ -769,14 +779,14 @@ public class ApfV4Generator {
     /**
      * Add an instruction to the end of the program to multiply register R0 by {@code value}.
      */
-    public ApfV4Generator addMul(int val) {
+    public ApfV4Generator addMul(long val) {
         return append(new Instruction(Opcodes.MUL).addUnsigned(val));
     }
 
     /**
      * Add an instruction to the end of the program to divide register R0 by {@code value}.
      */
-    public ApfV4Generator addDiv(int val) {
+    public ApfV4Generator addDiv(long val) {
         return append(new Instruction(Opcodes.DIV).addUnsigned(val));
     }
 
@@ -883,7 +893,7 @@ public class ApfV4Generator {
      * Add an instruction to the end of the program to jump to {@code target} if register R0's
      * value is greater than {@code value}.
      */
-    public ApfV4Generator addJumpIfR0GreaterThan(int val, String tgt) {
+    public ApfV4Generator addJumpIfR0GreaterThan(long val, String tgt) {
         return append(new Instruction(Opcodes.JGT).addUnsigned(val).setTargetLabel(tgt));
     }
 
@@ -891,7 +901,7 @@ public class ApfV4Generator {
      * Add an instruction to the end of the program to jump to {@code target} if register R0's
      * value is less than {@code value}.
      */
-    public ApfV4Generator addJumpIfR0LessThan(int val, String tgt) {
+    public ApfV4Generator addJumpIfR0LessThan(long val, String tgt) {
         return append(new Instruction(Opcodes.JLT).addUnsigned(val).setTargetLabel(tgt));
     }
 
