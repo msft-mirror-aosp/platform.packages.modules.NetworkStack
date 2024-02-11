@@ -15,8 +15,8 @@
  */
 package android.net.apf;
 
-import static android.net.apf.ApfV4Generator.Rbit.Rbit0;
-import static android.net.apf.ApfV4Generator.Rbit.Rbit1;
+import static android.net.apf.BaseApfGenerator.Rbit.Rbit0;
+import static android.net.apf.BaseApfGenerator.Rbit.Rbit1;
 
 import androidx.annotation.NonNull;
 
@@ -27,7 +27,7 @@ import com.android.net.module.util.HexDump;
  *
  * @hide
  */
-public class ApfV6Generator extends ApfV4Generator {
+public class ApfV6Generator extends ApfV4Generator<ApfV6Generator> {
 
     /**
      * Creates an ApfV6Generator instance which is able to emit instructions for the specified
@@ -102,17 +102,29 @@ public class ApfV6Generator extends ApfV4Generator {
     /**
      * Add an instruction to the end of the program to transmit the allocated buffer.
      */
-    public ApfV6Generator addTransmit() {
-        // TRANSMIT requires using Rbit0 because it shares opcode with DISCARD
-        return append(new Instruction(ExtendedOpcodes.TRANSMITDISCARD, Rbit0));
+    public ApfV6Generator addTransmit(int ipOfs) {
+        if (ipOfs >= 255) {
+            throw new IllegalArgumentException("IP offset of " + ipOfs + " must be < 255");
+        }
+        if (ipOfs == -1) ipOfs = 255;
+        return append(new Instruction(ExtendedOpcodes.TRANSMIT, Rbit0).addU8(ipOfs).addU8(255));
     }
 
     /**
-     * Add an instruction to the end of the program to discard the allocated buffer.
+     * Add an instruction to the end of the program to transmit the allocated buffer.
      */
-    public ApfV6Generator addDiscard() {
-        // DISCARD requires using Rbit1 because it shares opcode with TRANSMIT
-        return append(new Instruction(ExtendedOpcodes.TRANSMITDISCARD, Rbit1));
+    public ApfV6Generator addTransmitL4(int ipOfs, int csumOfs, int csumStart, int partialCsum,
+                                        boolean isUdp) {
+        if (ipOfs >= 255) {
+            throw new IllegalArgumentException("IP offset of " + ipOfs + " must be < 255");
+        }
+        if (ipOfs == -1) ipOfs = 255;
+        if (csumOfs >= 255) {
+            throw new IllegalArgumentException("L4 checksum requires csum offset of "
+                                               + csumOfs + " < 255");
+        }
+        return append(new Instruction(ExtendedOpcodes.TRANSMIT, isUdp ? Rbit1 : Rbit0)
+                .addU8(ipOfs).addU8(csumOfs).addU8(csumStart).addU16(partialCsum));
     }
 
     /**
@@ -323,10 +335,5 @@ public class ApfV6Generator extends ApfV4Generator {
         if (names[len - 1] != 0) {
             throw new IllegalArgumentException(errorMessage);
         }
-    }
-
-    ApfV6Generator append(Instruction instruction) {
-        super.append(instruction);
-        return this;
     }
 }
