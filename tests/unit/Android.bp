@@ -15,13 +15,17 @@
 //
 
 package {
+    default_team: "trendy_team_fwk_core_networking",
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
 java_defaults {
     name: "NetworkStackTestsDefaults",
     platform_apis: true,
-    srcs: ["src/**/*.java", "src/**/*.kt"],
+    srcs: [
+        "src/**/*.java",
+        "src/**/*.kt",
+    ],
     resource_dirs: ["res"],
     static_libs: [
         "androidx.test.ext.junit",
@@ -39,7 +43,7 @@ java_defaults {
     ],
     defaults: [
         "framework-connectivity-test-defaults",
-        "libnetworkstackutilsjni_deps"
+        "libnetworkstackutilsjni_deps",
     ],
     jni_libs: [
         // For mockito extended
@@ -55,7 +59,7 @@ java_defaults {
 android_test {
     name: "NetworkStackNextTests",
     target_sdk_version: "current",
-    min_sdk_version: "29",
+    min_sdk_version: "30",
     srcs: [], // TODO: tests that only apply to the current, non-stable API can be added here
     test_suites: ["general-tests"],
     defaults: [
@@ -73,21 +77,27 @@ android_test {
 // configuration needed by the tests is in the NetworkStackTestsDefaults rule.
 android_library {
     name: "NetworkStackTestsLib",
-    min_sdk_version: "29",
+    min_sdk_version: "30",
     defaults: ["NetworkStackTestsDefaults"],
     static_libs: ["NetworkStackApiStableLib"],
+    lint: {
+        test: true,
+
+    },
     visibility: [
         "//packages/modules/NetworkStack/tests/integration",
         "//packages/modules/Connectivity/tests:__subpackages__",
         "//packages/modules/Connectivity/Tethering/tests:__subpackages__",
-    ]
+    ],
 }
 
 android_test {
     name: "NetworkStackTests",
-    min_sdk_version: "29",
-    target_sdk_version: "30",
-    test_suites: ["general-tests", "mts"],
+    min_sdk_version: "30",
+    test_suites: [
+        "general-tests",
+        "mts",
+    ],
     defaults: [
         "NetworkStackTestsDefaults",
         "connectivity-mainline-presubmit-java-defaults",

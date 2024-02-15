@@ -16,6 +16,7 @@
 
 package android.net.shared;
 
+import static android.net.ip.IIpClient.HOSTNAME_SETTING_UNSET;
 import static android.net.ip.IIpClient.PROV_IPV4_DHCP;
 import static android.net.ip.IIpClient.PROV_IPV4_DISABLED;
 import static android.net.ip.IIpClient.PROV_IPV4_STATIC;
@@ -228,6 +229,14 @@ public class ProvisioningConfiguration {
         }
 
         /**
+         * Specify the UID of the remote entity that created this Network.
+         */
+        public Builder withCreatorUid(int creatoruid) {
+            mConfig.mCreatorUid = creatoruid;
+            return this;
+        }
+
+        /**
          * Specify the information elements included in wifi scan result that was obtained
          * prior to connecting to the access point, if this is a WiFi network.
          *
@@ -278,6 +287,17 @@ public class ProvisioningConfiguration {
          */
         public Builder withUniqueEui64AddressesOnly() {
             mConfig.mUniqueEui64AddressesOnly = true;
+            return this;
+        }
+
+        /**
+         * Specify the hostname setting to use during IP provisioning.
+         *     - {@link IIpClient#HOSTNAME_SETTING_UNSET}: Default value.
+         *     - {@link IIpClient#HOSTNAME_SETTING_SEND}: Send the hostname.
+         *     - {@link IIpClient#HOSTNAME_SETTING_DO_NOT_SEND}: Don't send the hostname.
+         */
+        public Builder withHostnameSetting(int setting) {
+            mConfig.mHostnameSetting = setting;
             return this;
         }
 
@@ -492,6 +512,8 @@ public class ProvisioningConfiguration {
     public List<DhcpOption> mDhcpOptions;
     public int mIPv4ProvisioningMode = PROV_IPV4_DHCP;
     public int mIPv6ProvisioningMode = PROV_IPV6_SLAAC;
+    public int mCreatorUid;
+    public int mHostnameSetting = HOSTNAME_SETTING_UNSET;
 
     public ProvisioningConfiguration() {} // used by Builder
 
@@ -510,11 +532,13 @@ public class ProvisioningConfiguration {
         mIPv6AddrGenMode = other.mIPv6AddrGenMode;
         mNetwork = other.mNetwork;
         mDisplayName = other.mDisplayName;
+        mCreatorUid = other.mCreatorUid;
         mScanResultInfo = other.mScanResultInfo;
         mLayer2Info = other.mLayer2Info;
         mDhcpOptions = other.mDhcpOptions;
         mIPv4ProvisioningMode = other.mIPv4ProvisioningMode;
         mIPv6ProvisioningMode = other.mIPv6ProvisioningMode;
+        mHostnameSetting = other.mHostnameSetting;
     }
 
     /**
@@ -540,9 +564,11 @@ public class ProvisioningConfiguration {
         p.ipv6AddrGenMode = mIPv6AddrGenMode;
         p.network = mNetwork;
         p.displayName = mDisplayName;
+        p.creatorUid = mCreatorUid;
         p.scanResultInfo = (mScanResultInfo == null) ? null : mScanResultInfo.toStableParcelable();
         p.layer2Info = (mLayer2Info == null) ? null : mLayer2Info.toStableParcelable();
         p.options = (mDhcpOptions == null) ? null : new ArrayList<>(mDhcpOptions);
+        p.hostnameSetting = mHostnameSetting;
         return p;
     }
 
@@ -572,6 +598,7 @@ public class ProvisioningConfiguration {
         config.mIPv6AddrGenMode = p.ipv6AddrGenMode;
         config.mNetwork = p.network;
         config.mDisplayName = p.displayName;
+        config.mCreatorUid = p.creatorUid;
         config.mScanResultInfo = ScanResultInfo.fromStableParcelable(p.scanResultInfo);
         config.mLayer2Info = Layer2Information.fromStableParcelable(p.layer2Info);
         config.mDhcpOptions = (p.options == null) ? null : new ArrayList<>(p.options);
@@ -582,6 +609,7 @@ public class ProvisioningConfiguration {
             config.mIPv4ProvisioningMode = p.ipv4ProvisioningMode;
             config.mIPv6ProvisioningMode = p.ipv6ProvisioningMode;
         }
+        config.mHostnameSetting = p.hostnameSetting;
         return config;
     }
 
@@ -630,11 +658,13 @@ public class ProvisioningConfiguration {
                 .add("mIPv6AddrGenMode: " + mIPv6AddrGenMode)
                 .add("mNetwork: " + mNetwork)
                 .add("mDisplayName: " + mDisplayName)
+                .add("mCreatorUid:" + mCreatorUid)
                 .add("mScanResultInfo: " + mScanResultInfo)
                 .add("mLayer2Info: " + mLayer2Info)
                 .add("mDhcpOptions: " + mDhcpOptions)
                 .add("mIPv4ProvisioningMode: " + ipv4ProvisioningMode)
                 .add("mIPv6ProvisioningMode: " + ipv6ProvisioningMode)
+                .add("mHostnameSetting: " + mHostnameSetting)
                 .toString();
     }
 
@@ -680,7 +710,9 @@ public class ProvisioningConfiguration {
                 && Objects.equals(mLayer2Info, other.mLayer2Info)
                 && dhcpOptionListEquals(mDhcpOptions, other.mDhcpOptions)
                 && mIPv4ProvisioningMode == other.mIPv4ProvisioningMode
-                && mIPv6ProvisioningMode == other.mIPv6ProvisioningMode;
+                && mIPv6ProvisioningMode == other.mIPv6ProvisioningMode
+                && mCreatorUid == other.mCreatorUid
+                && mHostnameSetting == other.mHostnameSetting;
     }
 
     public boolean isValid() {
