@@ -15,8 +15,14 @@
  */
 package android.net.apf
 
+import android.net.apf.ApfCounterTracker.Counter
+import android.net.apf.ApfTestUtils.DROP
 import android.net.apf.ApfTestUtils.MIN_PKT_SIZE
+import android.net.apf.ApfTestUtils.PASS
+import android.net.apf.ApfTestUtils.assertDrop
 import android.net.apf.ApfTestUtils.assertPass
+import android.net.apf.ApfTestUtils.assertVerdict
+import android.net.apf.BaseApfGenerator.DROP_LABEL
 import android.net.apf.BaseApfGenerator.IllegalInstructionException
 import android.net.apf.BaseApfGenerator.MIN_APF_VERSION
 import android.net.apf.BaseApfGenerator.MIN_APF_VERSION_IN_DEV
@@ -25,6 +31,7 @@ import android.net.apf.BaseApfGenerator.Register.R1
 import androidx.test.filters.SmallTest
 import androidx.test.runner.AndroidJUnit4
 import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -136,6 +143,21 @@ class ApfV5Test {
     }
 
     @Test
+    fun testValidateDnsNames() {
+        // '%' is a valid label character in mDNS subtype
+        // byte == 0xff means it is a '*' wildcard, which is a valid encoding.
+        val program = ApfV6Generator().addJumpIfPktAtR0ContainDnsQ(
+                byteArrayOf(1, '%'.code.toByte(), 0, 0),
+                1,
+                DROP_LABEL)
+                .addJumpIfPktAtR0ContainDnsA(
+                        byteArrayOf(0xff.toByte(), 1, 'B'.code.toByte(), 0, 0),
+                        DROP_LABEL
+                )
+                .generate()
+    }
+
+    @Test
     fun testApfInstructionsEncoding() {
         val v4gen = ApfV4Generator<ApfV4Generator<BaseApfGenerator>>(MIN_APF_VERSION)
         v4gen.addPass()
@@ -195,15 +217,19 @@ class ApfV5Test {
 
         gen = ApfV6Generator()
         gen.addTransmit(-1)
+        gen.addTransmitL4(30, 40, 50, 256, true)
         program = gen.generate()
         // encoding TRANSMIT opcode: opcode=21(EXT opcode number),
         // imm=37(TRANSMIT opcode number),
         assertContentEquals(byteArrayOf(
                 encodeInstruction(opcode = 21, immLength = 1, register = 0),
                 37, 255.toByte(), 255.toByte(),
+                encodeInstruction(opcode = 21, immLength = 1, register = 1), 37, 30, 40, 50, 1, 0
         ), program)
-         assertContentEquals(listOf("0: transmit    ip_ofs=255"),
-             ApfJniUtils.disassembleApf(program).map { it.trim() })
+         assertContentEquals(listOf(
+                 "0: transmit    ip_ofs=255",
+                 "4: transmitudp ip_ofs=30, csum_ofs=40, csum_start=50, partial_csum=0x0100",
+         ), ApfJniUtils.disassembleApf(program).map { it.trim() })
 
         gen = ApfV6Generator()
         val largeByteArray = ByteArray(256) { 0x01 }
@@ -337,6 +363,20 @@ class ApfV5Test {
             ApfJniUtils.disassembleApf(program).map{ it.trim() })
 
         gen = ApfV6Generator()
+        gen.addJumpIfPktAtR0DoesNotContainDnsQSafe(qnames, 0x0c, ApfV4Generator.DROP_LABEL)
+        gen.addJumpIfPktAtR0ContainDnsQSafe(qnames, 0x0c, ApfV4Generator.DROP_LABEL)
+        program = gen.generate()
+        assertContentEquals(byteArrayOf(
+                encodeInstruction(21, 1, 0), 45, 11, 0x0c.toByte(),
+        ) + qnames + byteArrayOf(
+                encodeInstruction(21, 1, 1), 45, 1, 0x0c.toByte(),
+        ) + qnames, program)
+        assertContentEquals(listOf(
+                "0: jdnsqnesafe r0, DROP, 12, (1)A(1)B(0)(0)",
+                "10: jdnsqeqsafe r0, DROP, 12, (1)A(1)B(0)(0)"),
+                ApfJniUtils.disassembleApf(program).map{ it.trim() })
+
+        gen = ApfV6Generator()
         gen.addJumpIfPktAtR0DoesNotContainDnsA(qnames, ApfV4Generator.DROP_LABEL)
         gen.addJumpIfPktAtR0ContainDnsA(qnames, ApfV4Generator.DROP_LABEL)
         program = gen.generate()
@@ -349,6 +389,20 @@ class ApfV5Test {
             "0: jdnsane     r0, DROP, (1)A(1)B(0)(0)",
             "9: jdnsaeq     r0, DROP, (1)A(1)B(0)(0)"),
             ApfJniUtils.disassembleApf(program).map{ it.trim() })
+
+        gen = ApfV6Generator()
+        gen.addJumpIfPktAtR0DoesNotContainDnsASafe(qnames, ApfV4Generator.DROP_LABEL)
+        gen.addJumpIfPktAtR0ContainDnsASafe(qnames, ApfV4Generator.DROP_LABEL)
+        program = gen.generate()
+        assertContentEquals(byteArrayOf(
+                encodeInstruction(21, 1, 0), 46, 10,
+        ) + qnames + byteArrayOf(
+                encodeInstruction(21, 1, 1), 46, 1,
+        ) + qnames, program)
+        assertContentEquals(listOf(
+                "0: jdnsanesafe r0, DROP, (1)A(1)B(0)(0)",
+                "9: jdnsaeqsafe r0, DROP, (1)A(1)B(0)(0)"),
+                ApfJniUtils.disassembleApf(program).map{ it.trim() })
     }
 
     @Test
@@ -381,7 +435,7 @@ class ApfV5Test {
 
     @Test
     fun testCopyToTxBuffer() {
-        val program = ApfV6Generator()
+        var program = ApfV6Generator()
             .addData(byteArrayOf(33, 34, 35))
             .addAllocate(74)
             .addDataCopy(2, 2)
@@ -391,6 +445,68 @@ class ApfV5Test {
             .generate()
         assertPass(MIN_APF_VERSION_IN_DEV, program, testPacket)
         assertContentEquals(byteArrayOf(33, 34, 1, 2, 3), ApfJniUtils.getTransmittedPacket())
+
+        program = ApfV6Generator()
+                .addData(byteArrayOf(33, 34, 35))
+                .addAllocate(266)
+                .addLoadImmediate(R0, 2) // data copy offset
+                .addDataCopyFromR0(2 /* len */)
+                .addLoadImmediate(R0, 4) // data copy offset
+                .addLoadImmediate(R1, 1) // len
+                .addDataCopyFromR0LenR1()
+                .addLoadImmediate(R0, 0) // packet copy offset
+                .addPacketCopyFromR0(1 /* len */)
+                .addLoadImmediate(R0, 1) // packet copy offset
+                .addLoadImmediate(R1, 2) // len
+                .addPacketCopyFromR0LenR1()
+                .addTransmit(-1)
+                .generate()
+        assertPass(MIN_APF_VERSION_IN_DEV, program, testPacket)
+        assertContentEquals(byteArrayOf(33, 34, 35, 1, 2, 3), ApfJniUtils.getTransmittedPacket())
+    }
+
+    @Test
+    fun testPassDrop() {
+        var program = ApfV6Generator()
+                .addDrop()
+                .addPass()
+                .generate()
+        assertDrop(MIN_APF_VERSION_IN_DEV, program, testPacket)
+
+        var dataRegion = ByteArray(Counter.totalSize()) { 0 }
+        program = ApfV6Generator()
+                .addData(byteArrayOf())
+                .addCountAndDrop(Counter.DROPPED_ETH_BROADCAST.value())
+                .generate()
+        assertVerdict(MIN_APF_VERSION_IN_DEV, DROP, program, testPacket, dataRegion)
+        var counterMap = decodeCountersIntoMap(dataRegion)
+        assertEquals(mapOf<Counter, Long>(
+                Counter.TOTAL_PACKETS to 1,
+                Counter.DROPPED_ETH_BROADCAST to 1), counterMap)
+
+        dataRegion = ByteArray(Counter.totalSize()) { 0 }
+        program = ApfV6Generator()
+                .addData(byteArrayOf())
+                .addCountAndPass(Counter.PASSED_ARP.value())
+                .generate()
+        assertVerdict(MIN_APF_VERSION_IN_DEV, PASS, program, testPacket, dataRegion)
+        counterMap = decodeCountersIntoMap(dataRegion)
+        assertEquals(mapOf<Counter, Long>(
+                Counter.TOTAL_PACKETS to 1,
+                Counter.PASSED_ARP to 1), counterMap)
+    }
+
+    private fun decodeCountersIntoMap(counterBytes: ByteArray): Map<Counter, Long> {
+        val counters = Counter::class.java.enumConstants
+        val ret = HashMap<Counter, Long>()
+        // starting from index 2 to skip the endianness mark
+        for (c in listOf(*counters).subList(2, counters.size)) {
+            val value = ApfCounterTracker.getCounterValue(counterBytes, c)
+            if (value != 0L) {
+                ret[c] = value
+            }
+        }
+        return ret
     }
 
     private fun encodeInstruction(opcode: Int, immLength: Int, register: Int): Byte {
