@@ -16,6 +16,7 @@
 
 package android.net.apf
 
+import android.net.apf.BaseApfGenerator.Register.R0
 import androidx.test.filters.SmallTest
 import androidx.test.runner.AndroidJUnit4
 import com.android.testutils.assertThrows
@@ -34,7 +35,7 @@ import org.mockito.MockitoAnnotations
 class JumpTableTest {
 
     @Mock
-    lateinit var gen: ApfV4Generator
+    lateinit var gen: ApfV4Generator<ApfV4Generator<BaseApfGenerator>>
 
     @Before
     fun setUp() {
@@ -94,7 +95,7 @@ class JumpTableTest {
         j.generate(gen)
 
         inOrder.verify(gen).defineLabel(name)
-        inOrder.verify(gen).addLoadFromMemory(ApfV4Generator.Register.R0, slot)
+        inOrder.verify(gen).addLoadFromMemory(R0, slot)
         inOrder.verify(gen).addJumpIfR0Equals(0, "foo")
         inOrder.verify(gen).addJumpIfR0Equals(1, "bar")
         inOrder.verify(gen).addJumpIfR0Equals(2, "baz")
