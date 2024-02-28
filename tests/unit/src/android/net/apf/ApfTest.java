@@ -16,11 +16,11 @@
 
 package android.net.apf;
 
-import static android.net.apf.ApfV4Generator.APF_VERSION_4;
-import static android.net.apf.ApfV4Generator.DROP_LABEL;
-import static android.net.apf.ApfV4Generator.PASS_LABEL;
-import static android.net.apf.ApfV4Generator.Register.R0;
-import static android.net.apf.ApfV4Generator.Register.R1;
+import static android.net.apf.BaseApfGenerator.APF_VERSION_4;
+import static android.net.apf.BaseApfGenerator.DROP_LABEL;
+import static android.net.apf.BaseApfGenerator.PASS_LABEL;
+import static android.net.apf.BaseApfGenerator.Register.R0;
+import static android.net.apf.BaseApfGenerator.Register.R1;
 import static android.net.apf.ApfJniUtils.compareBpfApf;
 import static android.net.apf.ApfJniUtils.compileToBpf;
 import static android.net.apf.ApfJniUtils.dropsAllPackets;
@@ -70,7 +70,7 @@ import android.net.apf.ApfFilter.ApfConfiguration;
 import android.net.apf.ApfTestUtils.MockIpClientCallback;
 import android.net.apf.ApfTestUtils.TestApfFilter;
 import android.net.apf.ApfTestUtils.TestLegacyApfFilter;
-import android.net.apf.ApfV4Generator.IllegalInstructionException;
+import android.net.apf.BaseApfGenerator.IllegalInstructionException;
 import android.net.metrics.IpConnectivityLog;
 import android.os.Build;
 import android.os.PowerManager;
@@ -877,9 +877,16 @@ public class ApfTest {
         assertDataMemoryContents(DROP, gen.generate(), packet, data, expected_data);
 
         // Same program as before, but this time we're trying to load past the end of the data.
+        // 3 instructions, all normal opcodes (LI, LDDW, JMP) with 1 byte immediate = 6 byte program
+        // 32 byte data length, for a total of 38 byte ram len.
+        // APFv6 needs to round this up to be a multiple of 4, so 40.
         gen = new ApfV4Generator(APF_VERSION_4);
         gen.addLoadImmediate(R0, 20);
-        gen.addLoadData(R1, 15);  // 20 + 15 > 32
+        if (mApfVersion == 4) {
+            gen.addLoadData(R1, 15);  // R0(20)+15+U32[0..3] >= 6 prog + 32 data, so invalid
+        } else {
+            gen.addLoadData(R1, 17);  // R0(20)+17+U32[0..3] >= 6 prog + 2 pad + 32 data, so invalid
+        }
         gen.addJump(DROP_LABEL);  // Not reached.
         assertDataMemoryContents(PASS, gen.generate(), packet, data, expected_data);
 
@@ -1388,21 +1395,16 @@ public class ApfTest {
 
     }
 
-    /** Adds to the program a no-op instruction that is one byte long. */
-    private void addOneByteNoop(ApfV4Generator gen) {
-        gen.addLeftShift(0);
-    }
-
     @Test
-    public void testAddOneByteNoopAddsOneByte() throws Exception {
+    public void testAddNopAddsOneByte() throws Exception {
         ApfV4Generator gen = new ApfV4Generator(MIN_APF_VERSION);
-        addOneByteNoop(gen);
+        gen.addNop();
         assertEquals(1, gen.generate().length);
 
         final int count = 42;
         gen = new ApfV4Generator(MIN_APF_VERSION);
         for (int i = 0; i < count; i++) {
-            addOneByteNoop(gen);
+            gen.addNop();
         }
         assertEquals(count, gen.generate().length);
     }
@@ -1493,7 +1495,7 @@ public class ApfTest {
 
         // Hack to prevent the APF instruction limit triggering.
         for (int i = 0; i < 500; i++) {
-            addOneByteNoop(gen);
+            gen.addNop();
         }
 
         byte[] program = gen.generate();
@@ -1579,7 +1581,7 @@ public class ApfTest {
         // bytes, is capable of dropping the packet.
         ApfV4Generator gen = generateDnsFilter(/*ipv6=*/ true, labels);
         for (int i = 0; i < expectedNecessaryOverhead; i++) {
-            addOneByteNoop(gen);
+            gen.addNop();
         }
         final byte[] programWithJustEnoughOverhead = gen.generate();
         assertVerdict(
@@ -1593,7 +1595,7 @@ public class ApfTest {
         // cannot correctly drop the packet because it hits the interpreter instruction limit.
         gen = generateDnsFilter(/*ipv6=*/ true, labels);
         for (int i = 0; i < expectedNecessaryOverhead - 1; i++) {
-            addOneByteNoop(gen);
+            gen.addNop();
         }
         final byte[] programWithNotEnoughOverhead = gen.generate();
 
