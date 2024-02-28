@@ -51,6 +51,7 @@ import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PR
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_GRATUITOUS_NA_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.createInet6AddressFromEui64;
 import static com.android.networkstack.util.NetworkStackUtils.macAddressToEui64;
 import static com.android.server.util.PermissionUtil.enforceNetworkStackCallingPermission;
@@ -705,6 +706,7 @@ public class IpClient extends StateMachine {
     private final boolean mEnableIpClientIgnoreLowRaLifetime;
     private final boolean mApfShouldHandleLightDoze;
     private final boolean mEnableApfPollingCounters;
+    private final boolean mPopulateLinkAddressLifetime;
 
     private InterfaceParams mInterfaceParams;
 
@@ -936,17 +938,21 @@ public class IpClient extends StateMachine {
         mApfCounterPollingIntervalMs = mDependencies.getDeviceConfigPropertyInt(
                 CONFIG_APF_COUNTER_POLLING_INTERVAL_SECS,
                 DEFAULT_APF_COUNTER_POLLING_INTERVAL_SECS) * DateUtils.SECOND_IN_MILLIS;
-        mUseNewApfFilter = mDependencies.isFeatureEnabled(context, APF_NEW_RA_FILTER_VERSION);
+        mUseNewApfFilter = SdkLevel.isAtLeastV() || mDependencies.isFeatureEnabled(context,
+                APF_NEW_RA_FILTER_VERSION);
         mEnableApfPollingCounters = mDependencies.isFeatureEnabled(context,
                 APF_POLLING_COUNTERS_VERSION);
-        mEnableIpClientIgnoreLowRaLifetime = mDependencies.isFeatureEnabled(context,
-                IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION);
+        mEnableIpClientIgnoreLowRaLifetime =
+                SdkLevel.isAtLeastV() || mDependencies.isFeatureEnabled(context,
+                        IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION);
         // Light doze mode status checking API is only available at T or later releases.
         mApfShouldHandleLightDoze = SdkLevel.isAtLeastT() && mDependencies.isFeatureNotChickenedOut(
                 mContext, APF_HANDLE_LIGHT_DOZE_FORCE_DISABLE);
+        mPopulateLinkAddressLifetime = mDependencies.isFeatureEnabled(context,
+                IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION);
 
         IpClientLinkObserver.Configuration config = new IpClientLinkObserver.Configuration(
-                mMinRdnssLifetimeSec);
+                mMinRdnssLifetimeSec, mPopulateLinkAddressLifetime);
 
         mLinkObserver = new IpClientLinkObserver(
                 mContext, getHandler(),
@@ -2259,13 +2265,6 @@ public class IpClient extends StateMachine {
                 setIpv6Sysctl(DAD_TRANSMITS, 0 /* dad_transmits */);
             }
         }
-        // Check the feature flag first before reading IPv6 sysctl, which can prevent from
-        // triggering a potential kernel bug about the sysctl.
-        // TODO: add unit test to check if the setIpv6Sysctl() is called or not.
-        if (mEnableIpClientIgnoreLowRaLifetime && mUseNewApfFilter
-                && mDependencies.hasIpv6Sysctl(mInterfaceName, ACCEPT_RA_MIN_LFT)) {
-            setIpv6Sysctl(ACCEPT_RA_MIN_LFT, mAcceptRaMinLft);
-        }
         return mInterfaceCtrl.setIPv6PrivacyExtensions(true)
                 && mInterfaceCtrl.setIPv6AddrGenModeIfSupported(mConfiguration.mIPv6AddrGenMode)
                 && mInterfaceCtrl.enableIPv6();
@@ -2450,7 +2449,17 @@ public class IpClient extends StateMachine {
         }
 
         apfConfig.minRdnssLifetimeSec = mMinRdnssLifetimeSec;
-        apfConfig.acceptRaMinLft = mAcceptRaMinLft;
+        // Check the feature flag first before reading IPv6 sysctl, which can prevent from
+        // triggering a potential kernel bug about the sysctl.
+        // TODO: add unit test to check if the setIpv6Sysctl() is called or not.
+        if (mEnableIpClientIgnoreLowRaLifetime && mUseNewApfFilter
+                && mDependencies.hasIpv6Sysctl(mInterfaceName, ACCEPT_RA_MIN_LFT)) {
+            setIpv6Sysctl(ACCEPT_RA_MIN_LFT, mAcceptRaMinLft);
+            final Integer acceptRaMinLft = getIpv6Sysctl(ACCEPT_RA_MIN_LFT);
+            apfConfig.acceptRaMinLft = acceptRaMinLft == null ? 0 : acceptRaMinLft;
+        } else {
+            apfConfig.acceptRaMinLft = 0;
+        }
         apfConfig.shouldHandleLightDoze = mApfShouldHandleLightDoze;
         apfConfig.minMetricsSessionDurationMs = mApfCounterPollingIntervalMs;
         return mDependencies.maybeCreateApfFilter(mContext, apfConfig, mInterfaceParams,
@@ -2665,7 +2674,8 @@ public class IpClient extends StateMachine {
             isManagedWifiProfile = true;
         }
         mDhcpClient.sendMessage(DhcpClient.CMD_START_DHCP, new DhcpClient.Configuration(mL2Key,
-                isUsingPreconnection(), options, isManagedWifiProfile));
+                isUsingPreconnection(), options, isManagedWifiProfile,
+                mConfiguration.mHostnameSetting));
     }
 
     private boolean hasPermission(String permissionName) {
@@ -3052,14 +3062,22 @@ public class IpClient extends StateMachine {
             }
         }
 
-        private void addInterfaceAddress(@NonNull final Inet6Address address,
+        private void addInterfaceAddress(@Nullable final Inet6Address address,
                 @NonNull final IaPrefixOption ipo) {
             final int flags = IFA_F_NOPREFIXROUTE | IFA_F_MANAGETEMPADDR | IFA_F_NODAD;
             final long now = SystemClock.elapsedRealtime();
-            final long deprecationTime = now + ipo.preferred;
-            final long expirationTime = now + ipo.valid;
-            final LinkAddress la = new LinkAddress(address, RFC7421_PREFIX_LENGTH, flags,
-                    RT_SCOPE_UNIVERSE /* scope */, deprecationTime, expirationTime);
+            // Per RFC8415 section 21.22 the preferred/valid lifetime in IA Prefix option
+            // expressed in units of seconds.
+            final long deprecationTime = now + ipo.preferred * 1000;
+            final long expirationTime = now + ipo.valid * 1000;
+            final LinkAddress la;
+            try {
+                la = new LinkAddress(address, RFC7421_PREFIX_LENGTH, flags,
+                        RT_SCOPE_UNIVERSE /* scope */, deprecationTime, expirationTime);
+            } catch (IllegalArgumentException e) {
+                Log.e(TAG, "Invalid IPv6 link address " + e);
+                return;
+            }
             if (!la.isGlobalPreferred()) {
                 Log.w(TAG, la + " is not a global IPv6 address");
                 return;
@@ -3075,15 +3093,21 @@ public class IpClient extends StateMachine {
 
         private void updateDelegatedAddresses(@NonNull final List<IaPrefixOption> valid) {
             if (valid.isEmpty()) return;
+            final List<IpPrefix> zeroLifetimePrefixList = new ArrayList<>();
             for (IaPrefixOption ipo : valid) {
                 final IpPrefix prefix = ipo.getIpPrefix();
                 // The prefix with preferred/valid lifetime of 0 is considered as a valid prefix,
-                // it can be passed to IpClient from Dhcp6Client, however, client should stop using
-                // the global addresses derived from this prefix immediately.
+                // and can be passed to IpClient from Dhcp6Client, but client should stop using
+                // the global addresses derived from this prefix asap. Deleting the associated
+                // global IPv6 addresses immediately before adding another IPv6 address may result
+                // in a race where the device throws the provisioning failure callback due to the
+                // loss of all valid IPv6 addresses, however, IPv6 provisioning will soon complete
+                // successfully when the user space sees the new IPv6 address update. To avoid this
+                // race, temporarily store all prefix(es) with 0 preferred/valid lifetime and then
+                // delete them after iterating through all valid IA prefix options.
                 if (ipo.withZeroLifetimes()) {
-                    Log.d(TAG, "Delete IPv6 address derived from prefix " + prefix
-                            + " with 0 preferred/valid lifetime");
-                    deleteIpv6PrefixDelegationAddresses(prefix);
+                    zeroLifetimePrefixList.add(prefix);
+                    continue;
                 }
                 // Otherwise, configure IPv6 addresses derived from the delegated prefix(es) on
                 // the interface. We've checked that delegated prefix is valid upon receiving the
@@ -3093,6 +3117,15 @@ public class IpClient extends StateMachine {
                 final Inet6Address address = createInet6AddressFromEui64(prefix,
                         macAddressToEui64(mInterfaceParams.macAddr));
                 addInterfaceAddress(address, ipo);
+            }
+
+            // Delete global IPv6 addresses derived from prefix with 0 preferred/valid lifetime.
+            if (!zeroLifetimePrefixList.isEmpty()) {
+                for (IpPrefix prefix : zeroLifetimePrefixList) {
+                    Log.d(TAG, "Delete IPv6 address derived from prefix " + prefix
+                            + " with 0 preferred/valid lifetime");
+                    deleteIpv6PrefixDelegationAddresses(prefix);
+                }
             }
         }
 
@@ -3236,7 +3269,24 @@ public class IpClient extends StateMachine {
 
                 case DhcpClient.CMD_CONFIGURE_LINKADDRESS: {
                     final LinkAddress ipAddress = (LinkAddress) msg.obj;
-                    if (mInterfaceCtrl.setIPv4Address(ipAddress)) {
+                    final boolean success;
+                    if (mPopulateLinkAddressLifetime) {
+                        // For IPv4 link addresses, there is no concept of preferred/valid
+                        // lifetimes. Populate the ifa_cacheinfo attribute in the netlink
+                        // message with the DHCP lease duration, which is used by the kernel
+                        // to maintain the validity of the IP addresses.
+                        final int leaseDuration = msg.arg1;
+                        success = NetlinkUtils.sendRtmNewAddressRequest(mInterfaceParams.index,
+                                ipAddress.getAddress(),
+                                (short) ipAddress.getPrefixLength(),
+                                0 /* flags */,
+                                (byte) RT_SCOPE_UNIVERSE /* scope */,
+                                leaseDuration /* preferred */,
+                                leaseDuration /* valid */);
+                    } else {
+                        success = mInterfaceCtrl.setIPv4Address(ipAddress);
+                    }
+                    if (success) {
                         // Although it's impossible to happen that DHCP client becomes null in
                         // RunningState and then NPE is thrown when it attempts to send a message
                         // on an null object, sometimes it's found during stress tests. If this
