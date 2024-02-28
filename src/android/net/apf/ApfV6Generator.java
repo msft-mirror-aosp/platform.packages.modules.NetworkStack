@@ -15,8 +15,8 @@
  */
 package android.net.apf;
 
-import static android.net.apf.ApfV4Generator.Rbit.Rbit0;
-import static android.net.apf.ApfV4Generator.Rbit.Rbit1;
+import static android.net.apf.BaseApfGenerator.Rbit.Rbit0;
+import static android.net.apf.BaseApfGenerator.Rbit.Rbit1;
 
 import androidx.annotation.NonNull;
 
@@ -27,7 +27,7 @@ import com.android.net.module.util.HexDump;
  *
  * @hide
  */
-public class ApfV6Generator extends ApfV4Generator {
+public class ApfV6Generator extends ApfV4Generator<ApfV6Generator> {
 
     /**
      * Creates an ApfV6Generator instance which is able to emit instructions for the specified
@@ -100,19 +100,39 @@ public class ApfV6Generator extends ApfV4Generator {
     }
 
     /**
-     * Add an instruction to the end of the program to transmit the allocated buffer.
+     * Add an instruction to the end of the program to transmit the allocated buffer without
+     * checksum.
      */
-    public ApfV6Generator addTransmit() {
-        // TRANSMIT requires using Rbit0 because it shares opcode with DISCARD
-        return append(new Instruction(ExtendedOpcodes.TRANSMITDISCARD, Rbit0));
+    public ApfV6Generator addTransmitWithoutChecksum() {
+        return addTransmit(-1 /* ipOfs */);
     }
 
     /**
-     * Add an instruction to the end of the program to discard the allocated buffer.
+     * Add an instruction to the end of the program to transmit the allocated buffer.
      */
-    public ApfV6Generator addDiscard() {
-        // DISCARD requires using Rbit1 because it shares opcode with TRANSMIT
-        return append(new Instruction(ExtendedOpcodes.TRANSMITDISCARD, Rbit1));
+    public ApfV6Generator addTransmit(int ipOfs) {
+        if (ipOfs >= 255) {
+            throw new IllegalArgumentException("IP offset of " + ipOfs + " must be < 255");
+        }
+        if (ipOfs == -1) ipOfs = 255;
+        return append(new Instruction(ExtendedOpcodes.TRANSMIT, Rbit0).addU8(ipOfs).addU8(255));
+    }
+
+    /**
+     * Add an instruction to the end of the program to transmit the allocated buffer.
+     */
+    public ApfV6Generator addTransmitL4(int ipOfs, int csumOfs, int csumStart, int partialCsum,
+                                        boolean isUdp) {
+        if (ipOfs >= 255) {
+            throw new IllegalArgumentException("IP offset of " + ipOfs + " must be < 255");
+        }
+        if (ipOfs == -1) ipOfs = 255;
+        if (csumOfs >= 255) {
+            throw new IllegalArgumentException("L4 checksum requires csum offset of "
+                                               + csumOfs + " < 255");
+        }
+        return append(new Instruction(ExtendedOpcodes.TRANSMIT, isUdp ? Rbit1 : Rbit0)
+                .addU8(ipOfs).addU8(csumOfs).addU8(csumStart).addU16(partialCsum));
     }
 
     /**
@@ -167,7 +187,7 @@ public class ApfV6Generator extends ApfV4Generator {
      * @param src the offset inside the APF program/data region for where to start copy.
      * @param len the length of bytes needed to be copied, only <= 255 bytes can be copied at
      *               one time.
-     * @return the ApfGenerator object
+     * @return the ApfV6Generator object
      */
     public ApfV6Generator addDataCopy(int src, int len) {
         return append(new Instruction(Opcodes.PKTDATACOPY, Rbit1).addDataOffset(src).addU8(len));
@@ -180,7 +200,7 @@ public class ApfV6Generator extends ApfV4Generator {
      * @param src the offset inside the input packet for where to start copy.
      * @param len the length of bytes needed to be copied, only <= 255 bytes can be copied at
      *               one time.
-     * @return the ApfGenerator object
+     * @return the ApfV6Generator object
      */
     public ApfV6Generator addPacketCopy(int src, int len) {
         return append(new Instruction(Opcodes.PKTDATACOPY, Rbit0).addPacketOffset(src).addU8(len));
@@ -192,7 +212,7 @@ public class ApfV6Generator extends ApfV4Generator {
      * Source offset is stored in R0.
      *
      * @param len the number of bytes to be copied, only <= 255 bytes can be copied at once.
-     * @return the ApfGenerator object
+     * @return the ApfV6Generator object
      */
     public ApfV6Generator addDataCopyFromR0(int len) {
         return append(new Instruction(ExtendedOpcodes.EPKTDATACOPYIMM, Rbit1).addU8(len));
@@ -204,7 +224,7 @@ public class ApfV6Generator extends ApfV4Generator {
      * Source offset is stored in R0.
      *
      * @param len the number of bytes to be copied, only <= 255 bytes can be copied at once.
-     * @return the ApfGenerator object
+     * @return the ApfV6Generator object
      */
     public ApfV6Generator addPacketCopyFromR0(int len) {
         return append(new Instruction(ExtendedOpcodes.EPKTDATACOPYIMM, Rbit0).addU8(len));
@@ -239,6 +259,7 @@ public class ApfV6Generator extends ApfV4Generator {
      * payload's DNS questions do NOT contain the QNAMEs specified in {@code qnames} and qtype
      * equals {@code qtype}. Examines the payload starting at the offset in R0.
      * R = 0 means check for "does not contain".
+     * Drops packets if packets are corrupted.
      */
     public ApfV6Generator addJumpIfPktAtR0DoesNotContainDnsQ(@NonNull byte[] qnames, int qtype,
                                                              @NonNull String tgt) {
@@ -248,10 +269,22 @@ public class ApfV6Generator extends ApfV4Generator {
     }
 
     /**
+     * Same as {@link #addJumpIfPktAtR0DoesNotContainDnsQ} except passes packets if packets are
+     * corrupted.
+     */
+    public ApfV6Generator addJumpIfPktAtR0DoesNotContainDnsQSafe(@NonNull byte[] qnames, int qtype,
+            @NonNull String tgt) {
+        validateNames(qnames);
+        return append(new Instruction(ExtendedOpcodes.JDNSQMATCHSAFE, Rbit0).setTargetLabel(
+                tgt).addU8(qtype).setBytesImm(qnames));
+    }
+
+    /**
      * Appends a conditional jump instruction to the program: Jumps to {@code tgt} if the UDP
      * payload's DNS questions contain the QNAMEs specified in {@code qnames} and qtype
      * equals {@code qtype}. Examines the payload starting at the offset in R0.
      * R = 1 means check for "contain".
+     * Drops packets if packets are corrupted.
      */
     public ApfV6Generator addJumpIfPktAtR0ContainDnsQ(@NonNull byte[] qnames, int qtype,
                                                       @NonNull String tgt) {
@@ -261,10 +294,22 @@ public class ApfV6Generator extends ApfV4Generator {
     }
 
     /**
+     * Same as {@link #addJumpIfPktAtR0ContainDnsQ} except passes packets if packets are
+     * corrupted.
+     */
+    public ApfV6Generator addJumpIfPktAtR0ContainDnsQSafe(@NonNull byte[] qnames, int qtype,
+            @NonNull String tgt) {
+        validateNames(qnames);
+        return append(new Instruction(ExtendedOpcodes.JDNSQMATCHSAFE, Rbit1).setTargetLabel(
+                tgt).addU8(qtype).setBytesImm(qnames));
+    }
+
+    /**
      * Appends a conditional jump instruction to the program: Jumps to {@code tgt} if the UDP
      * payload's DNS answers/authority/additional records do NOT contain the NAMEs
      * specified in {@code Names}. Examines the payload starting at the offset in R0.
      * R = 0 means check for "does not contain".
+     * Drops packets if packets are corrupted.
      */
     public ApfV6Generator addJumpIfPktAtR0DoesNotContainDnsA(@NonNull byte[] names,
                                                              @NonNull String tgt) {
@@ -274,10 +319,22 @@ public class ApfV6Generator extends ApfV4Generator {
     }
 
     /**
+     * Same as {@link #addJumpIfPktAtR0DoesNotContainDnsA} except passes packets if packets are
+     * corrupted.
+     */
+    public ApfV6Generator addJumpIfPktAtR0DoesNotContainDnsASafe(@NonNull byte[] names,
+            @NonNull String tgt) {
+        validateNames(names);
+        return append(new Instruction(ExtendedOpcodes.JDNSAMATCHSAFE, Rbit0).setTargetLabel(tgt)
+                .setBytesImm(names));
+    }
+
+    /**
      * Appends a conditional jump instruction to the program: Jumps to {@code tgt} if the UDP
      * payload's DNS answers/authority/additional records contain the NAMEs
      * specified in {@code Names}. Examines the payload starting at the offset in R0.
      * R = 1 means check for "contain".
+     * Drops packets if packets are corrupted.
      */
     public ApfV6Generator addJumpIfPktAtR0ContainDnsA(@NonNull byte[] names,
                                                       @NonNull String tgt) {
@@ -287,10 +344,21 @@ public class ApfV6Generator extends ApfV4Generator {
     }
 
     /**
+     * Same as {@link #addJumpIfPktAtR0ContainDnsA} except passes packets if packets are
+     * corrupted.
+     */
+    public ApfV6Generator addJumpIfPktAtR0ContainDnsASafe(@NonNull byte[] names,
+            @NonNull String tgt) {
+        validateNames(names);
+        return append(new Instruction(ExtendedOpcodes.JDNSAMATCHSAFE, Rbit1).setTargetLabel(
+                tgt).setBytesImm(names));
+    }
+
+    /**
      * Check if the byte is valid dns character: A-Z,0-9,-,_
      */
     private static boolean isValidDnsCharacter(byte c) {
-        return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+        return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '%';
     }
 
     private static void validateNames(@NonNull byte[] names) {
@@ -303,6 +371,8 @@ public class ApfV6Generator extends ApfV4Generator {
         int i = 0;
         while (i < len - 1) {
             int label_len = names[i++];
+            // byte == 0xff means it is a '*' wildcard
+            if (label_len == -1) continue;
             if (label_len < 1 || label_len > 63) {
                 throw new IllegalArgumentException(
                         "label len: " + label_len + " must be between 1 and 63");
@@ -323,10 +393,5 @@ public class ApfV6Generator extends ApfV4Generator {
         if (names[len - 1] != 0) {
             throw new IllegalArgumentException(errorMessage);
         }
-    }
-
-    ApfV6Generator append(Instruction instruction) {
-        super.append(instruction);
-        return this;
     }
 }

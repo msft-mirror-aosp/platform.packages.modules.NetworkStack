@@ -16,8 +16,8 @@
 
 package android.net.apf;
 
-import static android.net.apf.ApfV4Generator.Register.R0;
-import static android.net.apf.ApfV4Generator.Register.R1;
+import static android.net.apf.BaseApfGenerator.Register.R0;
+import static android.net.apf.BaseApfGenerator.Register.R1;
 import static android.net.util.SocketUtils.makePacketSocketAddress;
 import static android.os.PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED;
 import static android.os.PowerManager.ACTION_DEVICE_LIGHT_IDLE_MODE_CHANGED;
@@ -48,7 +48,7 @@ import android.net.LinkProperties;
 import android.net.NattKeepalivePacketDataParcelable;
 import android.net.TcpKeepalivePacketDataParcelable;
 import android.net.apf.ApfCounterTracker.Counter;
-import android.net.apf.ApfV4Generator.IllegalInstructionException;
+import android.net.apf.BaseApfGenerator.IllegalInstructionException;
 import android.net.ip.IpClient.IpClientCallbacksWrapper;
 import android.os.PowerManager;
 import android.os.SystemClock;
@@ -597,10 +597,6 @@ public class ApfFilter implements AndroidPacketFilter {
 
             if (type == Type.MATCH && (lifetime != 0 || min != 0)) {
                 throw new IllegalArgumentException("lifetime, min must be 0 for MATCH sections");
-            }
-            // Clamp the lifetime to INT_MAX to prevent it from ever going negative.
-            if (lifetime > Integer.MAX_VALUE) {
-                lifetime = Integer.MAX_VALUE;
             }
             this.lifetime = lifetime;
 
@@ -1777,6 +1773,9 @@ public class ApfFilter implements AndroidPacketFilter {
         maybeSetupCounter(gen, Counter.DROPPED_IPV6_MULTICAST_NA);
         gen.addJump(mCountAndDropLabel);
         gen.defineLabel(skipUnsolicitedMulticastNALabel);
+
+        // Note that this is immediately followed emitEpilogue which will:
+        // maybeSetupCounter(gen, Counter.PASSED_IPV6_ICMP);
     }
 
     /** Encodes qname in TLV pattern. */
@@ -1972,6 +1971,15 @@ public class ApfFilter implements AndroidPacketFilter {
             gen.addLoadData(R0, 0);  // load counter
             gen.addAdd(1);
             gen.addStoreData(R0, 0);  // write-back counter
+
+            maybeSetupCounter(gen, Counter.FILTER_AGE_SECONDS);
+            gen.addLoadFromMemory(R0, 15);  // m[15] is filter age in seconds
+            gen.addStoreData(R0, 0);  // store 'counter'
+
+            // requires a new enough APFv5+ interpreter, otherwise will be 0
+            maybeSetupCounter(gen, Counter.FILTER_AGE_16384THS);
+            gen.addLoadFromMemory(R0, 9);  // m[9] is filter age in 16384ths
+            gen.addStoreData(R0, 0);  // store 'counter'
         }
 
         // Here's a basic summary of what the initial program does:
