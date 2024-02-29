@@ -16,8 +16,11 @@
 
 package android.net.apf;
 
-import android.net.apf.ApfV4Generator.IllegalInstructionException;
-import android.net.apf.ApfV4Generator.Register;
+import static android.net.apf.BaseApfGenerator.Register.R0;
+import static android.net.apf.BaseApfGenerator.Register.R1;
+
+import android.net.apf.BaseApfGenerator.IllegalInstructionException;
+import android.net.apf.BaseApfGenerator.Register;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -29,7 +32,7 @@ import java.io.InputStreamReader;
  *       translation of all BPF programs.
  *
  * Example usage:
- *   javac net/java/android/net/apf/ApfGenerator.java \
+ *   javac net/java/android/net/apf/ApfV4Generator.java \
  *         tests/servicestests/src/android/net/apf/Bpf2Apf.java
  *   sudo tcpdump -i em1 -d icmp | java -classpath tests/servicestests/src:net/java \
  *                                      android.net.apf.Bpf2Apf
@@ -67,7 +70,7 @@ public class Bpf2Apf {
             case "ldx":
             case "ldxb":
             case "ldxh":
-                Register dest = opcode.contains("x") ? Register.R1 : Register.R0;
+                Register dest = opcode.contains("x") ? R1 : R0;
                 if (arg.equals("4*([14]&0xf)")) {
                     if (!opcode.equals("ldxb")) {
                         throw new IllegalArgumentException("Unhandled instruction: " + line);
@@ -140,7 +143,7 @@ public class Bpf2Apf {
                 break;
             case "st":
             case "stx":
-                Register src = opcode.contains("x") ? Register.R1 : Register.R0;
+                Register src = opcode.contains("x") ? R1 : R0;
                 if (!arg.startsWith("M[")) {
                     throw new IllegalArgumentException("Unhandled instruction: " + line);
                 }
@@ -169,9 +172,9 @@ public class Bpf2Apf {
                             gen.addOrR1();
                             break;
                         case "sub":
-                            gen.addNeg(Register.R1);
+                            gen.addNeg(R1);
                             gen.addAddR1();
-                            gen.addNeg(Register.R1);
+                            gen.addNeg(R1);
                             break;
                     }
                 } else {
@@ -291,10 +294,10 @@ public class Bpf2Apf {
                 }
                 break;
             case "tax":
-                gen.addMove(Register.R1);
+                gen.addMove(R1);
                 break;
             case "txa":
-                gen.addMove(Register.R0);
+                gen.addMove(R0);
                 break;
             default:
                 throw new IllegalArgumentException("Unhandled instruction: " + line);

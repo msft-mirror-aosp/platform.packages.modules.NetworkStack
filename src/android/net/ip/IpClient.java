@@ -938,11 +938,13 @@ public class IpClient extends StateMachine {
         mApfCounterPollingIntervalMs = mDependencies.getDeviceConfigPropertyInt(
                 CONFIG_APF_COUNTER_POLLING_INTERVAL_SECS,
                 DEFAULT_APF_COUNTER_POLLING_INTERVAL_SECS) * DateUtils.SECOND_IN_MILLIS;
-        mUseNewApfFilter = mDependencies.isFeatureEnabled(context, APF_NEW_RA_FILTER_VERSION);
+        mUseNewApfFilter = SdkLevel.isAtLeastV() || mDependencies.isFeatureEnabled(context,
+                APF_NEW_RA_FILTER_VERSION);
         mEnableApfPollingCounters = mDependencies.isFeatureEnabled(context,
                 APF_POLLING_COUNTERS_VERSION);
-        mEnableIpClientIgnoreLowRaLifetime = mDependencies.isFeatureEnabled(context,
-                IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION);
+        mEnableIpClientIgnoreLowRaLifetime =
+                SdkLevel.isAtLeastV() || mDependencies.isFeatureEnabled(context,
+                        IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION);
         // Light doze mode status checking API is only available at T or later releases.
         mApfShouldHandleLightDoze = SdkLevel.isAtLeastT() && mDependencies.isFeatureNotChickenedOut(
                 mContext, APF_HANDLE_LIGHT_DOZE_FORCE_DISABLE);
@@ -950,7 +952,7 @@ public class IpClient extends StateMachine {
                 IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION);
 
         IpClientLinkObserver.Configuration config = new IpClientLinkObserver.Configuration(
-                mMinRdnssLifetimeSec);
+                mMinRdnssLifetimeSec, mPopulateLinkAddressLifetime);
 
         mLinkObserver = new IpClientLinkObserver(
                 mContext, getHandler(),
@@ -2263,13 +2265,6 @@ public class IpClient extends StateMachine {
                 setIpv6Sysctl(DAD_TRANSMITS, 0 /* dad_transmits */);
             }
         }
-        // Check the feature flag first before reading IPv6 sysctl, which can prevent from
-        // triggering a potential kernel bug about the sysctl.
-        // TODO: add unit test to check if the setIpv6Sysctl() is called or not.
-        if (mEnableIpClientIgnoreLowRaLifetime && mUseNewApfFilter
-                && mDependencies.hasIpv6Sysctl(mInterfaceName, ACCEPT_RA_MIN_LFT)) {
-            setIpv6Sysctl(ACCEPT_RA_MIN_LFT, mAcceptRaMinLft);
-        }
         return mInterfaceCtrl.setIPv6PrivacyExtensions(true)
                 && mInterfaceCtrl.setIPv6AddrGenModeIfSupported(mConfiguration.mIPv6AddrGenMode)
                 && mInterfaceCtrl.enableIPv6();
@@ -2454,7 +2449,17 @@ public class IpClient extends StateMachine {
         }
 
         apfConfig.minRdnssLifetimeSec = mMinRdnssLifetimeSec;
-        apfConfig.acceptRaMinLft = mAcceptRaMinLft;
+        // Check the feature flag first before reading IPv6 sysctl, which can prevent from
+        // triggering a potential kernel bug about the sysctl.
+        // TODO: add unit test to check if the setIpv6Sysctl() is called or not.
+        if (mEnableIpClientIgnoreLowRaLifetime && mUseNewApfFilter
+                && mDependencies.hasIpv6Sysctl(mInterfaceName, ACCEPT_RA_MIN_LFT)) {
+            setIpv6Sysctl(ACCEPT_RA_MIN_LFT, mAcceptRaMinLft);
+            final Integer acceptRaMinLft = getIpv6Sysctl(ACCEPT_RA_MIN_LFT);
+            apfConfig.acceptRaMinLft = acceptRaMinLft == null ? 0 : acceptRaMinLft;
+        } else {
+            apfConfig.acceptRaMinLft = 0;
+        }
         apfConfig.shouldHandleLightDoze = mApfShouldHandleLightDoze;
         apfConfig.minMetricsSessionDurationMs = mApfCounterPollingIntervalMs;
         return mDependencies.maybeCreateApfFilter(mContext, apfConfig, mInterfaceParams,
@@ -2669,7 +2674,8 @@ public class IpClient extends StateMachine {
             isManagedWifiProfile = true;
         }
         mDhcpClient.sendMessage(DhcpClient.CMD_START_DHCP, new DhcpClient.Configuration(mL2Key,
-                isUsingPreconnection(), options, isManagedWifiProfile));
+                isUsingPreconnection(), options, isManagedWifiProfile,
+                mConfiguration.mHostnameSetting));
     }
 
     private boolean hasPermission(String permissionName) {
