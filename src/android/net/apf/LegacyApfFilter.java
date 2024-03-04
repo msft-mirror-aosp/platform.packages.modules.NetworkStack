@@ -16,8 +16,8 @@
 
 package android.net.apf;
 
-import static android.net.apf.ApfV4Generator.Register.R0;
-import static android.net.apf.ApfV4Generator.Register.R1;
+import static android.net.apf.BaseApfGenerator.Register.R0;
+import static android.net.apf.BaseApfGenerator.Register.R1;
 import static android.net.util.SocketUtils.makePacketSocketAddress;
 import static android.system.OsConstants.AF_PACKET;
 import static android.system.OsConstants.ARPHRD_ETHER;
@@ -45,7 +45,7 @@ import android.net.LinkProperties;
 import android.net.NattKeepalivePacketDataParcelable;
 import android.net.TcpKeepalivePacketDataParcelable;
 import android.net.apf.ApfCounterTracker.Counter;
-import android.net.apf.ApfV4Generator.IllegalInstructionException;
+import android.net.apf.BaseApfGenerator.IllegalInstructionException;
 import android.net.ip.IpClient.IpClientCallbacksWrapper;
 import android.net.metrics.ApfProgramEvent;
 import android.net.metrics.ApfStats;
@@ -1722,6 +1722,15 @@ public class LegacyApfFilter implements AndroidPacketFilter {
             gen.addLoadData(R0, 0);  // load counter
             gen.addAdd(1);
             gen.addStoreData(R0, 0);  // write-back counter
+
+            maybeSetupCounter(gen, Counter.FILTER_AGE_SECONDS);
+            gen.addLoadFromMemory(R0, 15);  // m[15] is filter age in seconds
+            gen.addStoreData(R0, 0);  // store 'counter'
+
+            // requires a new enough APFv5+ interpreter, otherwise will be 0
+            maybeSetupCounter(gen, Counter.FILTER_AGE_16384THS);
+            gen.addLoadFromMemory(R0, 9);  // m[9] is filter age in 16384ths
+            gen.addStoreData(R0, 0);  // store 'counter'
         }
 
         // Here's a basic summary of what the initial program does:
