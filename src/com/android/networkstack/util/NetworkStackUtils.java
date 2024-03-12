@@ -186,12 +186,6 @@ public class NetworkStackUtils {
     public static final String VALIDATION_METRICS_VERSION = "validation_metrics_version";
 
     /**
-     * Experiment flag to enable sending gratuitous multicast unsolicited Neighbor Advertisements
-     * to propagate new assigned IPv6 GUA as quickly as possible.
-     */
-    public static final String IPCLIENT_GRATUITOUS_NA_VERSION = "ipclient_gratuitous_na_version";
-
-    /**
      * Experiment flag to enable sending Gratuitous APR and Gratuitous Neighbor Advertisement for
      * all assigned IPv4 and IPv6 GUAs after completing L2 roaming.
      */
@@ -277,13 +271,6 @@ public class NetworkStackUtils {
 
 
     /**** BEGIN Feature Kill Switch Flags ****/
-
-    /**
-     * Kill switch flag to disable the feature of parsing netlink events from kernel directly
-     * instead from netd aidl interface by flag push.
-     */
-    public static final String IPCLIENT_PARSE_NETLINK_EVENTS_FORCE_DISABLE =
-            "ipclient_parse_netlink_events_force_disable";
 
     /**
      * Kill switch flag to disable the feature of handle light doze mode in Apf.
