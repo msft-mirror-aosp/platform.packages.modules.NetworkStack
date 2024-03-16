@@ -24,6 +24,8 @@ import static android.net.ip.IIpClient.PROV_IPV6_DISABLED;
 import static android.net.ip.IIpClient.PROV_IPV6_LINKLOCAL;
 import static android.net.ip.IIpClient.PROV_IPV6_SLAAC;
 import static android.net.ip.IIpClientCallbacks.DTIM_MULTIPLIER_RESET;
+import static android.net.ip.IpClientLinkObserver.IpClientNetlinkMonitor;
+import static android.net.ip.IpClientLinkObserver.IpClientNetlinkMonitor.INetlinkMessageProcessor;
 import static android.net.ip.IpReachabilityMonitor.INVALID_REACHABILITY_LOSS_TYPE;
 import static android.net.ip.IpReachabilityMonitor.nudEventTypeToInt;
 import static android.net.util.SocketUtils.makePacketSocketAddress;
@@ -49,7 +51,6 @@ import static com.android.networkstack.util.NetworkStackUtils.APF_NEW_RA_FILTER_
 import static com.android.networkstack.util.NetworkStackUtils.APF_POLLING_COUNTERS_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION;
-import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_GRATUITOUS_NA_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.createInet6AddressFromEui64;
@@ -149,7 +150,6 @@ import com.android.networkstack.metrics.NetworkQuirkMetrics;
 import com.android.networkstack.packets.NeighborAdvertisement;
 import com.android.networkstack.packets.NeighborSolicitation;
 import com.android.networkstack.util.NetworkStackUtils;
-import com.android.server.NetworkObserverRegistry;
 import com.android.server.NetworkStackService.NetworkStackServiceManager;
 
 import java.io.File;
@@ -173,8 +173,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.StringJoiner;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
@@ -670,10 +672,8 @@ public class IpClient extends StateMachine {
     @VisibleForTesting
     protected final IpClientCallbacksWrapper mCallback;
     private final Dependencies mDependencies;
-    private final CountDownLatch mShutdownLatch;
     private final ConnectivityManager mCm;
     private final INetd mNetd;
-    private final NetworkObserverRegistry mObserverRegistry;
     private final IpClientLinkObserver mLinkObserver;
     private final WakeupMessage mProvisioningTimeoutAlarm;
     private final WakeupMessage mDhcpActionTimeoutAlarm;
@@ -879,7 +879,8 @@ public class IpClient extends StateMachine {
             final File sysctl = new File(path);
             return sysctl.exists();
         }
-         /**
+
+        /**
          * Get the configuration from RRO to check whether or not to send domain search list
          * option in DHCPDISCOVER/DHCPREQUEST message.
          */
@@ -887,17 +888,23 @@ public class IpClient extends StateMachine {
             return context.getResources().getBoolean(R.bool.config_dhcp_client_domain_search_list);
         }
 
+        /**
+         * Create an IpClientNetlinkMonitor instance.
+         */
+        public IpClientNetlinkMonitor makeIpClientNetlinkMonitor(Handler h, SharedLog log,
+                String tag, int sockRcvbufSize, INetlinkMessageProcessor p) {
+            return new IpClientNetlinkMonitor(h, log, tag, sockRcvbufSize, p);
+        }
     }
 
     public IpClient(Context context, String ifName, IIpClientCallbacks callback,
-            NetworkObserverRegistry observerRegistry, NetworkStackServiceManager nssManager) {
-        this(context, ifName, callback, observerRegistry, nssManager, new Dependencies());
+            NetworkStackServiceManager nssManager) {
+        this(context, ifName, callback, nssManager, new Dependencies());
     }
 
     @VisibleForTesting
     public IpClient(Context context, String ifName, IIpClientCallbacks callback,
-            NetworkObserverRegistry observerRegistry, NetworkStackServiceManager nssManager,
-            Dependencies deps) {
+            NetworkStackServiceManager nssManager, Dependencies deps) {
         super(IpClient.class.getSimpleName() + "." + ifName);
         Objects.requireNonNull(ifName);
         Objects.requireNonNull(callback);
@@ -911,9 +918,7 @@ public class IpClient extends StateMachine {
         mDependencies = deps;
         mMetricsLog = deps.getIpConnectivityLog();
         mNetworkQuirkMetrics = deps.getNetworkQuirkMetrics();
-        mShutdownLatch = new CountDownLatch(1);
         mCm = mContext.getSystemService(ConnectivityManager.class);
-        mObserverRegistry = observerRegistry;
         mIpMemoryStore = deps.getIpMemoryStore(context, nssManager);
 
         sSmLogs.putIfAbsent(mInterfaceName, new SharedLog(MAX_LOG_RECORDS, mTag));
@@ -969,10 +974,8 @@ public class IpClient extends StateMachine {
                     public void onIpv6AddressRemoved(final Inet6Address address) {
                         // The update of Gratuitous NA target addresses set or unsolicited
                         // multicast NS source addresses set should be only accessed from the
-                        // handler thread of IpClient StateMachine, keeping the behaviour
-                        // consistent with relying on the non-blocking NetworkObserver callbacks,
-                        // see {@link registerObserverForNonblockingCallback}. This can be done
-                        // by either sending a message to StateMachine or posting a handler.
+                        // handler thread of IpClient StateMachine. This can be done by either
+                        // sending a message to StateMachine or posting a handler.
                         if (address.isLinkLocalAddress()) return;
                         getHandler().post(() -> {
                             mLog.log("Remove IPv6 GUA " + address
@@ -1133,17 +1136,11 @@ public class IpClient extends StateMachine {
     }
 
     private void startStateMachineUpdaters() {
-        mObserverRegistry.registerObserverForNonblockingCallback(mLinkObserver);
     }
 
     private void stopStateMachineUpdaters() {
-        mObserverRegistry.unregisterObserver(mLinkObserver);
         mLinkObserver.clearInterfaceParams();
         mLinkObserver.shutdown();
-    }
-
-    private boolean isGratuitousNaEnabled() {
-        return mDependencies.isFeatureNotChickenedOut(mContext, IPCLIENT_GRATUITOUS_NA_VERSION);
     }
 
     private boolean isGratuitousArpNaRoamingEnabled() {
@@ -1177,7 +1174,6 @@ public class IpClient extends StateMachine {
     @Override
     protected void onQuitting() {
         mCallback.onQuit();
-        mShutdownLatch.countDown();
     }
 
     /**
@@ -1414,6 +1410,64 @@ public class IpClient extends StateMachine {
         pw.decreaseIndent();
     }
 
+    /**
+     * Handle "adb shell cmd apf" command.
+     */
+    public String apfShellCommand(String cmd, @Nullable String optarg) {
+        final CompletableFuture<String> result = new CompletableFuture<>();
+
+        getHandler().post(() -> {
+            if (mApfFilter == null) {
+                // IpClient has either stopped or the interface does not support APF.
+                result.completeExceptionally(
+                        new IllegalStateException("No active APF filter."));
+            }
+            switch (cmd) {
+                case "status":
+                    result.complete(mApfFilter.isRunning() ? "running" : "paused");
+                    break;
+                case "pause":
+                    mApfFilter.pause();
+                    result.complete("success");
+                    break;
+                case "resume":
+                    mApfFilter.resume();
+                    result.complete("success");
+                    break;
+                case "install":
+                    if (optarg == null) {
+                        result.completeExceptionally(
+                                new IllegalArgumentException("No program provided"));
+                    } else if (mApfFilter.isRunning()) {
+                        result.completeExceptionally(
+                                new IllegalStateException("APF filter must be paused for install"));
+                    } else {
+                        mCallback.installPacketFilter(HexDump.hexStringToByteArray(optarg));
+                        result.complete("success");
+                    }
+                    break;
+                case "capabilities":
+                    final StringJoiner joiner = new StringJoiner(",");
+                    joiner.add(Integer.toString(mCurrentApfCapabilities.apfVersionSupported));
+                    joiner.add(Integer.toString(mCurrentApfCapabilities.maximumApfProgramSize));
+                    joiner.add(Integer.toString(mCurrentApfCapabilities.apfPacketFormat));
+                    result.complete(joiner.toString());
+                    break;
+                default:
+                    result.completeExceptionally(
+                            new IllegalArgumentException("Invalid apf read command: " + cmd));
+            }
+        });
+
+        try {
+            return result.get();
+        } catch (ExecutionException | InterruptedException e) {
+            // completeExceptionally is solely used to return error messages back to the user, so
+            // the stack trace is not all that interesting. (A similar argument can be made for
+            // InterruptedException). Only extract the message from the checked exception.
+            throw new RuntimeException(e.getMessage());
+        }
+    }
 
     /**
      * Internals.
@@ -2073,9 +2127,7 @@ public class IpClient extends StateMachine {
         // Check if new assigned IPv6 GUA is available in the LinkProperties now. If so, initiate
         // gratuitous multicast unsolicited Neighbor Advertisements as soon as possible to inform
         // first-hop routers that the new GUA host is goning to use.
-        if (isGratuitousNaEnabled()) {
-            maybeSendGratuitousNAs(newLp, false /* isGratuitousNaAfterRoaming */);
-        }
+        maybeSendGratuitousNAs(newLp, false /* isGratuitousNaAfterRoaming */);
 
         // Sending multicast NS from each new assigned IPv6 GUAs to the solicited-node multicast
         // address based on the default router's IPv6 link-local address should trigger default
@@ -2436,6 +2488,10 @@ public class IpClient extends StateMachine {
     private AndroidPacketFilter maybeCreateApfFilter(final ApfCapabilities apfCapabilities) {
         ApfFilter.ApfConfiguration apfConfig = new ApfFilter.ApfConfiguration();
         apfConfig.apfCapabilities = apfCapabilities;
+        if (apfCapabilities != null && !SdkLevel.isAtLeastV()
+                && apfCapabilities.apfVersionSupported <= 4) {
+            apfConfig.installableProgramSizeClamp = 2000;
+        }
         apfConfig.multicastFilter = mMulticastFiltering;
         // Get the Configuration for ApfFilter from Context
         // Resource settings were moved from ApfCapabilities APIs to NetworkStack resources in S
