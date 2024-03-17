@@ -154,11 +154,18 @@ public class ApfTestUtils {
      * Runs the APF program and checks the return code and data regions equals to expected value.
      */
     public static void assertDataMemoryContents(int apfVersion, int expected, byte[] program,
-            byte[] packet, byte[] data, byte[] expectedData)
+            byte[] packet, byte[] data, byte[] expectedData, boolean ignoreInterpreterVersion)
             throws ApfV4Generator.IllegalInstructionException, Exception {
         assertReturnCodesEqual(expected,
                 apfSimulate(apfVersion, program, packet, data, 0 /* filterAge */));
 
+        if (ignoreInterpreterVersion) {
+            final int apfVersionIdx = ApfCounterTracker.Counter.totalSize()
+                    + ApfCounterTracker.Counter.APF_VERSION.offset();
+            for (int i = 0; i < 4; ++i) {
+                data[apfVersionIdx + i] = 0;
+            }
+        }
         // assertArrayEquals() would only print one byte, making debugging difficult.
         if (!Arrays.equals(expectedData, data)) {
             throw new Exception("\nprogram:     " + HexDump.toHexString(program) + "\ndata memory: "
@@ -383,7 +390,7 @@ public class ApfTestUtils {
 
         @Override
         @GuardedBy("this")
-        protected ApfV4Generator emitPrologueLocked() throws IllegalInstructionException {
+        protected ApfV4GeneratorBase<?> emitPrologueLocked() throws IllegalInstructionException {
             if (mThrowsExceptionWhenGeneratesProgram) {
                 throw new IllegalStateException();
             }
