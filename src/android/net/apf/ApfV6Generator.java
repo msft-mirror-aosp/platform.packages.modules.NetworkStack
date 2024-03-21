@@ -15,6 +15,8 @@
  */
 package android.net.apf;
 
+import static android.net.apf.BaseApfGenerator.Register.R1;
+
 import com.android.internal.annotations.VisibleForTesting;
 
 /**
@@ -31,5 +33,40 @@ public final class ApfV6Generator extends ApfV6GeneratorBase<ApfV6Generator> {
     @VisibleForTesting(visibility = VisibleForTesting.Visibility.PACKAGE)
     public ApfV6Generator() throws IllegalInstructionException {
         super();
+    }
+
+    @Override
+    void addArithR1(Opcodes opcode) {
+        append(new Instruction(opcode, R1));
+    }
+
+    /**
+     * Add an instruction to the end of the program to increment the counter value and
+     * immediately return PASS.
+     *
+     * @param counter the counter enum to be incremented.
+     */
+    @Override
+    public ApfV6Generator addCountAndPass(ApfCounterTracker.Counter counter) {
+        return addCountAndPass(counter.value());
+    }
+
+    /**
+     * Add an instruction to the end of the program to increment the counter value and
+     * immediately return DROP.
+     *
+     * @param counter the counter enum to be incremented.
+     */
+    @Override
+    public ApfV6Generator addCountAndDrop(ApfCounterTracker.Counter counter) {
+        return addCountAndDrop(counter.value());
+    }
+
+    /**
+     * This method is noop in APFv6.
+     */
+    @Override
+    public ApfV6Generator addCountTrampoline() {
+        return self();
     }
 }

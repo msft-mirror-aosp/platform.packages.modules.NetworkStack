@@ -19,8 +19,6 @@ package android.net.apf;
 import android.util.ArrayMap;
 import android.util.Log;
 
-import com.android.internal.annotations.VisibleForTesting;
-
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -38,7 +36,6 @@ public class ApfCounterTracker {
      * buffer, using negative byte offsets, where -4 is equivalent to maximumApfProgramSize - 4,
      * the last writable 32bit word.
      */
-    @VisibleForTesting
     public enum Counter {
         RESERVED_OOB,  // Points to offset 0 from the end of the buffer (out-of-bounds)
         ENDIANNESS,              // APFv6 interpreter stores 0x12345678 here
@@ -48,6 +45,7 @@ public class ApfCounterTracker {
         CORRUPT_DNS_PACKET,      // hardcoded in APFv6 interpreter
         FILTER_AGE_SECONDS,
         FILTER_AGE_16384THS,
+        APF_VERSION,
         PASSED_ARP,
         PASSED_DHCP,
         PASSED_IPV4,
@@ -60,10 +58,12 @@ public class ApfCounterTracker {
         PASSED_ARP_UNICAST_REPLY,
         PASSED_NON_IP_UNICAST,
         PASSED_MDNS,
+        PASSED_MLD,
         DROPPED_ETH_BROADCAST,
         DROPPED_RA,
         DROPPED_GARP_REPLY,
         DROPPED_ARP_OTHER_HOST,
+        DROPPED_ARP_REQUEST_NO_ADDRESS,
         DROPPED_IPV4_L2_BROADCAST,
         DROPPED_IPV4_BROADCAST_ADDR,
         DROPPED_IPV4_BROADCAST_NET,
