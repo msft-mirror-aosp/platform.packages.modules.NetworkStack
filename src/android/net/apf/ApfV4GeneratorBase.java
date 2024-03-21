@@ -27,6 +27,11 @@ import com.android.internal.annotations.VisibleForTesting;
  *
  * Call add*() functions to add instructions to the program, then call
  * {@link BaseApfGenerator#generate} to get the APF bytecode for the program.
+ * <p>
+ * Choose between these approaches for your instruction helper methods: If the functionality must
+ * be identical across APF versions, make it a final method within the base class. If it needs
+ * version-specific adjustments, use an abstract method in the base class with final
+ * implementations in generator instances.
  *
  * @param <Type> the generator class
  *
@@ -425,6 +430,16 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
     }
 
     /**
+     * Abstract method for adding instructions to increment the counter and return PASS.
+     */
+    public abstract Type addCountAndPass(ApfCounterTracker.Counter counter);
+
+    /**
+     * Abstract method for adding instructions to increment the counter and return DROP.
+     */
+    public abstract Type addCountAndDrop(ApfCounterTracker.Counter counter);
+
+    /**
      * Add an instruction to the end of the program to load 32 bits from the data memory into
      * {@code register}. The source address is computed by adding the signed immediate
      * @{code offset} to the other register.
@@ -448,5 +463,12 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
         return append(new Instruction(Opcodes.STDW, src).addSigned(ofs));
     }
 
+
+    /**
+     * The abstract method to generate count trampoline instructions.
+     * @return
+     * @throws IllegalInstructionException
+     */
+    public abstract Type addCountTrampoline() throws IllegalInstructionException;
 }
 

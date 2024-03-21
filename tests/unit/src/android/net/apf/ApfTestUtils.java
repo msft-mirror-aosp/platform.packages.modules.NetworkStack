@@ -87,9 +87,12 @@ public class ApfTestUtils {
 
     private static void assertVerdict(int apfVersion, int expected, byte[] program, byte[] packet,
             int filterAge) {
-        final String msg = "Unexpected APF verdict. To debug:\n" + "  apf_run --program "
-                + HexDump.toHexString(program) + " --packet " + HexDump.toHexString(packet)
-                + " --trace | less\n  ";
+        final String msg = "Unexpected APF verdict. To debug:\n"
+                + "  apf_run --program " + HexDump.toHexString(program)
+                + " --packet " + HexDump.toHexString(packet)
+                + " --age " + filterAge
+                + (apfVersion > 4 ? " --v6" : "")
+                + " --trace "  + " | less\n  ";
         assertReturnCodesEqual(msg, expected,
                 apfSimulate(apfVersion, program, packet, null, filterAge));
     }
@@ -179,14 +182,25 @@ public class ApfTestUtils {
      */
     public static void assertVerdict(int apfVersion, int expected, byte[] program, byte[] packet,
             byte[] data) {
-        assertReturnCodesEqual(expected,
-                apfSimulate(apfVersion, program, packet, data, 0 /* filterAge */));
+        assertVerdict(apfVersion, expected, program, packet, data, 0 /* filterAge */);
     }
 
     private static void assertVerdict(int apfVersion, int expected, ApfV4Generator gen,
             byte[] packet, int filterAge) throws ApfV4Generator.IllegalInstructionException {
-        assertReturnCodesEqual(expected,
-                apfSimulate(apfVersion, gen.generate(), packet, null, filterAge));
+        assertVerdict(apfVersion, expected, gen.generate(), packet, null, filterAge);
+    }
+
+    private static void assertVerdict(int apfVersion, int expected, byte[] program, byte[] packet,
+            byte[] data, int filterAge) {
+        final String msg = "Unexpected APF verdict. To debug:\n"
+                + "  apf_run --program " + HexDump.toHexString(program)
+                + " --packet " + HexDump.toHexString(packet)
+                + (data != null ? " --data " + HexDump.toHexString(data) : "")
+                + " --age " + filterAge
+                + (apfVersion > 4 ? " --v6" : "")
+                + " --trace "  + " | less\n  ";
+        assertReturnCodesEqual(msg, expected,
+                apfSimulate(apfVersion, program, packet, data, filterAge));
     }
 
     /**
@@ -281,13 +295,6 @@ public class ApfTestUtils {
         private long mCurrentTimeMs = SystemClock.elapsedRealtime();
         private final MockIpClientCallback mMockIpClientCb;
         private final boolean mThrowsExceptionWhenGeneratesProgram;
-
-        public TestApfFilter(Context context, ApfConfiguration config,
-                MockIpClientCallback ipClientCallback, NetworkQuirkMetrics networkQuirkMetrics)
-                throws Exception {
-            this(context, config, ipClientCallback, networkQuirkMetrics, new Dependencies(context),
-                    false /* throwsExceptionWhenGeneratesProgram */, new ApfFilter.Clock());
-        }
 
         public TestApfFilter(Context context, ApfConfiguration config,
                 MockIpClientCallback ipClientCallback, NetworkQuirkMetrics networkQuirkMetrics,
