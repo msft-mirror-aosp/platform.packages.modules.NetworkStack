@@ -1414,6 +1414,25 @@ public class IpClient extends StateMachine {
      * Handle "adb shell cmd apf" command.
      */
     public String apfShellCommand(String cmd, @Nullable String optarg) {
+        final long oneDayInMs = 86400 * 1000;
+        if (SystemClock.elapsedRealtime() >= oneDayInMs) {
+            return "Error: This test interface requires uptime < 24h";
+        }
+
+        // Waiting for a "read" result cannot block the handler thread, since the result gets
+        // processed on it. This is test only code, so mApfFilter going away is not a concern.
+        if (cmd.equals("read")) {
+            if (mApfFilter == null) {
+                return "Error: No active APF filter";
+            }
+            // Request a new snapshot, then wait for it.
+            mApfDataSnapshotComplete.close();
+            mCallback.startReadPacketFilter();
+            if (!mApfDataSnapshotComplete.block(5000 /* ms */)) {
+                return "Error: Failed to read APF program";
+            }
+        }
+
         final CompletableFuture<String> result = new CompletableFuture<>();
 
         getHandler().post(() -> {
@@ -1448,6 +1467,11 @@ public class IpClient extends StateMachine {
                         joiner.add(Integer.toString(mCurrentApfCapabilities.maximumApfProgramSize));
                         joiner.add(Integer.toString(mCurrentApfCapabilities.apfPacketFormat));
                         result.complete(joiner.toString());
+                        break;
+                    case "read":
+                        final String snapshot = mApfFilter.getDataSnapshotHexString();
+                        Objects.requireNonNull(snapshot, "No data snapshot recorded.");
+                        result.complete(snapshot);
                         break;
                     default:
                         throw new IllegalArgumentException("Invalid apf read command: " + cmd);
