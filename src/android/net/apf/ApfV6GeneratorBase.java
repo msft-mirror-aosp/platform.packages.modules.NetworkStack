@@ -22,6 +22,8 @@ import androidx.annotation.NonNull;
 
 import com.android.net.module.util.HexDump;
 
+import java.util.Objects;
+
 /**
  * The abstract class for APFv6 assembler/generator.
  *
@@ -99,6 +101,13 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
     }
 
     /**
+     * Add an instruction to the beginning of the program to reserve the empty data region.
+     */
+    public final Type addData() throws IllegalInstructionException {
+        return addData(new byte[0]);
+    }
+
+    /**
      * Add an instruction to the beginning of the program to reserve the data region.
      * @param data the actual data byte
      */
@@ -106,9 +115,12 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
         if (!mInstructions.isEmpty()) {
             throw new IllegalInstructionException("data instruction has to come first");
         }
+        if (data.length > 65535) {
+            throw new IllegalArgumentException("data size larger than 65535");
+        }
         mIsV6 = true;
         return append(new Instruction(Opcodes.JMP, Rbit1).addUnsigned(data.length)
-                .setBytesImm(data));
+                .setBytesImm(data).overrideLenField(2));
     }
 
     /**
@@ -190,6 +202,22 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
      */
     public final Type addWriteU32(Register reg) {
         return append(new Instruction(ExtendedOpcodes.EWRITE4, reg));
+    }
+
+    /**
+     * Add an instruction to the end of the program to copy data from APF program/data region to
+     * output buffer and auto-increment the output buffer pointer.
+     * This method requires the {@code addData} method to be called beforehand.
+     * It will first attempt to match {@code content} with existing data bytes. If not exist, then
+     * append the {@code content} to the data bytes.
+     */
+    public final Type addDataCopy(@NonNull byte[] content) throws IllegalInstructionException {
+        if (mInstructions.isEmpty()) {
+            throw new IllegalInstructionException("There is no instructions");
+        }
+        Objects.requireNonNull(content);
+        int copySrc = mInstructions.get(0).maybeUpdateBytesImm(content);
+        return addDataCopy(copySrc, content.length);
     }
 
     /**
