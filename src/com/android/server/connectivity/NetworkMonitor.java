@@ -987,9 +987,7 @@ public class NetworkMonitor extends StateMachine {
             final TcpSocketTracker tst = getTcpSocketTracker();
             if (tst != null) {
                 // Initialization.
-                tst.setOpportunisticMode(false);
-                tst.setLinkProperties(mLinkProperties);
-                tst.setNetworkCapabilities(mNetworkCapabilities);
+                tst.init(getHandler(), mLinkProperties, mNetworkCapabilities);
             }
             Log.d(TAG, "Starting on network " + mNetwork
                     + " with capport HTTPS URL " + Arrays.toString(mCaptivePortalHttpsUrls)
@@ -2022,7 +2020,8 @@ public class NetworkMonitor extends StateMachine {
             recordProbeEventMetrics(ProbeType.PT_PRIVDNS, elapsedNanos,
                     success ? ProbeResult.PR_SUCCESS :
                             ProbeResult.PR_FAILURE, null /* capportData */);
-            logValidationProbe(elapsedNanos, PROBE_PRIVDNS, success ? DNS_SUCCESS : DNS_FAILURE);
+            logValidationProbe(elapsedNanos / 1000, PROBE_PRIVDNS,
+                    success ? DNS_SUCCESS : DNS_FAILURE);
 
             final String strIps = Objects.toString(answer);
             validationLog(PROBE_PRIVDNS, queryName,
