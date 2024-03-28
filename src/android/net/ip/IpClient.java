@@ -2122,8 +2122,17 @@ public class IpClient extends StateMachine {
     // Returns false if we have lost provisioning, true otherwise.
     private boolean handleLinkPropertiesUpdate(boolean sendCallbacks) {
         final LinkProperties newLp = assembleLinkProperties();
+        // LinkProperties.equals just compares if the interface addresses are identical,
+        // it doesn't compare the LinkAddress objects, so it considers two LinkProperties
+        // objects are identical even with different address lifetime. However, we may want
+        // to notify the caller whenever the link address lifetime is updated, especially
+        // after we enable populating the deprecationTime/expirationTime fields. The caller
+        // can get the latest address lifetime from the onLinkPropertiesChange callback.
         if (Objects.equals(newLp, mLinkProperties)) {
-            return true;
+            if (!mPopulateLinkAddressLifetime) return true;
+            if (LinkPropertiesUtils.isIdenticalAllLinkAddresses(newLp, mLinkProperties)) {
+                return true;
+            }
         }
 
         // Set an alarm to wait for IPv6 autoconf via SLAAC to succeed after receiving an RA,
@@ -3128,14 +3137,33 @@ public class IpClient extends StateMachine {
             }
         }
 
+        private void deleteInterfaceAddress(final LinkAddress address) {
+            if (!address.isIpv6()) {
+                // NetlinkUtils.sendRtmDelAddressRequest does not support deleting IPv4 addresses.
+                Log.wtf(TAG, "Deleting IPv4 address not supported " + address);
+                return;
+            }
+            final Inet6Address in6addr = (Inet6Address) address.getAddress();
+            final short plen = (short) address.getPrefixLength();
+            if (!NetlinkUtils.sendRtmDelAddressRequest(mInterfaceParams.index, in6addr, plen)) {
+                Log.e(TAG, "Failed to delete IPv6 address " + address);
+            }
+        }
+
         private void deleteIpv6PrefixDelegationAddresses(final IpPrefix prefix) {
-            for (LinkAddress la : mLinkProperties.getLinkAddresses()) {
-                final InetAddress address = la.getAddress();
-                if (prefix.contains(address)) {
-                    if (!NetlinkUtils.sendRtmDelAddressRequest(mInterfaceParams.index,
-                            (Inet6Address) address, (short) la.getPrefixLength())) {
-                        Log.e(TAG, "Failed to delete IPv6 address " + address.getHostAddress());
-                    }
+            // b/290747921: some kernels require the mngtmpaddr to be deleted first, to prevent the
+            // creation of a new tempaddr.
+            final List<LinkAddress> linkAddresses = mLinkProperties.getLinkAddresses();
+            // delete addresses with IFA_F_MANAGETEMPADDR contained in the prefix.
+            for (LinkAddress la : linkAddresses) {
+                if (hasFlag(la, IFA_F_MANAGETEMPADDR) && prefix.contains(la.getAddress())) {
+                    deleteInterfaceAddress(la);
+                }
+            }
+            // delete all other addresses contained in the prefix.
+            for (LinkAddress la : linkAddresses) {
+                if (!hasFlag(la, IFA_F_MANAGETEMPADDR) && prefix.contains(la.getAddress())) {
+                    deleteInterfaceAddress(la);
                 }
             }
         }
