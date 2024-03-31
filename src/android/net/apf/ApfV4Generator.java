@@ -69,8 +69,8 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
      */
     @Override
     public ApfV4Generator addCountAndPass(ApfCounterTracker.Counter counter) {
-        if (mVersion >= 4)  addLoadImmediate(R1, counter.offset());
-        return addJump(mCountAndPassLabel);
+        checkPassCounterRange(counter);
+        return maybeAddLoadR1CounterOffset(counter).addJump(mCountAndPassLabel);
     }
 
     /**
@@ -83,8 +83,50 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
      */
     @Override
     public ApfV4Generator addCountAndDrop(ApfCounterTracker.Counter counter) {
-        if (mVersion >= 4) addLoadImmediate(R1, counter.offset());
-        return addJump(mCountAndDropLabel);
+        checkDropCounterRange(counter);
+        return maybeAddLoadR1CounterOffset(counter).addJump(mCountAndDropLabel);
+    }
+
+    @Override
+    public ApfV4Generator addCountAndDropIfR0Equals(long val, ApfCounterTracker.Counter cnt) {
+        checkDropCounterRange(cnt);
+        return maybeAddLoadR1CounterOffset(cnt).addJumpIfR0Equals(val, mCountAndDropLabel);
+    }
+
+    @Override
+    public ApfV4Generator addCountAndPassIfR0Equals(long val, ApfCounterTracker.Counter cnt) {
+        checkPassCounterRange(cnt);
+        return maybeAddLoadR1CounterOffset(cnt).addJumpIfR0Equals(val, mCountAndPassLabel);
+    }
+
+    @Override
+    public ApfV4Generator addCountAndDropIfR0NotEquals(long val, ApfCounterTracker.Counter cnt) {
+        checkDropCounterRange(cnt);
+        return maybeAddLoadR1CounterOffset(cnt).addJumpIfR0NotEquals(val, mCountAndDropLabel);
+    }
+
+    @Override
+    public ApfV4Generator addCountAndPassIfR0NotEquals(long val, ApfCounterTracker.Counter cnt) {
+        checkPassCounterRange(cnt);
+        return maybeAddLoadR1CounterOffset(cnt).addJumpIfR0NotEquals(val, mCountAndPassLabel);
+    }
+
+    @Override
+    public ApfV4Generator addCountAndDropIfR0LessThan(long val, ApfCounterTracker.Counter cnt) {
+        checkDropCounterRange(cnt);
+        if (val <= 0) {
+            throw new IllegalArgumentException("val must > 0, current val: " + val);
+        }
+        return maybeAddLoadR1CounterOffset(cnt).addJumpIfR0LessThan(val, mCountAndDropLabel);
+    }
+
+    @Override
+    public ApfV4Generator addCountAndPassIfR0LessThan(long val, ApfCounterTracker.Counter cnt) {
+        checkPassCounterRange(cnt);
+        if (val <= 0) {
+            throw new IllegalArgumentException("val must > 0, current val: " + val);
+        }
+        return maybeAddLoadR1CounterOffset(cnt).addJumpIfR0LessThan(val, mCountAndPassLabel);
     }
 
     /**
@@ -108,5 +150,10 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
                 .addAdd(1)           // R0++
                 .addStoreData(R0, 0) // *(R1 + 0) = R0
                 .addJump(DROP_LABEL);
+    }
+
+    private ApfV4Generator maybeAddLoadR1CounterOffset(ApfCounterTracker.Counter counter) {
+        if (mVersion >= 4) return addLoadImmediate(R1, counter.offset());
+        return self();
     }
 }

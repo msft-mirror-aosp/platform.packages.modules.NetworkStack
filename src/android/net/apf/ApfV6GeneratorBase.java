@@ -17,6 +17,7 @@ package android.net.apf;
 
 import static android.net.apf.BaseApfGenerator.Rbit.Rbit0;
 import static android.net.apf.BaseApfGenerator.Rbit.Rbit1;
+import static android.net.apf.BaseApfGenerator.Register.R1;
 
 import androidx.annotation.NonNull;
 
@@ -120,7 +121,7 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
         }
         mIsV6 = true;
         return append(new Instruction(Opcodes.JMP, Rbit1).addUnsigned(data.length)
-                .setBytesImm(data).overrideLenField(2));
+                .setBytesImm(data).overrideImmSize(2));
     }
 
     /**
@@ -163,21 +164,21 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
      * Add an instruction to the end of the program to write 1 byte value to output buffer.
      */
     public final Type addWriteU8(int val) {
-        return append(new Instruction(Opcodes.WRITE).overrideLenField(1).addU8(val));
+        return append(new Instruction(Opcodes.WRITE).overrideImmSize(1).addU8(val));
     }
 
     /**
      * Add an instruction to the end of the program to write 2 bytes value to output buffer.
      */
     public final Type addWriteU16(int val) {
-        return append(new Instruction(Opcodes.WRITE).overrideLenField(2).addU16(val));
+        return append(new Instruction(Opcodes.WRITE).overrideImmSize(2).addU16(val));
     }
 
     /**
      * Add an instruction to the end of the program to write 4 bytes value to output buffer.
      */
     public final Type addWriteU32(long val) {
-        return append(new Instruction(Opcodes.WRITE).overrideLenField(4).addU32(val));
+        return append(new Instruction(Opcodes.WRITE).overrideImmSize(4).addU32(val));
     }
 
     /**
@@ -393,6 +394,18 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
         return append(new Instruction(ExtendedOpcodes.JDNSAMATCHSAFE, Rbit1).setTargetLabel(
                 tgt).setBytesImm(names));
     }
+
+    /**
+     * Add an instruction to the end of the program to jump to {@code tgt} if the bytes of the
+     * packet at an offset specified by {@code register} match {@code bytes}
+     * R=1 means check for equal.
+     */
+    public final Type addJumpIfBytesAtR0Equal(byte[] bytes, String tgt)
+            throws IllegalInstructionException {
+        return append(new Instruction(Opcodes.JNEBS, R1).addUnsigned(
+                bytes.length).setTargetLabel(tgt).setBytesImm(bytes));
+    }
+
 
     /**
      * Check if the byte is valid dns character: A-Z,0-9,-,_

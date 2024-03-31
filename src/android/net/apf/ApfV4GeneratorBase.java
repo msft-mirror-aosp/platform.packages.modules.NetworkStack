@@ -282,12 +282,44 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
     }
 
     /**
+     * Add instructions to the end of the program to increase counter and drop packet if R0 equals
+     * {@code val}
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndDropIfR0Equals(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException;
+
+    /**
+     * Add instructions to the end of the program to increase counter and pass packet if R0 equals
+     * {@code val}
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndPassIfR0Equals(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException;
+
+    /**
      * Add an instruction to the end of the program to jump to {@code target} if register R0's
      * value does not equal {@code value}.
      */
     public final Type addJumpIfR0NotEquals(long val, String tgt) {
         return append(new Instruction(Opcodes.JNE).addTwosCompUnsigned(val).setTargetLabel(tgt));
     }
+
+    /**
+     * Add instructions to the end of the program to increase counter and drop packet if R0 not
+     * equals {@code val}
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndDropIfR0NotEquals(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException;
+
+    /**
+     * Add instructions to the end of the program to increase counter and pass packet if R0 not
+     * equals {@code val}
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndPassIfR0NotEquals(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException;
 
     /**
      * Add an instruction to the end of the program to jump to {@code target} if register R0's
@@ -304,6 +336,22 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
     public final Type addJumpIfR0LessThan(long val, String tgt) {
         return append(new Instruction(Opcodes.JLT).addUnsigned(val).setTargetLabel(tgt));
     }
+
+    /**
+     * Add instructions to the end of the program to increase counter and drop packet if R0 less
+     * than {@code val}
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndDropIfR0LessThan(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException;
+
+    /**
+     * Add instructions to the end of the program to increase counter and pass packet if R0 less
+     * than {@code val}
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndPassIfR0LessThan(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException;
 
     /**
      * Add an instruction to the end of the program to jump to {@code target} if register R0's
@@ -359,18 +407,6 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
      */
     public final Type addJumpIfBytesAtR0NotEqual(byte[] bytes, String tgt) {
         return append(new Instruction(Opcodes.JNEBS).addUnsigned(
-                bytes.length).setTargetLabel(tgt).setBytesImm(bytes));
-    }
-
-    /**
-     * Add an instruction to the end of the program to jump to {@code tgt} if the bytes of the
-     * packet at an offset specified by {@code register} match {@code bytes}
-     * R=1 means check for equal.
-     */
-    public final Type addJumpIfBytesAtR0Equal(byte[] bytes, String tgt)
-            throws IllegalInstructionException {
-        requireApfVersion(MIN_APF_VERSION_IN_DEV);
-        return append(new Instruction(Opcodes.JNEBS, R1).addUnsigned(
                 bytes.length).setTargetLabel(tgt).setBytesImm(bytes));
     }
 
