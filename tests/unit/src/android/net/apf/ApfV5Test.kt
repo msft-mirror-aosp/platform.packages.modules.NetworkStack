@@ -16,6 +16,9 @@
 package android.net.apf
 
 import android.net.apf.ApfCounterTracker.Counter
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_ETHERTYPE_DENYLISTED
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_ETH_BROADCAST
+import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP
 import android.net.apf.ApfTestUtils.DROP
 import android.net.apf.ApfTestUtils.MIN_PKT_SIZE
 import android.net.apf.ApfTestUtils.PASS
@@ -31,6 +34,7 @@ import android.net.apf.BaseApfGenerator.Register.R0
 import android.net.apf.BaseApfGenerator.Register.R1
 import androidx.test.filters.SmallTest
 import androidx.test.runner.AndroidJUnit4
+import com.android.net.module.util.HexDump
 import com.android.net.module.util.Struct
 import com.android.net.module.util.structs.EthernetHeader
 import com.android.net.module.util.structs.Ipv4Header
@@ -217,6 +221,48 @@ class ApfV5Test {
                 byteArrayOf(1, 'A'.code.toByte(), 1, 'B'.code.toByte()),
                 ApfV4Generator.DROP_LABEL
         ) }
+        assertFailsWith<IllegalArgumentException> { gen.addCountAndDrop(PASSED_ARP) }
+        assertFailsWith<IllegalArgumentException> { gen.addCountAndPass(DROPPED_ETH_BROADCAST) }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndDropIfR0Equals(3, PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndPassIfR0Equals(3, DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndDropIfR0NotEquals(3, PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndPassIfR0NotEquals(3, DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndDropIfR0LessThan(3, PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndPassIfR0LessThan(3, DROPPED_ETH_BROADCAST)
+        }
+
+        val v4gen = ApfV4Generator(APF_VERSION_4)
+        assertFailsWith<IllegalArgumentException> { v4gen.addCountAndDrop(PASSED_ARP) }
+        assertFailsWith<IllegalArgumentException> { v4gen.addCountAndPass(DROPPED_ETH_BROADCAST) }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndDropIfR0Equals(3, PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndPassIfR0Equals(3, DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndDropIfR0NotEquals(3, PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndPassIfR0NotEquals(3, DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndDropIfR0LessThan(3, PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndPassIfR0LessThan(3, DROPPED_ETH_BROADCAST)
+        }
     }
 
     @Test
@@ -295,34 +341,34 @@ class ApfV5Test {
         )
 
         gen = ApfV6Generator()
-        gen.addCountAndPass(Counter.TOTAL_PACKETS)
+        gen.addCountAndPass(PASSED_ARP)
         program = gen.generate()
         // encoding COUNT(PASS) opcode: opcode=0, imm_len=size_of(imm), R=0, imm=counterNumber
         assertContentEquals(
                 byteArrayOf(
                         encodeInstruction(opcode = 0, immLength = 1, register = 0),
-                        0x02
+                        PASSED_ARP.value().toByte()
                 ),
                 program
         )
         assertContentEquals(
-                listOf("0: pass         2"),
+                listOf("0: pass         10"),
                 ApfJniUtils.disassembleApf(program).map { it.trim() }
         )
 
         gen = ApfV6Generator()
-        gen.addCountAndDrop(Counter.PASSED_ALLOCATE_FAILURE)
+        gen.addCountAndDrop(DROPPED_ETHERTYPE_DENYLISTED)
         program = gen.generate()
         // encoding COUNT(DROP) opcode: opcode=0, imm_len=size_of(imm), R=1, imm=counterNumber
         assertContentEquals(
                 byteArrayOf(
                         encodeInstruction(opcode = 0, immLength = 1, register = 1),
-                        0x03
+                        DROPPED_ETHERTYPE_DENYLISTED.value().toByte()
                 ),
                 program
         )
         assertContentEquals(
-                listOf("0: drop         3"),
+                listOf("0: drop         38"),
                 ApfJniUtils.disassembleApf(program).map { it.trim() }
         )
 
@@ -597,6 +643,31 @@ class ApfV5Test {
     }
 
     @Test
+    fun testCopyContentToTxBuffer() {
+        val program = ApfV6Generator()
+                .addData()
+                .addAllocate(18)
+                .addDataCopy(HexDump.hexStringToByteArray("112233445566"))
+                .addDataCopy(HexDump.hexStringToByteArray("223344"))
+                .addDataCopy(HexDump.hexStringToByteArray("778899"))
+                .addDataCopy(HexDump.hexStringToByteArray("112233445566"))
+                .addTransmitWithoutChecksum()
+                .generate()
+        assertContentEquals(listOf(
+                "0: data        9, 112233445566778899",
+                "12: allocate    18",
+                "16: datacopy    src=3, len=6",
+                "19: datacopy    src=4, len=3",
+                "22: datacopy    src=9, len=3",
+                "25: datacopy    src=3, len=6",
+                "28: transmit    ip_ofs=255"
+        ), ApfJniUtils.disassembleApf(program).map{ it.trim() })
+        assertPass(MIN_APF_VERSION_IN_DEV, program, testPacket)
+        val transmitPkt = HexDump.toHexString(ApfJniUtils.getTransmittedPacket())
+        assertEquals("112233445566223344778899112233445566", transmitPkt)
+    }
+
+    @Test
     fun testPassDrop() {
         var program = ApfV6Generator()
                 .addDrop()
@@ -627,6 +698,101 @@ class ApfV5Test {
                 Counter.TOTAL_PACKETS to 1,
                 Counter.PASSED_ARP to 1
         ), counterMap)
+    }
+
+    @Test
+    fun testCountAndPassDropCompareR0() {
+        doTestCountAndPassDropCompareR0(
+                { mutableMapOf() },
+                { ApfV4Generator(APF_VERSION_4) }
+        )
+        doTestCountAndPassDropCompareR0(
+                { mutableMapOf(Counter.TOTAL_PACKETS to 1) },
+                { ApfV6Generator().addData(byteArrayOf()) }
+        )
+    }
+
+    private fun doTestCountAndPassDropCompareR0(
+            getInitialMap: () -> MutableMap<Counter, Long>,
+            getGenerator: () -> ApfV4GeneratorBase<*>
+    ) {
+        var program = getGenerator()
+                .addLoadImmediate(R0, 123)
+                .addCountAndDropIfR0Equals(123, Counter.DROPPED_ETH_BROADCAST)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        var dataRegion = ByteArray(Counter.totalSize()) { 0 }
+        assertVerdict(MIN_APF_VERSION_IN_DEV, DROP, program, testPacket, dataRegion)
+        var counterMap = decodeCountersIntoMap(dataRegion)
+        var expectedMap = getInitialMap()
+        expectedMap[Counter.DROPPED_ETH_BROADCAST] = 1
+        assertEquals(expectedMap, counterMap)
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 123)
+                .addCountAndPassIfR0Equals(123, Counter.PASSED_ARP)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        dataRegion = ByteArray(Counter.totalSize()) { 0 }
+        assertVerdict(MIN_APF_VERSION_IN_DEV, PASS, program, testPacket, dataRegion)
+        counterMap = decodeCountersIntoMap(dataRegion)
+        expectedMap = getInitialMap()
+        expectedMap[Counter.PASSED_ARP] = 1
+        assertEquals(expectedMap, counterMap)
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 123)
+                .addCountAndDropIfR0NotEquals(124, Counter.DROPPED_ETH_BROADCAST)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        dataRegion = ByteArray(Counter.totalSize()) { 0 }
+        assertVerdict(MIN_APF_VERSION_IN_DEV, DROP, program, testPacket, dataRegion)
+        counterMap = decodeCountersIntoMap(dataRegion)
+        expectedMap = getInitialMap()
+        expectedMap[Counter.DROPPED_ETH_BROADCAST] = 1
+        assertEquals(expectedMap, counterMap)
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 123)
+                .addCountAndPassIfR0NotEquals(124, Counter.PASSED_ARP)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        dataRegion = ByteArray(Counter.totalSize()) { 0 }
+        assertVerdict(MIN_APF_VERSION_IN_DEV, PASS, program, testPacket, dataRegion)
+        counterMap = decodeCountersIntoMap(dataRegion)
+        expectedMap = getInitialMap()
+        expectedMap[Counter.PASSED_ARP] = 1
+        assertEquals(expectedMap, counterMap)
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 123)
+                .addCountAndDropIfR0LessThan(124, Counter.DROPPED_ETH_BROADCAST)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        dataRegion = ByteArray(Counter.totalSize()) { 0 }
+        assertVerdict(MIN_APF_VERSION_IN_DEV, DROP, program, testPacket, dataRegion)
+        counterMap = decodeCountersIntoMap(dataRegion)
+        expectedMap = getInitialMap()
+        expectedMap[Counter.DROPPED_ETH_BROADCAST] = 1
+        assertEquals(expectedMap, counterMap)
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 123)
+                .addCountAndPassIfR0LessThan(124, Counter.PASSED_ARP)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        dataRegion = ByteArray(Counter.totalSize()) { 0 }
+        assertVerdict(MIN_APF_VERSION_IN_DEV, PASS, program, testPacket, dataRegion)
+        counterMap = decodeCountersIntoMap(dataRegion)
+        expectedMap = getInitialMap()
+        expectedMap[Counter.PASSED_ARP] = 1
+        assertEquals(expectedMap, counterMap)
     }
 
     @Test
@@ -665,7 +831,7 @@ class ApfV5Test {
         assertContentEquals(ByteArray(Counter.totalSize()) { 0 }, dataRegion)
 
         program = ApfV4Generator(MIN_APF_VERSION)
-                .addCountAndPass(Counter.DROPPED_ETH_BROADCAST)
+                .addCountAndPass(PASSED_ARP)
                 .addCountTrampoline()
                 .generate()
         dataRegion = ByteArray(Counter.totalSize()) { 0 }
