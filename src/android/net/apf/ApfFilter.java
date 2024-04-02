@@ -170,6 +170,7 @@ public class ApfFilter implements AndroidPacketFilter {
         public int acceptRaMinLft;
         public boolean shouldHandleLightDoze;
         public long minMetricsSessionDurationMs;
+        public boolean enableApfV6;
     }
 
     /** A wrapper class of {@link SystemClock} to be mocked in unit tests. */
@@ -281,6 +282,7 @@ public class ApfFilter implements AndroidPacketFilter {
     private final int mAcceptRaMinLft;
     private final boolean mShouldHandleLightDoze;
 
+    private final boolean mEnableApfV6;
     private final NetworkQuirkMetrics mNetworkQuirkMetrics;
     private final IpClientRaInfoMetrics mIpClientRaInfoMetrics;
     private final ApfSessionInfoMetrics mApfSessionInfoMetrics;
@@ -378,6 +380,7 @@ public class ApfFilter implements AndroidPacketFilter {
         mClock = clock;
         mSessionStartMs = mClock.elapsedRealtime();
         mMinMetricsSessionDurationMs = config.minMetricsSessionDurationMs;
+        mEnableApfV6 = config.enableApfV6;
 
         if (mApfCapabilities.hasDataAccess()) {
             mCountAndPassLabel = "countAndPass";
@@ -663,8 +666,8 @@ public class ApfFilter implements AndroidPacketFilter {
         private long mMinRioRouteLifetime = Long.MAX_VALUE;
         // Minimum lifetime of RDNSSs in packet, Long.MAX_VALUE means not seen.
         private long mMinRdnssLifetime = Long.MAX_VALUE;
-        // Minimum lifetime in packet
-        private final int mMinLifetime;
+        // The time in seconds in which some of the information contained in this RA expires.
+        private final int mExpirationTime;
         // When the packet was last captured, in seconds since Unix Epoch
         private final int mLastSeen;
 
@@ -981,7 +984,7 @@ public class ApfFilter implements AndroidPacketFilter {
                         break;
                 }
             }
-            mMinLifetime = minLifetime();
+            mExpirationTime = getExpirationTime();
         }
 
         public enum MatchType {
@@ -1094,14 +1097,13 @@ public class ApfFilter implements AndroidPacketFilter {
             return MatchType.MATCH_DROP;
         }
 
-        // What is the minimum of all lifetimes within {@code packet} in seconds?
-        // Precondition: matches(packet, length) already returned true.
-        private int minLifetime() {
+        // Get the number of seconds in which some of the information contained in this RA expires.
+        private int getExpirationTime() {
             // While technically most lifetimes in the RA are u32s, as far as the RA filter is
             // concerned, INT_MAX is still a *much* longer lifetime than any filter would ever
             // reasonably be active for.
-            // Clamp minLifetime at INT_MAX.
-            int minLifetime = Integer.MAX_VALUE;
+            // Clamp expirationTime at INT_MAX.
+            int expirationTime = Integer.MAX_VALUE;
             for (PacketSection section : mPacketSections) {
                 if (section.type != PacketSection.Type.LIFETIME) {
                     continue;
@@ -1111,14 +1113,14 @@ public class ApfFilter implements AndroidPacketFilter {
                     continue;
                 }
 
-                minLifetime = (int) Math.min(minLifetime, section.lifetime);
+                expirationTime = (int) Math.min(expirationTime, section.lifetime);
             }
-            return minLifetime;
+            return expirationTime;
         }
 
-        // Filter for a fraction of the lifetime and adjust for the age of the RA.
+        // Filter for a fraction of the expiration time and adjust for the age of the RA.
         int getRemainingFilterLft(int currentTimeSeconds) {
-            int filterLifetime = ((mMinLifetime / FRACTION_OF_LIFETIME_TO_FILTER)
+            int filterLifetime = ((mExpirationTime / FRACTION_OF_LIFETIME_TO_FILTER)
                     - (currentTimeSeconds - mLastSeen));
             filterLifetime = Math.max(0, filterLifetime);
             // Clamp filterLifetime to <= 65535, so it fits in 2 bytes.
@@ -1946,8 +1948,12 @@ public class ApfFilter implements AndroidPacketFilter {
     @VisibleForTesting
     protected ApfV4GeneratorBase<?> emitPrologueLocked() throws IllegalInstructionException {
         // This is guaranteed to succeed because of the check in maybeCreate.
-        ApfV4GeneratorBase<ApfV4Generator> gen = new ApfV4Generator(
-                mApfCapabilities.apfVersionSupported);
+        ApfV4GeneratorBase<?> gen;
+        if (mEnableApfV6 && mApfCapabilities.apfVersionSupported > 4) {
+            gen = new ApfV6Generator().addData();
+        } else {
+            gen = new ApfV4Generator(mApfCapabilities.apfVersionSupported);
+        }
 
         if (mApfCapabilities.hasDataAccess()) {
             // Increment TOTAL_PACKETS
@@ -1968,6 +1974,11 @@ public class ApfFilter implements AndroidPacketFilter {
             // requires a new enough APFv5+ interpreter, otherwise will be 0
             maybeSetupCounter(gen, Counter.APF_VERSION);
             gen.addLoadFromMemory(R0, 8);  // m[8] is apf version
+            gen.addStoreData(R0, 0);  // store 'counter'
+
+            // store this program's sequential id, for later comparison
+            maybeSetupCounter(gen, Counter.APF_PROGRAM_ID);
+            gen.addLoadImmediate(R0, mNumProgramUpdates);
             gen.addStoreData(R0, 0);  // store 'counter'
         }
 
@@ -2260,7 +2271,7 @@ public class ApfFilter implements AndroidPacketFilter {
         if (context == null || config == null || ifParams == null) return null;
         ApfCapabilities apfCapabilities =  config.apfCapabilities;
         if (apfCapabilities == null) return null;
-        if (apfCapabilities.apfVersionSupported == 0) return null;
+        if (apfCapabilities.apfVersionSupported < 2) return null;
         if (apfCapabilities.maximumApfProgramSize < 512) {
             Log.e(TAG, "Unacceptably small APF limit: " + apfCapabilities.maximumApfProgramSize);
             return null;

@@ -274,6 +274,12 @@ public class IpReachabilityMonitor {
                 IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION);
         mIgnoreOrganicNudFailure = dependencies.isFeatureEnabled(context,
                 IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION);
+        // TODO: for debugging flaky test only, revert it later.
+        Log.d(TAG, "mIgnoreIncompleteIpv6DnsServerEnabled: "
+                + mIgnoreIncompleteIpv6DnsServerEnabled);
+        Log.d(TAG, "mIgnoreIncompleteIpv6DefaultRouterEnabled: "
+                + mIgnoreIncompleteIpv6DefaultRouterEnabled);
+        Log.d(TAG, "mIgnoreOrganicNudFailure is " + mIgnoreOrganicNudFailure);
         mMetricsLog = metricsLog;
         mNetd = netd;
         Preconditions.checkNotNull(mNetd);
@@ -460,7 +466,7 @@ public class IpReachabilityMonitor {
         // For on-link IPv6 DNS server or default router that never ever responds to address
         // resolution, kernel will send RTM_NEWNEIGH with NUD_FAILED to user space directly,
         // and there is no netlink neighbor events related to this neighbor received before.
-        return (prev == null || event.nudState == StructNdMsg.NUD_FAILED);
+        return (prev == null && event.nudState == StructNdMsg.NUD_FAILED);
     }
 
     private void handleNeighborLost(@Nullable final NeighborEvent prev,

@@ -17,6 +17,7 @@ package android.net.apf;
 
 import static android.net.apf.BaseApfGenerator.Rbit.Rbit0;
 import static android.net.apf.BaseApfGenerator.Rbit.Rbit1;
+import static android.net.apf.BaseApfGenerator.Register.R1;
 
 import androidx.annotation.NonNull;
 
@@ -178,6 +179,28 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
      */
     public final Type addWriteU32(long val) {
         return append(new Instruction(Opcodes.WRITE).overrideImmSize(4).addU32(val));
+    }
+
+    /**
+     * Add an instruction to the end of the program to encode int value as 4 bytes to output buffer.
+     */
+    public final Type addWrite32(int val) {
+        return addWriteU32((long) val & 0xffffffffL);
+    }
+
+    /**
+     * Add an instruction to the end of the program to write 4 bytes array to output buffer.
+     */
+    public final Type addWrite32(@NonNull byte[] bytes) {
+        Objects.requireNonNull(bytes);
+        if (bytes.length != 4) {
+            throw new IllegalArgumentException(
+                    "bytes array size must be 4, current size: " + bytes.length);
+        }
+        return addWrite32(((bytes[0] & 0xff) << 24)
+                | ((bytes[1] & 0xff) << 16)
+                | ((bytes[2] & 0xff) << 8)
+                | (bytes[3] & 0xff));
     }
 
     /**
@@ -393,6 +416,18 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
         return append(new Instruction(ExtendedOpcodes.JDNSAMATCHSAFE, Rbit1).setTargetLabel(
                 tgt).setBytesImm(names));
     }
+
+    /**
+     * Add an instruction to the end of the program to jump to {@code tgt} if the bytes of the
+     * packet at an offset specified by {@code register} match {@code bytes}
+     * R=1 means check for equal.
+     */
+    public final Type addJumpIfBytesAtR0Equal(byte[] bytes, String tgt)
+            throws IllegalInstructionException {
+        return append(new Instruction(Opcodes.JNEBS, R1).addUnsigned(
+                bytes.length).setTargetLabel(tgt).setBytesImm(bytes));
+    }
+
 
     /**
      * Check if the byte is valid dns character: A-Z,0-9,-,_

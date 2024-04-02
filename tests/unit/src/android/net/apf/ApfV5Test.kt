@@ -16,6 +16,9 @@
 package android.net.apf
 
 import android.net.apf.ApfCounterTracker.Counter
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_ETHERTYPE_DENYLISTED
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_ETH_BROADCAST
+import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP
 import android.net.apf.ApfTestUtils.DROP
 import android.net.apf.ApfTestUtils.MIN_PKT_SIZE
 import android.net.apf.ApfTestUtils.PASS
@@ -218,6 +221,51 @@ class ApfV5Test {
                 byteArrayOf(1, 'A'.code.toByte(), 1, 'B'.code.toByte()),
                 ApfV4Generator.DROP_LABEL
         ) }
+        assertFailsWith<IllegalArgumentException> { gen.addCountAndDrop(PASSED_ARP) }
+        assertFailsWith<IllegalArgumentException> { gen.addCountAndPass(DROPPED_ETH_BROADCAST) }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndDropIfR0Equals(3, PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndPassIfR0Equals(3, DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndDropIfR0NotEquals(3, PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndPassIfR0NotEquals(3, DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndDropIfR0LessThan(3, PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndPassIfR0LessThan(3, DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addWrite32(byteArrayOf())
+        }
+
+        val v4gen = ApfV4Generator(APF_VERSION_4)
+        assertFailsWith<IllegalArgumentException> { v4gen.addCountAndDrop(PASSED_ARP) }
+        assertFailsWith<IllegalArgumentException> { v4gen.addCountAndPass(DROPPED_ETH_BROADCAST) }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndDropIfR0Equals(3, PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndPassIfR0Equals(3, DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndDropIfR0NotEquals(3, PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndPassIfR0NotEquals(3, DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndDropIfR0LessThan(3, PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndPassIfR0LessThan(3, DROPPED_ETH_BROADCAST)
+        }
     }
 
     @Test
@@ -296,34 +344,34 @@ class ApfV5Test {
         )
 
         gen = ApfV6Generator()
-        gen.addCountAndPass(Counter.TOTAL_PACKETS)
+        gen.addCountAndPass(PASSED_ARP)
         program = gen.generate()
         // encoding COUNT(PASS) opcode: opcode=0, imm_len=size_of(imm), R=0, imm=counterNumber
         assertContentEquals(
                 byteArrayOf(
                         encodeInstruction(opcode = 0, immLength = 1, register = 0),
-                        0x02
+                        PASSED_ARP.value().toByte()
                 ),
                 program
         )
         assertContentEquals(
-                listOf("0: pass         2"),
+                listOf("0: pass         10"),
                 ApfJniUtils.disassembleApf(program).map { it.trim() }
         )
 
         gen = ApfV6Generator()
-        gen.addCountAndDrop(Counter.PASSED_ALLOCATE_FAILURE)
+        gen.addCountAndDrop(DROPPED_ETHERTYPE_DENYLISTED)
         program = gen.generate()
         // encoding COUNT(DROP) opcode: opcode=0, imm_len=size_of(imm), R=1, imm=counterNumber
         assertContentEquals(
                 byteArrayOf(
                         encodeInstruction(opcode = 0, immLength = 1, register = 1),
-                        0x03
+                        DROPPED_ETHERTYPE_DENYLISTED.value().toByte()
                 ),
                 program
         )
         assertContentEquals(
-                listOf("0: drop         3"),
+                listOf("0: drop         38"),
                 ApfJniUtils.disassembleApf(program).map { it.trim() }
         )
 
@@ -393,6 +441,8 @@ class ApfV5Test {
         gen.addWriteU16(0x8000)
         gen.addWriteU32(0x00000000)
         gen.addWriteU32(0x80000000)
+        gen.addWrite32(-2)
+        gen.addWrite32(byteArrayOf(0xff.toByte(), 0xfe.toByte(), 0xfd.toByte(), 0xfc.toByte()))
         program = gen.generate()
         assertContentEquals(byteArrayOf(
                 encodeInstruction(24, 1, 0), 0x01,
@@ -403,8 +453,11 @@ class ApfV5Test {
                 encodeInstruction(24, 2, 0), 0x00, 0x00,
                 encodeInstruction(24, 2, 0), 0x80.toByte(), 0x00,
                 encodeInstruction(24, 4, 0), 0x00, 0x00, 0x00, 0x00,
-                encodeInstruction(24, 4, 0), 0x80.toByte(), 0x00, 0x00,
-                0x00), program)
+                encodeInstruction(24, 4, 0), 0x80.toByte(), 0x00, 0x00, 0x00,
+                encodeInstruction(24, 4, 0), 0xff.toByte(), 0xff.toByte(),
+                0xff.toByte(), 0xfe.toByte(),
+                encodeInstruction(24, 4, 0), 0xff.toByte(), 0xfe.toByte(),
+                0xfd.toByte(), 0xfc.toByte()), program)
         assertContentEquals(listOf(
                 "0: write       0x01",
                 "2: write       0x0102",
@@ -414,7 +467,9 @@ class ApfV5Test {
                 "14: write       0x0000",
                 "17: write       0x8000",
                 "20: write       0x00000000",
-                "25: write       0x80000000"
+                "25: write       0x80000000",
+                "30: write       0xfffffffe",
+                "35: write       0xfffefdfc"
         ), ApfJniUtils.disassembleApf(program).map { it.trim() })
 
         gen = ApfV6Generator()
@@ -556,6 +611,8 @@ class ApfV5Test {
             .addWriteU8(0x01)
             .addWriteU16(0x0203)
             .addWriteU32(0x04050607)
+            .addWrite32(-2)
+            .addWrite32(byteArrayOf(0xff.toByte(), 0xfe.toByte(), 0xfd.toByte(), 0xfc.toByte()))
             .addLoadImmediate(R0, 1)
             .addWriteU8(R0)
             .addLoadImmediate(R0, 0x0203)
@@ -565,8 +622,13 @@ class ApfV5Test {
             .addTransmitWithoutChecksum()
             .generate()
         assertPass(MIN_APF_VERSION_IN_DEV, program, ByteArray(MIN_PKT_SIZE))
-        assertContentEquals(byteArrayOf(0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x01, 0x02, 0x03,
-                0x04, 0x05, 0x06, 0x07), ApfJniUtils.getTransmittedPacket())
+        assertContentEquals(
+                byteArrayOf(
+                        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0xff.toByte(),
+                        0xff.toByte(), 0xff.toByte(), 0xfe.toByte(), 0xff.toByte(), 0xfe.toByte(),
+                        0xfd.toByte(), 0xfc.toByte(), 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07),
+                ApfJniUtils.getTransmittedPacket()
+        )
     }
 
     @Test
@@ -786,7 +848,7 @@ class ApfV5Test {
         assertContentEquals(ByteArray(Counter.totalSize()) { 0 }, dataRegion)
 
         program = ApfV4Generator(MIN_APF_VERSION)
-                .addCountAndPass(Counter.DROPPED_ETH_BROADCAST)
+                .addCountAndPass(PASSED_ARP)
                 .addCountTrampoline()
                 .generate()
         dataRegion = ByteArray(Counter.totalSize()) { 0 }
