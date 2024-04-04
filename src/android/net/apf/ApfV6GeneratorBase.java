@@ -17,10 +17,13 @@ package android.net.apf;
 
 import static android.net.apf.BaseApfGenerator.Rbit.Rbit0;
 import static android.net.apf.BaseApfGenerator.Rbit.Rbit1;
+import static android.net.apf.BaseApfGenerator.Register.R1;
 
 import androidx.annotation.NonNull;
 
 import com.android.net.module.util.HexDump;
+
+import java.util.Objects;
 
 /**
  * The abstract class for APFv6 assembler/generator.
@@ -99,6 +102,13 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
     }
 
     /**
+     * Add an instruction to the beginning of the program to reserve the empty data region.
+     */
+    public final Type addData() throws IllegalInstructionException {
+        return addData(new byte[0]);
+    }
+
+    /**
      * Add an instruction to the beginning of the program to reserve the data region.
      * @param data the actual data byte
      */
@@ -106,9 +116,12 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
         if (!mInstructions.isEmpty()) {
             throw new IllegalInstructionException("data instruction has to come first");
         }
+        if (data.length > 65535) {
+            throw new IllegalArgumentException("data size larger than 65535");
+        }
         mIsV6 = true;
         return append(new Instruction(Opcodes.JMP, Rbit1).addUnsigned(data.length)
-                .setBytesImm(data));
+                .setBytesImm(data).overrideImmSize(2));
     }
 
     /**
@@ -151,21 +164,43 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
      * Add an instruction to the end of the program to write 1 byte value to output buffer.
      */
     public final Type addWriteU8(int val) {
-        return append(new Instruction(Opcodes.WRITE).overrideLenField(1).addU8(val));
+        return append(new Instruction(Opcodes.WRITE).overrideImmSize(1).addU8(val));
     }
 
     /**
      * Add an instruction to the end of the program to write 2 bytes value to output buffer.
      */
     public final Type addWriteU16(int val) {
-        return append(new Instruction(Opcodes.WRITE).overrideLenField(2).addU16(val));
+        return append(new Instruction(Opcodes.WRITE).overrideImmSize(2).addU16(val));
     }
 
     /**
      * Add an instruction to the end of the program to write 4 bytes value to output buffer.
      */
     public final Type addWriteU32(long val) {
-        return append(new Instruction(Opcodes.WRITE).overrideLenField(4).addU32(val));
+        return append(new Instruction(Opcodes.WRITE).overrideImmSize(4).addU32(val));
+    }
+
+    /**
+     * Add an instruction to the end of the program to encode int value as 4 bytes to output buffer.
+     */
+    public final Type addWrite32(int val) {
+        return addWriteU32((long) val & 0xffffffffL);
+    }
+
+    /**
+     * Add an instruction to the end of the program to write 4 bytes array to output buffer.
+     */
+    public final Type addWrite32(@NonNull byte[] bytes) {
+        Objects.requireNonNull(bytes);
+        if (bytes.length != 4) {
+            throw new IllegalArgumentException(
+                    "bytes array size must be 4, current size: " + bytes.length);
+        }
+        return addWrite32(((bytes[0] & 0xff) << 24)
+                | ((bytes[1] & 0xff) << 16)
+                | ((bytes[2] & 0xff) << 8)
+                | (bytes[3] & 0xff));
     }
 
     /**
@@ -190,6 +225,22 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
      */
     public final Type addWriteU32(Register reg) {
         return append(new Instruction(ExtendedOpcodes.EWRITE4, reg));
+    }
+
+    /**
+     * Add an instruction to the end of the program to copy data from APF program/data region to
+     * output buffer and auto-increment the output buffer pointer.
+     * This method requires the {@code addData} method to be called beforehand.
+     * It will first attempt to match {@code content} with existing data bytes. If not exist, then
+     * append the {@code content} to the data bytes.
+     */
+    public final Type addDataCopy(@NonNull byte[] content) throws IllegalInstructionException {
+        if (mInstructions.isEmpty()) {
+            throw new IllegalInstructionException("There is no instructions");
+        }
+        Objects.requireNonNull(content);
+        int copySrc = mInstructions.get(0).maybeUpdateBytesImm(content);
+        return addDataCopy(copySrc, content.length);
     }
 
     /**
@@ -365,6 +416,18 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
         return append(new Instruction(ExtendedOpcodes.JDNSAMATCHSAFE, Rbit1).setTargetLabel(
                 tgt).setBytesImm(names));
     }
+
+    /**
+     * Add an instruction to the end of the program to jump to {@code tgt} if the bytes of the
+     * packet at an offset specified by register0 match {@code bytes}.
+     * R=1 means check for equal.
+     */
+    public final Type addJumpIfBytesAtR0Equal(byte[] bytes, String tgt)
+            throws IllegalInstructionException {
+        return append(new Instruction(Opcodes.JNEBS, R1).addUnsigned(
+                bytes.length).setTargetLabel(tgt).setBytesImm(bytes));
+    }
+
 
     /**
      * Check if the byte is valid dns character: A-Z,0-9,-,_

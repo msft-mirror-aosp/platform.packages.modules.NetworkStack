@@ -22,6 +22,10 @@ import static android.net.apf.BaseApfGenerator.Register.R0;
 
 import androidx.annotation.NonNull;
 
+import com.android.net.module.util.ByteUtils;
+import com.android.net.module.util.CollectionUtils;
+import com.android.net.module.util.HexDump;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -313,16 +317,16 @@ public abstract class BaseApfGenerator {
     }
 
     class Instruction {
-        private final Opcodes mOpcode;
+        public final Opcodes mOpcode;
         private final Rbit mRbit;
         public final List<IntImmediate> mIntImms = new ArrayList<>();
         // When mOpcode is a jump:
         private int mTargetLabelSize;
-        private int mLenFieldOverride = -1;
+        private int mImmSizeOverride = -1;
         private String mTargetLabel;
         // When mOpcode == Opcodes.LABEL:
         private String mLabel;
-        private byte[] mBytesImm;
+        public byte[] mBytesImm;
         // Offset in bytes from the beginning of this program.
         // Set by {@link BaseApfGenerator#generate}.
         int offset;
@@ -441,14 +445,44 @@ public abstract class BaseApfGenerator {
             return this;
         }
 
-        Instruction overrideLenField(int size) {
-            mLenFieldOverride = size;
+        Instruction overrideImmSize(int size) {
+            mImmSizeOverride = size;
             return this;
         }
 
         Instruction setBytesImm(byte[] bytes) {
             mBytesImm = bytes;
             return this;
+        }
+
+        /**
+         * Attempts to match {@code content} with existing data bytes. If not exist, then
+         * append the {@code content} to the data bytes.
+         * Returns the start offset of the content from the beginning of the program.
+         */
+        int maybeUpdateBytesImm(byte[] content) throws IllegalInstructionException {
+            if (mOpcode != Opcodes.JMP || mBytesImm == null) {
+                throw new IllegalInstructionException(String.format(
+                        "maybeUpdateBytesImm() is only valid for jump data instruction, mOpcode "
+                                + ":%s, mBytesImm: %s", Opcodes.JMP,
+                        mBytesImm == null ? "(empty)" : HexDump.toHexString(mBytesImm)));
+            }
+            if (mImmSizeOverride != 2) {
+                throw new IllegalInstructionException(
+                        "mImmSizeOverride must be 2, mImmSizeOverride: " + mImmSizeOverride);
+            }
+            int offsetInDataBytes = CollectionUtils.indexOfSubArray(mBytesImm, content);
+            if (offsetInDataBytes == -1) {
+                offsetInDataBytes = mBytesImm.length;
+                mBytesImm = ByteUtils.concat(mBytesImm, content);
+                // Update the length immediate (first imm) value. Due to mValue within
+                // IntImmediate being final, we must remove and re-add the value to apply changes.
+                mIntImms.remove(0);
+                addDataOffset(mBytesImm.length);
+            }
+            // Note that the data instruction encoding consumes 1 byte and the data length
+            // encoding consumes 2 bytes.
+            return 1 + mImmSizeOverride + offsetInDataBytes;
         }
 
         /**
@@ -493,21 +527,6 @@ public abstract class BaseApfGenerator {
          * Assemble value for instruction size field.
          */
         private int generateImmSizeField() {
-            // If we already know the size the length field, just use it
-            switch (mLenFieldOverride) {
-                case -1:
-                    break;
-                case 1:
-                    return 1;
-                case 2:
-                    return 2;
-                case 4:
-                    return 3;
-                default:
-                    throw new IllegalStateException(
-                            "mLenFieldOverride has invalid value: " + mLenFieldOverride);
-            }
-            // Otherwise, calculate
             int immSize = calculateRequiredIndeterminateSize();
             // Encode size field to fit in 2 bits: 0->0, 1->1, 2->2, 3->4.
             return immSize == 4 ? 3 : immSize;
@@ -582,7 +601,23 @@ public abstract class BaseApfGenerator {
             for (IntImmediate imm : mIntImms) {
                 maxSize = Math.max(maxSize, imm.calculateIndeterminateSize());
             }
-            return maxSize;
+            if (mImmSizeOverride != -1 && maxSize > mImmSizeOverride) {
+                throw new IllegalStateException(String.format(
+                        "maxSize: %d should not be greater than mImmSizeOverride: %d", maxSize,
+                        mImmSizeOverride));
+            }
+            // If we already know the size the length field, just use it
+            switch (mImmSizeOverride) {
+                case -1:
+                    return maxSize;
+                case 1:
+                case 2:
+                case 4:
+                    return mImmSizeOverride;
+                default:
+                    throw new IllegalStateException(
+                            "mImmSizeOverride has invalid value: " + mImmSizeOverride);
+            }
         }
 
         private int calculateTargetLabelOffset() throws IllegalInstructionException {
@@ -640,6 +675,26 @@ public abstract class BaseApfGenerator {
         throw new IllegalArgumentException(
                 String.format("%s: %d, must be in range [%d, %d]", variableName, value, lowerBound,
                         upperBound));
+    }
+
+    static void checkPassCounterRange(ApfCounterTracker.Counter cnt) {
+        if (cnt.value() < ApfCounterTracker.MIN_PASS_COUNTER.value()
+                || cnt.value() > ApfCounterTracker.MAX_PASS_COUNTER.value()) {
+            throw new IllegalArgumentException(
+                    String.format("Counter %s, is not in range [%s, %s]", cnt,
+                            ApfCounterTracker.MIN_PASS_COUNTER,
+                            ApfCounterTracker.MAX_PASS_COUNTER));
+        }
+    }
+
+    static void checkDropCounterRange(ApfCounterTracker.Counter cnt) {
+        if (cnt.value() < ApfCounterTracker.MIN_DROP_COUNTER.value()
+                || cnt.value() > ApfCounterTracker.MAX_DROP_COUNTER.value()) {
+            throw new IllegalArgumentException(
+                    String.format("Counter %s, is not in range [%s, %s]", cnt,
+                            ApfCounterTracker.MIN_DROP_COUNTER,
+                            ApfCounterTracker.MAX_DROP_COUNTER));
+        }
     }
 
     /**
