@@ -424,6 +424,10 @@ public class LegacyApfFilter implements AndroidPacketFilter {
         // Listen for doze-mode transition changes to enable/disable the IPv6 multicast filter.
         mContext.registerReceiver(mDeviceIdleReceiver,
                 new IntentFilter(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED));
+
+        mDependencies.onApfFilterCreated(this);
+        // mReceiveThread is created in maybeStartFilter() and halted in shutdown().
+        mDependencies.onThreadCreated(mReceiveThread);
     }
 
     public synchronized void setDataSnapshot(byte[] data) {
@@ -1730,6 +1734,16 @@ public class LegacyApfFilter implements AndroidPacketFilter {
             // requires a new enough APFv5+ interpreter, otherwise will be 0
             maybeSetupCounter(gen, Counter.FILTER_AGE_16384THS);
             gen.addLoadFromMemory(R0, 9);  // m[9] is filter age in 16384ths
+            gen.addStoreData(R0, 0);  // store 'counter'
+
+            // requires a new enough APFv5+ interpreter, otherwise will be 0
+            maybeSetupCounter(gen, Counter.APF_VERSION);
+            gen.addLoadFromMemory(R0, 8);  // m[8] is apf version
+            gen.addStoreData(R0, 0);  // store 'counter'
+
+            // store this program's sequential id, for later comparison
+            maybeSetupCounter(gen, Counter.APF_PROGRAM_ID);
+            gen.addLoadImmediate(R0, mNumProgramUpdates);
             gen.addStoreData(R0, 0);  // store 'counter'
         }
 
