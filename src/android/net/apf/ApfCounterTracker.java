@@ -19,8 +19,6 @@ package android.net.apf;
 import android.util.ArrayMap;
 import android.util.Log;
 
-import com.android.internal.annotations.VisibleForTesting;
-
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -38,7 +36,6 @@ public class ApfCounterTracker {
      * buffer, using negative byte offsets, where -4 is equivalent to maximumApfProgramSize - 4,
      * the last writable 32bit word.
      */
-    @VisibleForTesting
     public enum Counter {
         RESERVED_OOB,  // Points to offset 0 from the end of the buffer (out-of-bounds)
         ENDIANNESS,              // APFv6 interpreter stores 0x12345678 here
@@ -48,7 +45,9 @@ public class ApfCounterTracker {
         CORRUPT_DNS_PACKET,      // hardcoded in APFv6 interpreter
         FILTER_AGE_SECONDS,
         FILTER_AGE_16384THS,
-        PASSED_ARP,
+        APF_VERSION,
+        APF_PROGRAM_ID,
+        PASSED_ARP,  // see also MIN_PASS_COUNTER below
         PASSED_DHCP,
         PASSED_IPV4,
         PASSED_IPV6_NON_ICMP,
@@ -60,10 +59,12 @@ public class ApfCounterTracker {
         PASSED_ARP_UNICAST_REPLY,
         PASSED_NON_IP_UNICAST,
         PASSED_MDNS,
-        DROPPED_ETH_BROADCAST,
+        PASSED_MLD,  // see also MAX_PASS_COUNTER below
+        DROPPED_ETH_BROADCAST,  // see also MIN_DROP_COUNTER below
         DROPPED_RA,
         DROPPED_GARP_REPLY,
         DROPPED_ARP_OTHER_HOST,
+        DROPPED_ARP_REQUEST_NO_ADDRESS,
         DROPPED_IPV4_L2_BROADCAST,
         DROPPED_IPV4_BROADCAST_ADDR,
         DROPPED_IPV4_BROADCAST_NET,
@@ -82,7 +83,7 @@ public class ApfCounterTracker {
         DROPPED_MDNS,
         DROPPED_IPV4_TCP_PORT7_UNICAST,
         DROPPED_ARP_NON_IPV4,
-        DROPPED_ARP_UNKNOWN;
+        DROPPED_ARP_UNKNOWN;  // see also MAX_DROP_COUNTER below
 
         /**
          * Returns the negative byte offset from the end of the APF data segment for
@@ -107,6 +108,11 @@ public class ApfCounterTracker {
             return (Counter.class.getEnumConstants().length - 1) * 4;
         }
     }
+
+    public static final Counter MIN_DROP_COUNTER = Counter.DROPPED_ETH_BROADCAST;
+    public static final Counter MAX_DROP_COUNTER = Counter.DROPPED_ARP_UNKNOWN;
+    public static final Counter MIN_PASS_COUNTER = Counter.PASSED_ARP;
+    public static final Counter MAX_PASS_COUNTER = Counter.PASSED_MLD;
 
     private static final String TAG = ApfCounterTracker.class.getSimpleName();
 
