@@ -315,7 +315,10 @@ java_defaults {
     srcs: [
         ":framework-networkstack-shared-srcs",
     ],
-    libs: ["unsupportedappusage"],
+    libs: [
+        "error_prone_annotations",
+        "unsupportedappusage",
+    ],
     static_libs: [
         "androidx.annotation_annotation",
         "modules-utils-build_system",
@@ -332,6 +335,7 @@ java_defaults {
         "net-utils-device-common-ip",
         "net-utils-device-common-netlink",
         "net-utils-device-common-struct",
+        "net-utils-device-common-struct-base",
     ],
 }
 
