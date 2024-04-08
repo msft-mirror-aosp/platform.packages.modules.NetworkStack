@@ -26,6 +26,7 @@ import static android.net.NetworkCapabilities.NET_CAPABILITY_TRUSTED;
 import static android.net.NetworkCapabilities.TRANSPORT_TEST;
 import static android.net.RouteInfo.RTN_UNICAST;
 import static android.net.dhcp.DhcpClient.EXPIRED_LEASE;
+import static android.net.dhcp.DhcpPacket.CONFIG_MINIMUM_LEASE;
 import static android.net.dhcp.DhcpPacket.DHCP_BOOTREQUEST;
 import static android.net.dhcp.DhcpPacket.DHCP_CLIENT;
 import static android.net.dhcp.DhcpPacket.DHCP_IPV6_ONLY_PREFERRED;
@@ -220,8 +221,6 @@ import com.android.networkstack.metrics.NetworkQuirkMetrics;
 import com.android.networkstack.packets.NeighborAdvertisement;
 import com.android.networkstack.packets.NeighborSolicitation;
 import com.android.networkstack.util.NetworkStackUtils;
-import com.android.server.NetworkObserver;
-import com.android.server.NetworkObserverRegistry;
 import com.android.server.NetworkStackService.NetworkStackServiceManager;
 import com.android.testutils.CompatUtil;
 import com.android.testutils.DevSdkIgnoreRule;
@@ -239,8 +238,6 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestName;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
@@ -282,7 +279,6 @@ import java.util.function.Predicate;
  *
  * Tests in this class can either be run with signature permissions, or with root access.
  */
-@RunWith(Parameterized.class)
 @SmallTest
 public abstract class IpClientIntegrationTestCommon {
     private static final String TAG = IpClientIntegrationTestCommon.class.getSimpleName();
@@ -317,17 +313,6 @@ public abstract class IpClientIntegrationTestCommon {
     public final DevSdkIgnoreRule mIgnoreRule = new DevSdkIgnoreRule();
     @Rule
     public final TestName mTestNameRule = new TestName();
-
-    // Indicate whether the flag of parsing netlink event is enabled or not. If it's disabled,
-    // integration test still covers the old codepath(i.e. using NetworkObserver), otherwise,
-    // test goes through the new codepath(i.e. processRtNetlinkxxx).
-    @Parameterized.Parameter(0)
-    public boolean mIsNetlinkEventParseEnabled;
-
-    @Parameterized.Parameters
-    public static Iterable<? extends Object> data() {
-        return Arrays.asList(Boolean.FALSE, Boolean.TRUE);
-    }
 
     /**
      * Indicates that a test requires signature permissions to run.
@@ -364,7 +349,6 @@ public abstract class IpClientIntegrationTestCommon {
     @Mock private DevicePolicyManager mDevicePolicyManager;
     @Mock private PackageManager mPackageManager;
     @Spy private INetd mNetd;
-    private NetworkObserverRegistry mNetworkObserverRegistry;
 
     protected IpClient mIpc;
     protected Dependencies mDependencies;
@@ -595,6 +579,11 @@ public abstract class IpClientIntegrationTestCommon {
                 }
 
                 @Override
+                public int getIntDeviceConfig(final String name, int defaultValue) {
+                    return Dependencies.this.getDeviceConfigPropertyInt(name, defaultValue);
+                }
+
+                @Override
                 public PowerManager.WakeLock getWakeLock(final PowerManager powerManager) {
                     return mTimeoutWakeLock;
                 }
@@ -718,31 +707,10 @@ public abstract class IpClientIntegrationTestCommon {
 
     @Before
     public void setUp() throws Exception {
-        // Suffix "[0]" or "[1]" is added to the end of test method name after running with
-        // Parameterized.class, that's intended behavior, to iterate each test method with the
-        // parameterize value. However, Class#getMethod() throws NoSuchMethodException when
-        // searching the target test method name due to this change. Just keep the original test
-        // method name to fix NoSuchMethodException, and find the correct annotation associated
-        // to test method.
-        final String testMethodName = mTestNameRule.getMethodName().split("\\[")[0];
+        final String testMethodName = mTestNameRule.getMethodName();
         final Method testMethod = IpClientIntegrationTestCommon.class.getMethod(testMethodName);
         mIsSignatureRequiredTest = testMethod.getAnnotation(SignatureRequiredTest.class) != null;
         assumeFalse(testSkipped());
-
-        // Depend on the parameterized value to enable/disable netlink message refactor flag.
-        // Make sure both of the old codepath(rely on the INetdUnsolicitedEventListener aidl)
-        // and new codepath(parse netlink event from kernel) will be executed.
-        //
-        // Note this must be called before making IpClient instance since MyNetlinkMontior ctor
-        // in IpClientLinkObserver will use mIsNetlinkEventParseEnabled to decide the proper
-        // bindGroups, otherwise, the parameterized value got from ArrayMap(integration test) is
-        // always false.
-        //
-        // Set feature kill switch flag with the parameterized value to keep running test cases on
-        // both code paths. Once we clean up the old code path (i.e.when the parameterized variable
-        // is false), then we can also delete this code.
-        setFeatureChickenedOut(NetworkStackUtils.IPCLIENT_PARSE_NETLINK_EVENTS_FORCE_DISABLE,
-                !mIsNetlinkEventParseEnabled);
 
         // Enable DHCPv6 Prefix Delegation.
         setFeatureEnabled(NetworkStackUtils.IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION,
@@ -751,6 +719,18 @@ public abstract class IpClientIntegrationTestCommon {
         // Enable populating the IP Link Address lifetime.
         setFeatureEnabled(NetworkStackUtils.IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION,
                 true /* enabled */);
+
+        // Disable the experiment flag IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION
+        // for testIpReachabilityMonitor_incompleteIpv6DnsServerInDualStack_flagoff testcase, given
+        // the experiment flag is read at IpReachabilityMonitor constructor so we have to turn it
+        // off before creating the IpClient instance.
+        // TODO: cleanup this code as well when cleaning up the experiment flag.
+        if (testMethodName.equals(
+                "testIpReachabilityMonitor_incompleteIpv6DnsServerInDualStack_flagoff")) {
+            setFeatureEnabled(
+                    NetworkStackUtils.IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION,
+                    false /* enabled */);
+        }
 
         setUpTapInterface();
         // It turns out that Router Solicitation will also be sent out even after the tap interface
@@ -767,6 +747,7 @@ public abstract class IpClientIntegrationTestCommon {
             setUpIpClient();
             // Enable packet retransmit alarm in DhcpClient.
             enableRealAlarm("DhcpClient." + mIfaceName + ".KICK");
+            enableRealAlarm("DhcpClient." + mIfaceName + ".RENEW");
             // Enable alarm for IPv6 autoconf via SLAAC in IpClient.
             enableRealAlarm("IpClient." + mIfaceName + ".EVENT_IPV6_AUTOCONF_TIMEOUT");
             // Enable packet retransmit alarm in Dhcp6Client.
@@ -786,6 +767,8 @@ public abstract class IpClientIntegrationTestCommon {
         // in this case and start DHCPv6 Prefix Delegation then.
         final int timeout = useNetworkStackSignature() ? 500 : (int) TEST_TIMEOUT_MS;
         setDeviceConfigProperty(IpClient.CONFIG_IPV6_AUTOCONF_TIMEOUT, timeout /* default value */);
+        // Set DHCP minimum lease.
+        setDeviceConfigProperty(DhcpPacket.CONFIG_MINIMUM_LEASE, DhcpPacket.DEFAULT_MINIMUM_LEASE);
     }
 
     protected void setUpMocks() throws Exception {
@@ -945,8 +928,8 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     private IpClient makeIpClient() throws Exception {
-        IpClient ipc = new IpClient(mContext, mIfaceName, mCb, mNetworkObserverRegistry,
-                mNetworkStackServiceManager, mDependencies);
+        IpClient ipc =
+                new IpClient(mContext, mIfaceName, mCb, mNetworkStackServiceManager, mDependencies);
         // Wait for IpClient to enter its initial state. Otherwise, additional setup steps or tests
         // that mock IpClient's dependencies might interact with those mocks while IpClient is
         // starting. This would cause UnfinishedStubbingExceptions as mocks cannot be interacted
@@ -963,8 +946,6 @@ public abstract class IpClientIntegrationTestCommon {
         when(mContext.getSystemService(eq(Context.NETD_SERVICE))).thenReturn(netdIBinder);
         assertNotNull(mNetd);
 
-        mNetworkObserverRegistry = new NetworkObserverRegistry();
-        mNetworkObserverRegistry.register(mNetd);
         mIpc = makeIpClient();
 
         // Tell the IpMemoryStore immediately to answer any question about network attributes with a
@@ -2164,11 +2145,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     private boolean isStablePrivacyAddress(LinkAddress addr) {
-        // The Q netd does not understand the IFA_F_STABLE_PRIVACY flag.
-        // See r.android.com/1295670.
-        final int flag = (mIsNetlinkEventParseEnabled || ShimUtils.isAtLeastR())
-                ? IFA_F_STABLE_PRIVACY : 0;
-        return addr.isGlobalPreferred() && hasFlag(addr, flag);
+        return addr.isGlobalPreferred() && hasFlag(addr, IFA_F_STABLE_PRIVACY);
     }
 
     private LinkProperties doIpv6OnlyProvisioning() throws Exception {
@@ -2263,14 +2240,11 @@ public abstract class IpClientIntegrationTestCommon {
         reset(mCb);
     }
 
-    private void runRaRdnssIpv6LinkLocalDnsTest(boolean isIpv6LinkLocalDnsAccepted)
-            throws Exception {
+    private void runRaRdnssIpv6LinkLocalDnsTest() throws Exception {
         ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
                 .withoutIpReachabilityMonitor()
                 .withoutIPv4()
                 .build();
-        setFeatureEnabled(NetworkStackUtils.IPCLIENT_ACCEPT_IPV6_LINK_LOCAL_DNS_VERSION,
-                isIpv6LinkLocalDnsAccepted /* default value */);
         startIpClientProvisioning(config);
 
         final ByteBuffer pio = buildPioOption(600, 300, "2001:db8:1::/64");
@@ -2286,7 +2260,7 @@ public abstract class IpClientIntegrationTestCommon {
 
     @Test
     public void testRaRdnss_Ipv6LinkLocalDns() throws Exception {
-        runRaRdnssIpv6LinkLocalDnsTest(true /* isIpv6LinkLocalDnsAccepted */);
+        runRaRdnssIpv6LinkLocalDnsTest();
         final ArgumentCaptor<LinkProperties> captor = ArgumentCaptor.forClass(LinkProperties.class);
         verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningSuccess(captor.capture());
         final LinkProperties lp = captor.getValue();
@@ -2294,20 +2268,6 @@ public abstract class IpClientIntegrationTestCommon {
         assertEquals(1, lp.getDnsServers().size());
         assertEquals(ROUTER_LINK_LOCAL, (Inet6Address) lp.getDnsServers().get(0));
         assertTrue(lp.isIpv6Provisioned());
-    }
-
-    @Test
-    public void testRaRdnss_disableIpv6LinkLocalDns() throws Exception {
-        // Only run the test when the flag of parsing netlink events is enabled, feature flag
-        // "ipclient_accept_ipv6_link_local_dns" doesn't affect the legacy code.
-        assumeTrue(mIsNetlinkEventParseEnabled);
-        runRaRdnssIpv6LinkLocalDnsTest(false /* isIpv6LinkLocalDnsAccepted */);
-        verify(mCb, timeout(TEST_TIMEOUT_MS)).onLinkPropertiesChange(argThat(lp -> {
-            return lp.hasGlobalIpv6Address()
-                    && lp.hasIpv6DefaultRoute()
-                    && !lp.hasIpv6DnsServer();
-        }));
-        verify(mCb, never()).onProvisioningSuccess(any());
     }
 
     private void expectNat64PrefixUpdate(InOrder inOrder, IpPrefix expected) throws Exception {
@@ -2438,49 +2398,15 @@ public abstract class IpClientIntegrationTestCommon {
         HandlerUtils.waitForIdle(mIpc.getHandler(), TEST_TIMEOUT_MS);
     }
 
-    private void waitForAddressViaNetworkObserver(final String iface, final String addr1,
-            final String addr2, int prefixLength) throws Exception {
-        final CountDownLatch latch = new CountDownLatch(1);
-
-        // Add two IPv4 addresses to the specified interface, and proceed when the NetworkObserver
-        // has seen the second one. This ensures that every other NetworkObserver registered with
-        // mNetworkObserverRegistry - in particular, IpClient's - has seen the addition of the first
-        // address.
-        final LinkAddress trigger = new LinkAddress(addr2 + "/" + prefixLength);
-        NetworkObserver observer = new NetworkObserver() {
-            @Override
-            public void onInterfaceAddressUpdated(LinkAddress address, String ifName) {
-                if (ifName.equals(iface) && address.isSameAddressAs(trigger)) {
-                    latch.countDown();
-                }
-            }
-        };
-
-        mNetworkObserverRegistry.registerObserverForNonblockingCallback(observer);
-        try {
-            mNetd.interfaceAddAddress(iface, addr1, prefixLength);
-            mNetd.interfaceAddAddress(iface, addr2, prefixLength);
-            assertTrue("Trigger IP address " + addr2 + " not seen after " + TEST_TIMEOUT_MS + "ms",
-                    latch.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
-        } finally {
-            mNetworkObserverRegistry.unregisterObserver(observer);
-        }
-    }
-
     private void addIpAddressAndWaitForIt(final String iface) throws Exception {
         final String addr1 = "192.0.2.99";
         final String addr2 = "192.0.2.3";
         final int prefixLength = 26;
 
-        if (!mIsNetlinkEventParseEnabled) {
-            waitForAddressViaNetworkObserver(iface, addr1, addr2, prefixLength);
-        } else {
-            // IpClient gets IP addresses directly from netlink instead of from netd, unnecessary
-            // to rely on the NetworkObserver callbacks to confirm new added address update. Just
-            // add the addresses directly and wait to see if IpClient has seen the address
-            mNetd.interfaceAddAddress(iface, addr1, prefixLength);
-            mNetd.interfaceAddAddress(iface, addr2, prefixLength);
-        }
+        // IpClient gets IP addresses directly from netlink instead of from netd, just
+        // add the addresses directly and wait to see if IpClient has seen the address.
+        mNetd.interfaceAddAddress(iface, addr1, prefixLength);
+        mNetd.interfaceAddAddress(iface, addr2, prefixLength);
 
         // Wait for IpClient to process the addition of the address.
         HandlerUtils.waitForIdle(mIpc.getHandler(), TEST_TIMEOUT_MS);
@@ -2912,6 +2838,17 @@ public abstract class IpClientIntegrationTestCommon {
                 (byte) 0x06, data);
     }
 
+    private void assertDhcpResultsParcelable(final DhcpResultsParcelable lease) {
+        assertNotNull(lease);
+        assertEquals(CLIENT_ADDR, lease.baseConfiguration.getIpAddress().getAddress());
+        assertEquals(SERVER_ADDR, lease.baseConfiguration.getGateway());
+        assertEquals(1, lease.baseConfiguration.getDnsServers().size());
+        assertTrue(lease.baseConfiguration.getDnsServers().contains(SERVER_ADDR));
+        assertEquals(SERVER_ADDR, InetAddresses.parseNumericAddress(lease.serverAddress));
+        assertEquals(TEST_DEFAULT_MTU, lease.mtu);
+        assertEquals(TEST_LEASE_DURATION_S, lease.leaseDuration);
+    }
+
     private void doUpstreamHotspotDetectionTest(final int id, final String displayName,
             final String ssid, final byte[] oui, final byte type, final byte[] data,
             final boolean expectMetered) throws Exception {
@@ -2930,13 +2867,7 @@ public abstract class IpClientIntegrationTestCommon {
                 ArgumentCaptor.forClass(DhcpResultsParcelable.class);
         verify(mCb, timeout(TEST_TIMEOUT_MS)).onNewDhcpResults(captor.capture());
         final DhcpResultsParcelable lease = captor.getValue();
-        assertNotNull(lease);
-        assertEquals(CLIENT_ADDR, lease.baseConfiguration.getIpAddress().getAddress());
-        assertEquals(SERVER_ADDR, lease.baseConfiguration.getGateway());
-        assertEquals(1, lease.baseConfiguration.getDnsServers().size());
-        assertTrue(lease.baseConfiguration.getDnsServers().contains(SERVER_ADDR));
-        assertEquals(SERVER_ADDR, InetAddresses.parseNumericAddress(lease.serverAddress));
-        assertEquals(TEST_DEFAULT_MTU, lease.mtu);
+        assertDhcpResultsParcelable(lease);
 
         if (expectMetered) {
             assertEquals(lease.vendorInfo, DhcpPacket.VENDOR_INFO_ANDROID_METERED);
@@ -3864,8 +3795,6 @@ public abstract class IpClientIntegrationTestCommon {
                 .withoutIPv4()
                 .build();
 
-        setFeatureEnabled(NetworkStackUtils.IPCLIENT_GRATUITOUS_NA_VERSION,
-                true /* isGratuitousNaEnabled */);
         startIpClientProvisioning(config);
 
         doIpv6OnlyProvisioning();
@@ -3898,11 +3827,6 @@ public abstract class IpClientIntegrationTestCommon {
         setDhcpFeatures(true /* isRapidCommitEnabled */,
                 false /* isDhcpIpConflictDetectEnabled */);
 
-        // Disable gratuitious neighbor discovery feature manually, if the feature is enabled on
-        // the DUT during experiment launch, that will send another two duplicate NA packets and
-        // mess up the assert of received NA packets.
-        setFeatureEnabled(NetworkStackUtils.IPCLIENT_GRATUITOUS_NA_VERSION,
-                false /* isGratuitousNaEnabled */);
         if (isGratuitousArpNaRoamingEnabled) {
             setFeatureEnabled(NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION, true);
         } else {
@@ -3939,7 +3863,8 @@ public abstract class IpClientIntegrationTestCommon {
         final List<ArpPacket> arpList = new ArrayList<>();
         final List<NeighborAdvertisement> naList = new ArrayList<>();
         waitForGratuitousArpAndNaPacket(arpList, naList);
-        assertEquals(2, naList.size()); // privacy address and stable privacy address
+        // 2 NAs sent due to RFC9131 implement and 2 NAs sent after roam
+        assertEquals(4, naList.size()); // privacy address and stable privacy address
         assertEquals(1, arpList.size()); // IPv4 address
     }
 
@@ -3953,7 +3878,7 @@ public abstract class IpClientIntegrationTestCommon {
         final List<ArpPacket> arpList = new ArrayList<>();
         final List<NeighborAdvertisement> naList = new ArrayList<>();
         waitForGratuitousArpAndNaPacket(arpList, naList);
-        assertEquals(0, naList.size());
+        assertEquals(2, naList.size()); // NAs sent due to RFC9131 implement, not from roam
         assertEquals(0, arpList.size());
     }
 
@@ -3967,7 +3892,8 @@ public abstract class IpClientIntegrationTestCommon {
         final List<ArpPacket> arpList = new ArrayList<>();
         final List<NeighborAdvertisement> naList = new ArrayList<>();
         waitForGratuitousArpAndNaPacket(arpList, naList);
-        assertEquals(2, naList.size());
+        // 2 NAs sent due to RFC9131 implement and 2 NAs sent after roam
+        assertEquals(4, naList.size());
         assertEquals(0, arpList.size());
     }
 
@@ -4376,6 +4302,15 @@ public abstract class IpClientIntegrationTestCommon {
                 NetworkStackUtils.IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION,
                 isIgnoreOrganicNudFailureEnabled);
         final ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
+                 // We've found that mCm.shouldAvoidBadWifi() has a flaky behavior in the root test,
+                 // probably due to the sim card in the DUT. it doesn't occur in the siganture test
+                 // since we mock the return value directly. As a result, sometimes
+                 // IpReachabilityMonitor#avoidingBadLinks() returns false, it caused the expected
+                 // onReachabilityFailure callback wasn't triggered on the test. In order to make
+                 // the root test more stable, do not use MultinetworkPolicyTracker only for IPv6
+                 // neighbor reachability checking relevant test cases, that guarantees
+                 // avoidingBadLinks() always returns true which is expected.
+                .withoutMultinetworkPolicyTracker()
                 .build();
         startIpClientProvisioning(config);
         verify(mCb, timeout(TEST_TIMEOUT_MS)).setFallbackMulticastFilter(true);
@@ -4688,9 +4623,6 @@ public abstract class IpClientIntegrationTestCommon {
 
     @Test @SignatureRequiredTest(reason = "requires mock callback object")
     public void testNetlinkSocketReceiveENOBUFS() throws Exception {
-        // Only run the test when the flag of parsing netlink events is enabled.
-        assumeTrue(mIsNetlinkEventParseEnabled);
-
         ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
                 .withoutIPv4()
                 .build();
@@ -4995,20 +4927,16 @@ public abstract class IpClientIntegrationTestCommon {
         final LinkProperties lp = captor.getValue();
         assertTrue(hasIpv6AddressPrefixedWith(lp, prefix));
 
-        // Only run the test when the flag of parsing netlink events is enabled, where the
-        // deprecationTime and expirationTime is set.
-        if (mIsNetlinkEventParseEnabled) {
-            final long now = SystemClock.elapsedRealtime();
-            long when = 0;
-            for (LinkAddress la : lp.getLinkAddresses()) {
-                if (la.getAddress().isLinkLocalAddress()) {
-                    assertLinkAddressPermanentLifetime(la);
-                } else if (la.isGlobalPreferred()) {
-                    when = now + 4500 * 1000; // preferred=4500s
-                    assertLinkAddressDeprecationTime(la, when);
-                    when = now + 7200 * 1000; // valid=7200s
-                    assertLinkAddressExpirationTime(la, when);
-                }
+        final long now = SystemClock.elapsedRealtime();
+        long when = 0;
+        for (LinkAddress la : lp.getLinkAddresses()) {
+            if (la.getAddress().isLinkLocalAddress()) {
+                assertLinkAddressPermanentLifetime(la);
+            } else if (la.isGlobalPreferred()) {
+                when = now + 4500 * 1000; // preferred=4500s
+                assertLinkAddressDeprecationTime(la, when);
+                when = now + 7200 * 1000; // valid=7200s
+                assertLinkAddressExpirationTime(la, when);
             }
         }
     }
@@ -5777,11 +5705,6 @@ public abstract class IpClientIntegrationTestCommon {
 
     @Test
     public void testPopulateLinkAddressLifetime() throws Exception {
-        // Only run the test when the flag of parsing netlink events is enabled to verify the
-        // code of setting deprecationTime/expirationTime added when IpClientLinkObserver sees
-        // the RTM_NEWADDR, and we are going to delete the dead old code path completely soon.
-        assumeTrue(mIsNetlinkEventParseEnabled);
-
         final LinkProperties lp = doDualStackProvisioning();
         final long now = SystemClock.elapsedRealtime();
         long when = 0;
@@ -5803,9 +5726,6 @@ public abstract class IpClientIntegrationTestCommon {
 
     @Test
     public void testPopulateLinkAddressLifetime_infiniteLeaseDuration() throws Exception {
-        // Only run the test when the flag of parsing netlink events is enabled.
-        assumeTrue(mIsNetlinkEventParseEnabled);
-
         final ProvisioningConfiguration cfg = new ProvisioningConfiguration.Builder()
                 .withoutIPv6()
                 .build();
@@ -5829,9 +5749,6 @@ public abstract class IpClientIntegrationTestCommon {
 
     @Test
     public void testPopulateLinkAddressLifetime_minimalLeaseDuration() throws Exception {
-        // Only run the test when the flag of parsing netlink events is enabled.
-        assumeTrue(mIsNetlinkEventParseEnabled);
-
         final ProvisioningConfiguration cfg = new ProvisioningConfiguration.Builder()
                 .withoutIPv6()
                 .build();
@@ -5854,6 +5771,65 @@ public abstract class IpClientIntegrationTestCommon {
                 assertLinkAddressExpirationTime(la, when);
             }
         }
+    }
+
+    @Test
+    public void testPopulateLinkAddressLifetime_onDhcpRenew() throws Exception {
+        final ProvisioningConfiguration cfg = new ProvisioningConfiguration.Builder()
+                .withoutIPv6()
+                .build();
+        setDeviceConfigProperty(CONFIG_MINIMUM_LEASE,  5 /* default minimum lease */);
+        startIpClientProvisioning(cfg);
+        handleDhcpPackets(true /* isSuccessLease */, 4 /* lease duration */,
+                false /* shouldReplyRapidCommitAck */, TEST_DEFAULT_MTU,
+                null /* captivePortalApiUrl */, null /* ipv6OnlyWaitTime */,
+                null /* domainName */, null /* domainSearchList */);
+
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningSuccess(any());
+
+        // Device sends ARP request for address resolution of default gateway first.
+        final ArpPacket request = getNextArpPacket();
+        assertArpRequest(request, SERVER_ADDR);
+        sendArpReply(request.senderHwAddress.toByteArray() /* dst */, ROUTER_MAC_BYTES /* srcMac */,
+                request.senderIp /* target IP */, SERVER_ADDR /* sender IP */);
+
+        clearInvocations(mCb);
+
+        // Then client sends unicast DHCPREQUEST to extend the IPv4 address lifetime, and we reply
+        // with DHCPACK to refresh the DHCP lease.
+        final DhcpPacket packet = getNextDhcpPacket();
+        assertTrue(packet instanceof DhcpRequestPacket);
+        assertDhcpRequestForReacquire(packet);
+        mPacketReader.sendResponse(buildDhcpAckPacket(packet, CLIENT_ADDR,
+                TEST_LEASE_DURATION_S, (short) TEST_DEFAULT_MTU,
+                false /* rapidCommit */, null /* captivePortalApiUrl */));
+
+        // The IPv4 link address lifetime should be also updated after a success DHCP renew, check
+        // that we should never see provisioning failure.
+        verify(mCb, after(100).never()).onProvisioningFailure(any());
+
+        final ArgumentCaptor<DhcpResultsParcelable> dhcpResultsCaptor =
+                ArgumentCaptor.forClass(DhcpResultsParcelable.class);
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onNewDhcpResults(dhcpResultsCaptor.capture());
+        final DhcpResultsParcelable lease = dhcpResultsCaptor.getValue();
+        assertDhcpResultsParcelable(lease);
+
+        // Check if the IPv4 address lifetime has updated along with a success DHCP renew.
+        verify(mCb, timeout(TEST_TIMEOUT_MS)).onLinkPropertiesChange(argThat(x -> {
+            for (LinkAddress la : x.getLinkAddresses()) {
+                if (la.isIpv4()) {
+                    final long now = SystemClock.elapsedRealtime();
+                    final long when = now + 3600 * 1000;
+                    return (la.getDeprecationTime() != LinkAddress.LIFETIME_UNKNOWN)
+                            && (la.getExpirationTime() != LinkAddress.LIFETIME_UNKNOWN)
+                            && (la.getDeprecationTime() < when + TEST_LIFETIME_TOLERANCE_MS)
+                            && (la.getDeprecationTime() > when - TEST_LIFETIME_TOLERANCE_MS)
+                            && (la.getExpirationTime() < when + TEST_LIFETIME_TOLERANCE_MS)
+                            && (la.getExpirationTime() > when - TEST_LIFETIME_TOLERANCE_MS);
+                }
+            }
+            return false;
+        }));
     }
 
     private void doDhcpHostnameSettingTest(int hostnameSetting,
