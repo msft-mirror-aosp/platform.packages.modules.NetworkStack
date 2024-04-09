@@ -16,8 +16,8 @@
 
 package android.net.apf;
 
-import static android.net.apf.ApfV4Generator.Register.R0;
-import static android.net.apf.ApfV4Generator.Register.R1;
+import static android.net.apf.BaseApfGenerator.Register.R0;
+import static android.net.apf.BaseApfGenerator.Register.R1;
 import static android.net.util.SocketUtils.makePacketSocketAddress;
 import static android.system.OsConstants.AF_PACKET;
 import static android.system.OsConstants.ARPHRD_ETHER;
@@ -45,7 +45,7 @@ import android.net.LinkProperties;
 import android.net.NattKeepalivePacketDataParcelable;
 import android.net.TcpKeepalivePacketDataParcelable;
 import android.net.apf.ApfCounterTracker.Counter;
-import android.net.apf.ApfV4Generator.IllegalInstructionException;
+import android.net.apf.BaseApfGenerator.IllegalInstructionException;
 import android.net.ip.IpClient.IpClientCallbacksWrapper;
 import android.net.metrics.ApfProgramEvent;
 import android.net.metrics.ApfStats;
@@ -424,6 +424,10 @@ public class LegacyApfFilter implements AndroidPacketFilter {
         // Listen for doze-mode transition changes to enable/disable the IPv6 multicast filter.
         mContext.registerReceiver(mDeviceIdleReceiver,
                 new IntentFilter(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED));
+
+        mDependencies.onApfFilterCreated(this);
+        // mReceiveThread is created in maybeStartFilter() and halted in shutdown().
+        mDependencies.onThreadCreated(mReceiveThread);
     }
 
     public synchronized void setDataSnapshot(byte[] data) {
@@ -1075,7 +1079,7 @@ public class LegacyApfFilter implements AndroidPacketFilter {
             gen.addSwap();
             gen.addLoad16(R0, IPV4_TOTAL_LENGTH_OFFSET);
             gen.addNeg(R1);
-            gen.addAddR1();
+            gen.addAddR1ToR0();
             gen.addJumpIfR0NotEquals(1, nextFilterLabel);
 
             // Check that the ports match
@@ -1194,16 +1198,16 @@ public class LegacyApfFilter implements AndroidPacketFilter {
             // top bits of the low nibble are guaranteed to be zeroes. Right-shift R0 by 2.
             gen.addRightShift(2);
             // R0 += R1 -> R0 contains TCP + IP headers length
-            gen.addAddR1();
+            gen.addAddR1ToR0();
             // Load IPv4 total length
             gen.addLoad16(R1, IPV4_TOTAL_LENGTH_OFFSET);
             gen.addNeg(R0);
-            gen.addAddR1();
+            gen.addAddR1ToR0();
             gen.addJumpIfR0NotEquals(0, nextFilterLabel);
             // Add IPv4 header length
             gen.addLoadFromMemory(R1, gen.IPV4_HEADER_SIZE_MEMORY_SLOT);
             gen.addLoadImmediate(R0, ETH_HEADER_LEN);
-            gen.addAddR1();
+            gen.addAddR1ToR0();
             gen.addJumpIfBytesAtR0NotEqual(mPortSeqAckFingerprint, nextFilterLabel);
 
             maybeSetupCounter(gen, Counter.DROPPED_IPV4_KEEPALIVE_ACK);
@@ -1395,7 +1399,7 @@ public class LegacyApfFilter implements AndroidPacketFilter {
             // Check it's DHCP to our MAC address.
             gen.addLoadImmediate(R0, DHCP_CLIENT_MAC_OFFSET);
             // NOTE: Relies on R1 containing IPv4 header offset.
-            gen.addAddR1();
+            gen.addAddR1ToR0();
             gen.addJumpIfBytesAtR0NotEqual(mHardwareAddress, skipDhcpv4Filter);
             maybeSetupCounter(gen, Counter.PASSED_DHCP);
             gen.addJump(mCountAndPassLabel);
@@ -1660,7 +1664,7 @@ public class LegacyApfFilter implements AndroidPacketFilter {
         // If QDCOUNT == 1, matches the QNAME with allowlist.
         // Load offset for the first QNAME.
         gen.addLoadImmediate(R0, MDNS_QNAME_OFFSET);
-        gen.addAddR1();
+        gen.addAddR1ToR0();
 
         // Check first QNAME against allowlist
         for (int i = 0; i < mMdnsAllowList.size(); ++i) {
@@ -1722,6 +1726,25 @@ public class LegacyApfFilter implements AndroidPacketFilter {
             gen.addLoadData(R0, 0);  // load counter
             gen.addAdd(1);
             gen.addStoreData(R0, 0);  // write-back counter
+
+            maybeSetupCounter(gen, Counter.FILTER_AGE_SECONDS);
+            gen.addLoadFromMemory(R0, 15);  // m[15] is filter age in seconds
+            gen.addStoreData(R0, 0);  // store 'counter'
+
+            // requires a new enough APFv5+ interpreter, otherwise will be 0
+            maybeSetupCounter(gen, Counter.FILTER_AGE_16384THS);
+            gen.addLoadFromMemory(R0, 9);  // m[9] is filter age in 16384ths
+            gen.addStoreData(R0, 0);  // store 'counter'
+
+            // requires a new enough APFv5+ interpreter, otherwise will be 0
+            maybeSetupCounter(gen, Counter.APF_VERSION);
+            gen.addLoadFromMemory(R0, 8);  // m[8] is apf version
+            gen.addStoreData(R0, 0);  // store 'counter'
+
+            // store this program's sequential id, for later comparison
+            maybeSetupCounter(gen, Counter.APF_PROGRAM_ID);
+            gen.addLoadImmediate(R0, mNumProgramUpdates);
+            gen.addStoreData(R0, 0);  // store 'counter'
         }
 
         // Here's a basic summary of what the initial program does:

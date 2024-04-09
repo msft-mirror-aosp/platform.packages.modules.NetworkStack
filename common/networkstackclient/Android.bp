@@ -232,9 +232,6 @@ java_library {
         "com.android.tethering",
         "com.android.wifi",
     ],
-    lint: {
-        baseline_filename: "lint-baseline.xml",
-    },
 }
 
 java_library {
@@ -263,7 +260,6 @@ java_library {
         "networkstack-aidl-latest",
     ],
     visibility: [
-        "//frameworks/base/packages/Connectivity/service",
         "//packages/modules/Connectivity/Tethering",
         "//packages/modules/Connectivity/service",
         "//frameworks/base/services/net",
@@ -279,7 +275,4 @@ java_library {
         "com.android.tethering",
         "com.android.wifi",
     ],
-    lint: {
-        baseline_filename: "lint-baseline.xml",
-    },
 }
