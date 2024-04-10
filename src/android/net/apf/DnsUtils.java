@@ -16,8 +16,8 @@
 
 package android.net.apf;
 
-import static android.net.apf.ApfGenerator.Register.R0;
-import static android.net.apf.ApfGenerator.Register.R1;
+import static android.net.apf.BaseApfGenerator.Register.R0;
+import static android.net.apf.BaseApfGenerator.Register.R1;
 
 import static com.android.net.module.util.NetworkStackConstants.ETHER_HEADER_LEN;
 import static com.android.net.module.util.NetworkStackConstants.UDP_HEADER_LEN;
@@ -61,9 +61,9 @@ public class DnsUtils {
      * is much easier than subtracting 1 (which can't be done just by adding -1, because that just
      * adds 254).
      */
-    private static final int SLOT_NEGATIVE_QDCOUNT_REMAINING = 6;
+    private static final int SLOT_NEGATIVE_QDCOUNT_REMAINING = 4;
     /** Memory slot used by the jump table. */
-    private static final int SLOT_RETURN_VALUE_INDEX = 10;
+    private static final int SLOT_RETURN_VALUE_INDEX = 5;
 
     /**
      * APF function: parse_dns_label
@@ -82,7 +82,7 @@ public class DnsUtils {
      * - R1: label length
      * - m[SLOT_CURRENT_PARSE_OFFSET]: offset of label text
      */
-    private static void genParseDnsLabel(ApfGenerator gen, JumpTable jumpTable) throws Exception {
+    private static void genParseDnsLabel(ApfV4Generator gen, JumpTable jumpTable) throws Exception {
         final String labelParseDnsLabelReal = "parse_dns_label_real";
         final String labelPointerOffsetStored = "pointer_offset_stored";
 
@@ -101,7 +101,7 @@ public class DnsUtils {
          * JGT R0, R1, DROP                 // Bad pointer. Drop.
          */
         gen.addLoadFromMemory(R0, SLOT_DNS_HEADER_OFFSET);
-        gen.addJumpIfR0GreaterThanR1(ApfGenerator.DROP_LABEL);
+        gen.addJumpIfR0GreaterThanR1(ApfV4Generator.DROP_LABEL);
 
         /**
          * // Now parse the label.
@@ -145,10 +145,10 @@ public class DnsUtils {
         gen.addLoad16Indexed(R0, 0);
         gen.addAnd(0x3ff);
         gen.addLoadFromMemory(R1, SLOT_DNS_HEADER_OFFSET);
-        gen.addAddR1();
+        gen.addAddR1ToR0();
         gen.addLoadFromMemory(R1, SLOT_CURRENT_PARSE_OFFSET);
-        gen.addJumpIfR0EqualsR1(ApfGenerator.DROP_LABEL);
-        gen.addJumpIfR0GreaterThanR1(ApfGenerator.DROP_LABEL);
+        gen.addJumpIfR0EqualsR1(ApfV4Generator.DROP_LABEL);
+        gen.addJumpIfR0GreaterThanR1(ApfV4Generator.DROP_LABEL);
         gen.addStoreToMemory(R0, SLOT_CURRENT_PARSE_OFFSET);
 
         /** // Pointer chased. Parse starting from the pointer destination (which may also be a
@@ -192,7 +192,7 @@ public class DnsUtils {
      * Outputs:
      * None
      */
-    private static void genFindNextDnsQuestion(ApfGenerator gen, JumpTable jumpTable)
+    private static void genFindNextDnsQuestion(ApfV4Generator gen, JumpTable jumpTable)
             throws Exception {
         final String labelFindNextDnsQuestionFollow = "find_next_dns_question_follow";
         final String labelFindNextDnsQuestionLabel = "find_next_dns_question_label";
@@ -228,7 +228,7 @@ public class DnsUtils {
         gen.addJumpIfR0Equals(0, labelFindNextDnsQuestionNoPointer);
         // It's a pointer. Skip the pointer and question, and return.
         gen.addLoadImmediate(R0, POINTER_AND_QUESTION_HEADER_SIZE);
-        gen.addAddR1();
+        gen.addAddR1ToR0();
         gen.addStoreToMemory(R0, SLOT_CURRENT_PARSE_OFFSET);
         gen.addJump(labelFindNextDnsQuestionReturn);
 
@@ -240,14 +240,14 @@ public class DnsUtils {
         // Skip the label (1 byte) and query (2 bytes qtype, 2 bytes qclass) and return.
         gen.addJumpIfR0NotEquals(0, labelFindNextDnsQuestionLabel);
         gen.addLoadImmediate(R0, LABEL_AND_QUESTION_HEADER_SIZE);
-        gen.addAddR1();
+        gen.addAddR1ToR0();
         gen.addStoreToMemory(R0, SLOT_CURRENT_PARSE_OFFSET);
         gen.addJump(labelFindNextDnsQuestionReturn);
 
         // Non-zero length label. Consume it and continue.
         gen.defineLabel(labelFindNextDnsQuestionLabel);
         gen.addAdd(1);
-        gen.addAddR1();
+        gen.addAddR1ToR0();
         gen.addMove(R1);
         gen.addJump(labelFindNextDnsQuestionLoop);
 
@@ -257,7 +257,7 @@ public class DnsUtils {
         gen.addLoadFromMemory(R0, SLOT_NEGATIVE_QDCOUNT_REMAINING);
         gen.addAdd(1);
         gen.addStoreToMemory(R0, SLOT_NEGATIVE_QDCOUNT_REMAINING);
-        gen.addJumpIfR0Equals(0, ApfGenerator.DROP_LABEL);
+        gen.addJumpIfR0Equals(0, ApfV4Generator.DROP_LABEL);
 
         // If not, return.
         gen.addJump(jumpTable.getStartLabel());
@@ -278,7 +278,7 @@ public class DnsUtils {
         return "dns_nomatch_" + labelIndex;
     }
 
-    private static void addMatchLabel(@NonNull ApfGenerator gen, @NonNull JumpTable jumpTable,
+    private static void addMatchLabel(@NonNull ApfV4Generator gen, @NonNull JumpTable jumpTable,
             int labelIndex, @NonNull String label, @NonNull String nextLabel) throws Exception {
         final String parsedLabel = getPostMatchJumpTargetForLabel(labelIndex);
         final String noMatchLabel = getNoMatchLabel(labelIndex);
@@ -346,7 +346,7 @@ public class DnsUtils {
      *   than hit the instruction limit.
      * </ul>
      */
-    public static void generateFilter(ApfGenerator gen, String[] labels) throws Exception {
+    public static void generateFilter(ApfV4Generator gen, String[] labels) throws Exception {
         final int etherPlusUdpLen = ETHER_HEADER_LEN + UDP_HEADER_LEN;
 
         final String labelJumpTable = "jump_table";
@@ -401,11 +401,11 @@ public class DnsUtils {
         gen.defineLabel(LABEL_START_MATCH);
         for (int i = 0; i < labels.length; i++) {
             final String nextLabel = (i == labels.length - 1)
-                    ? ApfGenerator.PASS_LABEL
+                    ? ApfV4Generator.PASS_LABEL
                     : getStartMatchLabel(i + 1);
             addMatchLabel(gen, table, i, labels[i], nextLabel);
         }
-        gen.addJump(ApfGenerator.DROP_LABEL);
+        gen.addJump(ApfV4Generator.DROP_LABEL);
     }
 
     private DnsUtils() {

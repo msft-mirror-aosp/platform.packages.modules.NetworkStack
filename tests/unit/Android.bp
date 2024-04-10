@@ -15,12 +15,12 @@
 //
 
 package {
+    default_team: "trendy_team_fwk_core_networking",
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
 java_defaults {
     name: "NetworkStackTestsDefaults",
-    platform_apis: true,
     srcs: [
         "src/**/*.java",
         "src/**/*.kt",
@@ -57,6 +57,7 @@ java_defaults {
 // Tests for NetworkStackNext.
 android_test {
     name: "NetworkStackNextTests",
+    platform_apis: true,
     target_sdk_version: "current",
     min_sdk_version: "30",
     srcs: [], // TODO: tests that only apply to the current, non-stable API can be added here
@@ -69,9 +70,6 @@ android_test {
     static_libs: ["NetworkStackApiCurrentLib"],
     compile_multilib: "both", // Workaround for b/147785146 for mainline-presubmit
     jarjar_rules: ":NetworkStackJarJarRules",
-    lint: {
-        baseline_filename: "lint-baseline.xml",
-    },
 }
 
 // Library containing the unit tests. This is used by the coverage test target to pull in the
@@ -84,7 +82,7 @@ android_library {
     static_libs: ["NetworkStackApiStableLib"],
     lint: {
         test: true,
-        baseline_filename: "lint-baseline.xml",
+
     },
     visibility: [
         "//packages/modules/NetworkStack/tests/integration",
@@ -95,6 +93,7 @@ android_library {
 
 android_test {
     name: "NetworkStackTests",
+    platform_apis: true,
     min_sdk_version: "30",
     test_suites: [
         "general-tests",
@@ -107,9 +106,6 @@ android_test {
     static_libs: ["NetworkStackApiStableLib"],
     compile_multilib: "both",
     jarjar_rules: ":NetworkStackJarJarRules",
-    lint: {
-        baseline_filename: "lint-baseline.xml",
-    },
 }
 
 // Additional dependencies of libnetworkstackutilsjni that are not provided by the system when
