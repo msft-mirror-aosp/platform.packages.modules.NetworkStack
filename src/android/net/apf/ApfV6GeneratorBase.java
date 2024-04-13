@@ -35,10 +35,6 @@ import java.util.Objects;
 public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> extends
         ApfV4GeneratorBase<Type> {
 
-    // We have not *yet* switched to APFv6 mode (see addData),
-    // and are thus still in APFv2/4 backward compatibility mode.
-    boolean mIsV6 = false;
-
     /**
      * Creates an ApfV6GeneratorBase instance which is able to emit instructions for the specified
      * {@code version} of the APF interpreter. Throws {@code IllegalInstructionException} if
@@ -46,7 +42,7 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
      *
      */
     public ApfV6GeneratorBase() throws IllegalInstructionException {
-        super(MIN_APF_VERSION_IN_DEV);
+        super(APF_VERSION_6);
     }
 
     /**
@@ -119,7 +115,6 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
         if (data.length > 65535) {
             throw new IllegalArgumentException("data size larger than 65535");
         }
-        mIsV6 = true;
         return append(new Instruction(Opcodes.JMP, Rbit1).addUnsigned(data.length)
                 .setBytesImm(data).overrideImmSize(2));
     }
@@ -468,5 +463,124 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
         if (names[len - 1] != 0) {
             throw new IllegalArgumentException(errorMessage);
         }
+    }
+
+    @Override
+    void addArithR1(Opcodes opcode) {
+        append(new Instruction(opcode, R1));
+    }
+
+    /**
+     * Add an instruction to the end of the program to increment the counter value and
+     * immediately return PASS.
+     *
+     * @param counter the counter enum to be incremented.
+     */
+    @Override
+    public final Type addCountAndPass(ApfCounterTracker.Counter counter) {
+        checkPassCounterRange(counter);
+        return addCountAndPass(counter.value());
+    }
+
+    /**
+     * Add an instruction to the end of the program to increment the counter value and
+     * immediately return DROP.
+     *
+     * @param counter the counter enum to be incremented.
+     */
+    @Override
+    public final Type addCountAndDrop(ApfCounterTracker.Counter counter) {
+        checkDropCounterRange(counter);
+        return addCountAndDrop(counter.value());
+    }
+
+    @Override
+    public final Type addCountAndDropIfR0Equals(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        checkDropCounterRange(cnt);
+        final String tgt = getUniqueLabel();
+        return addJumpIfR0NotEquals(val, tgt).addCountAndDrop(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public final Type addCountAndPassIfR0Equals(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        checkPassCounterRange(cnt);
+        final String tgt = getUniqueLabel();
+        return addJumpIfR0NotEquals(val, tgt).addCountAndPass(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public final Type addCountAndDropIfR0NotEquals(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        checkDropCounterRange(cnt);
+        final String tgt = getUniqueLabel();
+        return addJumpIfR0Equals(val, tgt).addCountAndDrop(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public final Type addCountAndPassIfR0NotEquals(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        checkPassCounterRange(cnt);
+        final String tgt = getUniqueLabel();
+        return addJumpIfR0Equals(val, tgt).addCountAndPass(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public final Type addCountAndDropIfR0LessThan(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        checkDropCounterRange(cnt);
+        if (val <= 0) {
+            throw new IllegalArgumentException("val must > 0, current val: " + val);
+        }
+        final String tgt = getUniqueLabel();
+        return addJumpIfR0GreaterThan(val - 1, tgt).addCountAndDrop(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public final Type addCountAndPassIfR0LessThan(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        checkPassCounterRange(cnt);
+        if (val <= 0) {
+            throw new IllegalArgumentException("val must > 0, current val: " + val);
+        }
+        final String tgt = getUniqueLabel();
+        return addJumpIfR0GreaterThan(val - 1, tgt).addCountAndPass(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public final Type addCountAndDropIfBytesAtR0NotEqual(byte[] bytes,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        checkDropCounterRange(cnt);
+        final String tgt = getUniqueLabel();
+        return addJumpIfBytesAtR0Equal(bytes, tgt).addCountAndDrop(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public final Type addCountAndPassIfBytesAtR0NotEqual(byte[] bytes,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        checkPassCounterRange(cnt);
+        final String tgt = getUniqueLabel();
+        return addJumpIfBytesAtR0Equal(bytes, tgt).addCountAndPass(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public final Type addLoadCounter(Register register, ApfCounterTracker.Counter counter)
+            throws IllegalInstructionException {
+        return append(new Instruction(Opcodes.LDDW, register).addUnsigned(counter.value()));
+    }
+
+    @Override
+    public final Type addStoreCounter(ApfCounterTracker.Counter counter, Register register)
+            throws IllegalInstructionException {
+        return append(new Instruction(Opcodes.STDW, register).addUnsigned(counter.value()));
+    }
+
+    /**
+     * This method is noop in APFv6.
+     */
+    @Override
+    public final Type addCountTrampoline() {
+        return self();
     }
 }
