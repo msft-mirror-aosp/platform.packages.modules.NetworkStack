@@ -171,6 +171,7 @@ public class ApfFilter implements AndroidPacketFilter {
         public boolean shouldHandleLightDoze;
         public long minMetricsSessionDurationMs;
         public boolean enableApfV6;
+        public boolean hasClatInterface;
     }
 
     /** A wrapper class of {@link SystemClock} to be mocked in unit tests. */
@@ -339,6 +340,10 @@ public class ApfFilter implements AndroidPacketFilter {
     @GuardedBy("this")
     private int mIPv4PrefixLength;
 
+    // Whether CLAT is enabled.
+    @GuardedBy("this")
+    private boolean mHasClat;
+
     // mIsRunning is reflects the state of the ApfFilter during integration tests. ApfFilter can be
     // paused using "adb shell cmd apf <iface> <cmd>" commands. A paused ApfFilter will not install
     // any new programs, but otherwise operate normally.
@@ -391,6 +396,7 @@ public class ApfFilter implements AndroidPacketFilter {
             mCountAndPassLabel = PASS_LABEL;
             mCountAndDropLabel = DROP_LABEL;
         }
+        mHasClat = config.hasClatInterface;
 
         // Now fill the black list from the passed array
         mEthTypeBlackList = filterEthTypeBlackList(config.ethTypeBlackList);
@@ -1503,6 +1509,8 @@ public class ApfFilter implements AndroidPacketFilter {
         // if unicast ARP reply
         //   pass
         // if interface has no IPv4 address
+        //   if ARP request and clat enabled
+        //      drop
         //   if target ip is 0.0.0.0
         //      drop
         // else
@@ -1518,7 +1526,7 @@ public class ApfFilter implements AndroidPacketFilter {
         gen.addJumpIfBytesAtR0NotEqual(ARP_IPV4_HEADER, mCountAndDropLabel);
 
         gen.addLoad16(R0, ARP_OPCODE_OFFSET);
-        if (mIPv4Address == null) {
+        if (mHasClat && mIPv4Address == null) {
             // Drop if ARP REQUEST and we do not have an IPv4 address
             gen.addCountAndDropIfR0Equals(ARP_OPCODE_REQUEST,
                     Counter.DROPPED_ARP_REQUEST_NO_ADDRESS);
@@ -2388,6 +2396,15 @@ public class ApfFilter implements AndroidPacketFilter {
         }
         mIPv4Address = addr;
         mIPv4PrefixLength = prefix;
+        installNewProgramLocked();
+    }
+
+    @Override
+    public synchronized void updateClatInterfaceState(boolean add) {
+        if (mHasClat == add) {
+            return;
+        }
+        mHasClat = add;
         installNewProgramLocked();
     }
 
