@@ -37,8 +37,9 @@ import java.util.List;
  */
 public abstract class BaseApfGenerator {
 
-    public BaseApfGenerator(int mVersion) {
+    public BaseApfGenerator(int mVersion, boolean mDisableCounterRangeCheck) {
         this.mVersion = mVersion;
+        this.mDisableCounterRangeCheck = mDisableCounterRangeCheck;
     }
 
     /**
@@ -55,7 +56,7 @@ public abstract class BaseApfGenerator {
         // An optional unsigned immediate value can be provided to encode the counter number.
         // If the value is non-zero, the instruction increments the counter.
         // The counter is located (-4 * counter number) bytes from the end of the data region.
-        // It is a U32 big-endian value and is always incremented by 1.
+        // It is a U32 native-endian value and is always incremented by 1.
         // This is more or less equivalent to: lddw R0, -N4; add R0,1; stdw R0, -N4; {pass,drop}
         // e.g. "pass", "pass 1", "drop", "drop 1"
         PASSDROP(0),
@@ -681,7 +682,8 @@ public abstract class BaseApfGenerator {
                         upperBound));
     }
 
-    static void checkPassCounterRange(ApfCounterTracker.Counter cnt) {
+    void checkPassCounterRange(ApfCounterTracker.Counter cnt) {
+        if (mDisableCounterRangeCheck) return;
         if (cnt.value() < ApfCounterTracker.MIN_PASS_COUNTER.value()
                 || cnt.value() > ApfCounterTracker.MAX_PASS_COUNTER.value()) {
             throw new IllegalArgumentException(
@@ -691,7 +693,8 @@ public abstract class BaseApfGenerator {
         }
     }
 
-    static void checkDropCounterRange(ApfCounterTracker.Counter cnt) {
+    void checkDropCounterRange(ApfCounterTracker.Counter cnt) {
+        if (mDisableCounterRangeCheck) return;
         if (cnt.value() < ApfCounterTracker.MIN_DROP_COUNTER.value()
                 || cnt.value() > ApfCounterTracker.MAX_DROP_COUNTER.value()) {
             throw new IllegalArgumentException(
@@ -788,45 +791,87 @@ public abstract class BaseApfGenerator {
      */
     public static final int MEMORY_SLOTS = 16;
 
-    /**
-     * Slot #10 starts at zero, implicitly used as tx buffer output pointer.
-     */
-    public static final int TX_BUFFER_OUTPUT_POINTER_MEMORY_SLOT = 10;
+    public enum MemorySlot {
+        SLOT_0(0),
+        SLOT_1(1),
+        SLOT_2(2),
+        SLOT_3(3),
+        SLOT_4(4),
+        SLOT_5(5),
+        SLOT_6(6),
+        SLOT_7(7),
 
-    /**
-     * Memory slot number that is prefilled with the IPv4 header length.
-     * Note that this memory slot may be overwritten by a program that
-     * executes stores to this memory slot. This must be kept in sync with
-     * the APF interpreter.
-     */
-    public static final int IPV4_HEADER_SIZE_MEMORY_SLOT = 13;
+        APF_VERSION(8),
+        FILTER_AGE_16384THS(9),
 
-    /**
-     * Memory slot number that is prefilled with the size of the packet being filtered in bytes.
-     * Note that this memory slot may be overwritten by a program that
-     * executes stores to this memory slot. This must be kept in sync with the APF interpreter.
-     */
-    public static final int PACKET_SIZE_MEMORY_SLOT = 14;
+        /**
+         * Slot #10 starts at zero, implicitly used as tx buffer output pointer.
+         */
+        TX_BUFFER_OUTPUT_POINTER(10),
 
-    /**
-     * Memory slot number that is prefilled with the age of the filter in seconds. The age of the
-     * filter is the time since the filter was installed until now.
-     * Note that this memory slot may be overwritten by a program that
-     * executes stores to this memory slot. This must be kept in sync with the APF interpreter.
-     */
-    public static final int FILTER_AGE_MEMORY_SLOT = 15;
+        PROGRAM_SIZE(11),
+        RAM_LEN(12),
 
-    /**
-     * First memory slot containing prefilled values. Can be used in range comparisons to determine
-     * if memory slot index is within prefilled slots.
-     */
-    public static final int FIRST_PREFILLED_MEMORY_SLOT = 8;
+        /**
+         * Memory slot number that is prefilled with the IPv4 header length.
+         * Note that this memory slot may be overwritten by a program that
+         * executes stores to this memory slot. This must be kept in sync with
+         * the APF interpreter.
+         */
+        IPV4_HEADER_SIZE(13),
 
-    /**
-     * Last memory slot containing prefilled values. Can be used in range comparisons to determine
-     * if memory slot index is within prefilled slots.
-     */
-    public static final int LAST_PREFILLED_MEMORY_SLOT = FILTER_AGE_MEMORY_SLOT;
+        /**
+         * Memory slot number that is prefilled with the size of the packet being filtered in bytes.
+         * Note that this memory slot may be overwritten by a program that
+         * executes stores to this memory slot. This must be kept in sync with the APF interpreter.
+         */
+        PACKET_SIZE(14),
+
+        /**
+         * Memory slot number that is prefilled with the age of the filter in seconds.
+         * The age of the filter is the time since the filter was installed until now.
+         * Note that this memory slot may be overwritten by a program that
+         * executes stores to this memory slot.
+         * This must be kept in sync with the APF interpreter.
+         */
+        FILTER_AGE_SECONDS(15),
+
+        /**
+         * First memory slot containing prefilled values. Can be used in range comparisons
+         * to determine if memory slot index is within prefilled slots.
+         */
+        FIRST_PREFILLED(8),
+
+        /**
+         * Last memory slot containing prefilled values. Can be used in range comparisons
+         * to determine if memory slot index is within prefilled slots.
+         */
+        LAST_PREFILLED(15);
+
+        public final int value;
+
+        MemorySlot(int value) {
+            this.value = value;
+        }
+
+        /**
+         * Bpf2Apf.java needs to create MemorySlot by index
+         */
+        public static MemorySlot byIndex(int value) {
+            switch (value) {
+                case 0: return SLOT_0;
+                case 1: return SLOT_1;
+                case 2: return SLOT_2;
+                case 3: return SLOT_3;
+                case 4: return SLOT_4;
+                case 5: return SLOT_5;
+                case 6: return SLOT_6;
+                case 7: return SLOT_7;
+            }
+            throw new IllegalArgumentException(
+                    String.format("Memory slot %d not in range 0..7", value));
+        }
+    }
 
     // This version number syncs up with APF_VERSION in hardware/google/apf/apf_interpreter.h
     public static final int APF_VERSION_2 = 2;
@@ -840,4 +885,5 @@ public abstract class BaseApfGenerator {
     private final Instruction mPassLabel = new Instruction(Opcodes.LABEL);
     public final int mVersion;
     public boolean mGenerated;
+    private final boolean mDisableCounterRangeCheck;
 }
