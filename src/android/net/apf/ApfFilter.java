@@ -170,6 +170,7 @@ public class ApfFilter implements AndroidPacketFilter {
         public int acceptRaMinLft;
         public boolean shouldHandleLightDoze;
         public long minMetricsSessionDurationMs;
+        public boolean hasClatInterface;
     }
 
     /** A wrapper class of {@link SystemClock} to be mocked in unit tests. */
@@ -368,6 +369,7 @@ public class ApfFilter implements AndroidPacketFilter {
         mClock = clock;
         mSessionStartMs = mClock.elapsedRealtime();
         mMinMetricsSessionDurationMs = config.minMetricsSessionDurationMs;
+        mHasClat = config.hasClatInterface;
 
         // Now fill the black list from the passed array
         mEthTypeBlackList = filterEthTypeBlackList(config.ethTypeBlackList);
@@ -2140,14 +2142,14 @@ public class ApfFilter implements AndroidPacketFilter {
             }
             emitEpilogue(gen);
             program = gen.generate();
-        } catch (IllegalInstructionException|IllegalStateException e) {
+        } catch (IllegalInstructionException | IllegalStateException | IllegalArgumentException e) {
             Log.e(TAG, "Failed to generate APF program.", e);
             sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_GENERATE_FILTER_EXCEPTION);
             return;
         }
         if (mIsRunning) {
             // Update data snapshot every time we install a new program
-            mIpClientCallback.startReadPacketFilter();
+            mIpClientCallback.startReadPacketFilter("new program install");
             if (!mIpClientCallback.installPacketFilter(program)) {
                 sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
             }
@@ -2379,14 +2381,21 @@ public class ApfFilter implements AndroidPacketFilter {
         // NOTE: Do not keep a copy of LinkProperties as it would further duplicate state.
         final LinkAddress ipv4Address = findIPv4LinkAddress(lp);
         final byte[] addr = (ipv4Address != null) ? ipv4Address.getAddress().getAddress() : null;
-        final int pfx = (ipv4Address != null) ? ipv4Address.getPrefixLength() : 0;
-        final boolean clat = lp.getAllInterfaceNames().contains("v4-" + mInterfaceParams.name);
-        if ((pfx == mIPv4PrefixLength) && Arrays.equals(addr, mIPv4Address) && (clat == mHasClat)) {
+        final int prefix = (ipv4Address != null) ? ipv4Address.getPrefixLength() : 0;
+        if ((prefix == mIPv4PrefixLength) && Arrays.equals(addr, mIPv4Address)) {
             return;
         }
         mIPv4Address = addr;
-        mIPv4PrefixLength = pfx;
-        mHasClat = clat;
+        mIPv4PrefixLength = prefix;
+        installNewProgramLocked();
+    }
+
+    @Override
+    public synchronized void updateClatInterfaceState(boolean add) {
+        if (mHasClat == add) {
+            return;
+        }
+        mHasClat = add;
         installNewProgramLocked();
     }
 
