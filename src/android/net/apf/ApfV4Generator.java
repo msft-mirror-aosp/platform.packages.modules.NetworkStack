@@ -39,8 +39,15 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
      */
     private static final String COUNT_AND_DROP_LABEL = "__COUNT_AND_DROP__";
 
-    private final String mCountAndDropLabel;
-    private final String mCountAndPassLabel;
+    public final String mCountAndDropLabel;
+    public final String mCountAndPassLabel;
+
+    /**
+     * Returns true if we support the specified {@code version}, otherwise false.
+     */
+    public static boolean supportsVersion(int version) {
+        return version >= APF_VERSION_2;
+    }
 
     /**
      * Creates an ApfV4Generator instance which is able to emit instructions for the specified
@@ -48,10 +55,21 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
      * the requested version is unsupported.
      */
     @VisibleForTesting(visibility = VisibleForTesting.Visibility.PACKAGE)
-    public ApfV4Generator(int version) throws IllegalInstructionException {
-        super(version);
+    public ApfV4Generator(int version, boolean disableCounterRangeCheck)
+            throws IllegalInstructionException {
+        // make sure mVersion is not greater than 4 when using this class
+        super(version >= 4 ? 4 : version, disableCounterRangeCheck);
         mCountAndDropLabel = version >= 4 ? COUNT_AND_DROP_LABEL : DROP_LABEL;
         mCountAndPassLabel = version >= 4 ? COUNT_AND_PASS_LABEL : PASS_LABEL;
+    }
+
+    /**
+     * Creates an ApfV4Generator instance which is able to emit instructions for the specified
+     * {@code version} of the APF interpreter. Throws {@code IllegalInstructionException} if
+     * the requested version is unsupported.
+     */
+    public ApfV4Generator(int version) throws IllegalInstructionException {
+        this(version, false);
     }
 
     @Override
@@ -129,6 +147,60 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
         return maybeAddLoadR1CounterOffset(cnt).addJumpIfR0LessThan(val, mCountAndPassLabel);
     }
 
+    @Override
+    public ApfV4Generator addCountAndDropIfBytesAtR0NotEqual(byte[] bytes,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        checkDropCounterRange(cnt);
+        return maybeAddLoadR1CounterOffset(cnt).addJumpIfBytesAtR0NotEqual(bytes,
+                mCountAndDropLabel);
+    }
+
+    @Override
+    public ApfV4Generator addCountAndPassIfBytesAtR0NotEqual(byte[] bytes,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        checkPassCounterRange(cnt);
+        return maybeAddLoadR1CounterOffset(cnt).addJumpIfBytesAtR0NotEqual(bytes,
+                mCountAndPassLabel);
+    }
+
+    /**
+     * Add an instruction to the end of the program to load 32 bits from the data memory into
+     * {@code register}. The source address is computed by adding the signed immediate
+     * {@code offset} to the other register.
+     * Requires APF v4 or greater.
+     */
+    public final ApfV4Generator addLoadData(Register dst, int ofs)
+            throws IllegalInstructionException {
+        requireApfVersion(APF_VERSION_4);
+        return append(new Instruction(Opcodes.LDDW, dst).addSigned(ofs));
+    }
+
+    /**
+     * Add an instruction to the end of the program to store 32 bits from {@code register} into the
+     * data memory. The destination address is computed by adding the signed immediate
+     * {@code offset} to the other register.
+     * Requires APF v4 or greater.
+     */
+    public final ApfV4Generator addStoreData(Register src, int ofs)
+            throws IllegalInstructionException {
+        requireApfVersion(APF_VERSION_4);
+        return append(new Instruction(Opcodes.STDW, src).addSigned(ofs));
+    }
+
+    @Override
+    public ApfV4Generator addLoadCounter(Register register, ApfCounterTracker.Counter counter)
+            throws IllegalInstructionException {
+        if (mVersion < 4) return self();
+        return maybeAddLoadCounterOffset(register.other(), counter).addLoadData(register, 0);
+    }
+
+    @Override
+    public ApfV4Generator addStoreCounter(ApfCounterTracker.Counter counter, Register register)
+            throws IllegalInstructionException {
+        if (mVersion < 4) return self();
+        return maybeAddLoadCounterOffset(register.other(), counter).addStoreData(register, 0);
+    }
+
     /**
      * Append the count & (pass|drop) trampoline, which increments the counter at the data address
      * pointed to by R1, then jumps to the (pass|drop) label. This saves a few bytes over inserting
@@ -152,8 +224,12 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
                 .addJump(DROP_LABEL);
     }
 
+    private ApfV4Generator maybeAddLoadCounterOffset(Register reg, ApfCounterTracker.Counter cnt) {
+        if (mVersion < 4) return self();
+        return addLoadImmediate(reg, cnt.offset());
+    }
+
     private ApfV4Generator maybeAddLoadR1CounterOffset(ApfCounterTracker.Counter counter) {
-        if (mVersion >= 4) return addLoadImmediate(R1, counter.offset());
-        return self();
+        return maybeAddLoadCounterOffset(R1, counter);
     }
 }
