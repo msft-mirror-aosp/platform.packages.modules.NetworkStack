@@ -19,6 +19,8 @@ package android.net.apf;
 import android.util.ArrayMap;
 import android.util.Log;
 
+import com.android.internal.annotations.VisibleForTesting;
+
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -86,8 +88,9 @@ public class ApfCounterTracker {
         DROPPED_ARP_OTHER_HOST,
         DROPPED_ARP_REPLY_SPA_NO_HOST,
         DROPPED_ARP_REQUEST_ANYHOST,
-        DROPPED_ARP_REQUEST_NO_ADDRESS,
+        DROPPED_ARP_REQUEST_REPLIED,
         DROPPED_ARP_UNKNOWN,
+        DROPPED_ARP_V6_ONLY,
         DROPPED_GARP_REPLY;  // see also MAX_DROP_COUNTER below
 
         /**
@@ -111,6 +114,19 @@ public class ApfCounterTracker {
          */
         public static int totalSize() {
             return (Counter.class.getEnumConstants().length - 1) * 4;
+        }
+
+        /**
+         * Returns the counter enum based on the offset.
+         */
+        @VisibleForTesting(visibility = VisibleForTesting.Visibility.PACKAGE)
+        public static Counter getCounterEnumFromOffset(int offset) {
+            for (Counter cnt : Counter.class.getEnumConstants()) {
+                if (cnt.offset() == offset) {
+                    return cnt;
+                }
+            }
+            return RESERVED_OOB;
         }
     }
 

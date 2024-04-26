@@ -213,6 +213,8 @@ public class IpClient extends StateMachine {
     private final IpProvisioningMetrics mIpProvisioningMetrics = new IpProvisioningMetrics();
     private final NetworkQuirkMetrics mNetworkQuirkMetrics;
 
+    private boolean mHasClatInterface = false;
+
     /**
      * Dump all state machine and connectivity packet logs to the specified writer.
      * @param skippedIfaces Interfaces for which logs should not be dumped.
@@ -406,8 +408,8 @@ public class IpClient extends StateMachine {
          * Called to indicate that the APF Program & data buffer must be read asynchronously from
          * the wifi driver.
          */
-        public void startReadPacketFilter() {
-            log("startReadPacketFilter()");
+        public void startReadPacketFilter(@NonNull String event) {
+            log("startReadPacketFilter(), event: " + event);
             try {
                 mCallback.startReadPacketFilter();
             } catch (RemoteException e) {
@@ -989,11 +991,16 @@ public class IpClient extends StateMachine {
 
                     @Override
                     public void onClatInterfaceStateUpdate(boolean add) {
-                        // TODO: when clat interface was removed, consider sending a message to
-                        // the IpClient main StateMachine thread, in case "NDO enabled" state
-                        // becomes tied to more things that 464xlat operation.
                         getHandler().post(() -> {
+                            if (mHasClatInterface == add) return;
+                            // Clat interface information is spliced into LinkProperties by
+                            // ConnectivityService, so it cannot be added to the LinkProperties
+                            // here as those propagate back to ConnectivityService.
                             mCallback.setNeighborDiscoveryOffload(add ? false : true);
+                            mHasClatInterface = add;
+                            if (mApfFilter != null) {
+                                mApfFilter.updateClatInterfaceState(add);
+                            }
                         });
                     }
                 },
@@ -1146,7 +1153,7 @@ public class IpClient extends StateMachine {
     }
 
     private boolean isGratuitousArpNaRoamingEnabled() {
-        return mDependencies.isFeatureEnabled(mContext, IPCLIENT_GARP_NA_ROAMING_VERSION);
+        return mDependencies.isFeatureNotChickenedOut(mContext, IPCLIENT_GARP_NA_ROAMING_VERSION);
     }
 
     @VisibleForTesting
@@ -1359,7 +1366,7 @@ public class IpClient extends StateMachine {
             if (apfCapabilities.hasDataAccess()) {
                 // Request a new snapshot, then wait for it.
                 mApfDataSnapshotComplete.close();
-                mCallback.startReadPacketFilter();
+                mCallback.startReadPacketFilter("dumpsys");
                 if (!mApfDataSnapshotComplete.block(1000)) {
                     pw.print("TIMEOUT: DUMPING STALE APF SNAPSHOT");
                 }
@@ -1429,7 +1436,7 @@ public class IpClient extends StateMachine {
             }
             // Request a new snapshot, then wait for it.
             mApfDataSnapshotComplete.close();
-            mCallback.startReadPacketFilter();
+            mCallback.startReadPacketFilter("shell command");
             if (!mApfDataSnapshotComplete.block(5000 /* ms */)) {
                 throw new RuntimeException("Error: Failed to read APF program");
             }
@@ -2551,6 +2558,7 @@ public class IpClient extends StateMachine {
         }
         apfConfig.shouldHandleLightDoze = mApfShouldHandleLightDoze;
         apfConfig.minMetricsSessionDurationMs = mApfCounterPollingIntervalMs;
+        apfConfig.hasClatInterface = mHasClatInterface;
         return mDependencies.maybeCreateApfFilter(mContext, apfConfig, mInterfaceParams,
                 mCallback, mNetworkQuirkMetrics, mUseNewApfFilter);
     }
@@ -3497,7 +3505,7 @@ public class IpClient extends StateMachine {
                     break;
 
                 case CMD_UPDATE_APF_DATA_SNAPSHOT:
-                    mCallback.startReadPacketFilter();
+                    mCallback.startReadPacketFilter("polling");
                     sendMessageDelayed(CMD_UPDATE_APF_DATA_SNAPSHOT, mApfCounterPollingIntervalMs);
                     break;
 
