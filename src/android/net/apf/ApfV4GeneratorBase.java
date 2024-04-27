@@ -20,7 +20,12 @@ import static android.net.apf.BaseApfGenerator.Rbit.Rbit0;
 import static android.net.apf.BaseApfGenerator.Register.R0;
 import static android.net.apf.BaseApfGenerator.Register.R1;
 
+
+import android.annotation.NonNull;
+
 import com.android.internal.annotations.VisibleForTesting;
+
+import java.util.Objects;
 
 /**
  * APF assembler/generator.  A tool for generating an APF program.
@@ -127,7 +132,7 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
      * the sum of {@code offset} and the value in register R1.
      */
     public final Type addLoad8Indexed(Register r, int ofs) {
-        return append(new Instruction(Opcodes.LDBX, r).addPacketOffset(ofs));
+        return append(new Instruction(Opcodes.LDBX, r).addTwosCompUnsigned(ofs));
     }
 
     /**
@@ -136,7 +141,7 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
      * the sum of {@code offset} and the value in register R1.
      */
     public final Type addLoad16Indexed(Register r, int ofs) {
-        return append(new Instruction(Opcodes.LDHX, r).addPacketOffset(ofs));
+        return append(new Instruction(Opcodes.LDHX, r).addTwosCompUnsigned(ofs));
     }
 
     /**
@@ -145,7 +150,7 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
      * the sum of {@code offset} and the value in register R1.
      */
     public final Type addLoad32Indexed(Register r, int ofs) {
-        return append(new Instruction(Opcodes.LDWX, r).addPacketOffset(ofs));
+        return append(new Instruction(Opcodes.LDWX, r).addTwosCompUnsigned(ofs));
     }
 
     /**
@@ -401,13 +406,22 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
         return append(new Instruction(Opcodes.JSET, R1).setTargetLabel(tgt));
     }
 
+    void validateBytes(byte[] bytes) {
+        Objects.requireNonNull(bytes);
+        if (bytes.length > 2047) {
+            throw new IllegalArgumentException(
+                    "bytes array size must be in less than 2048, current size: " + bytes.length);
+        }
+    }
+
     /**
      * Add an instruction to the end of the program to jump to {@code tgt} if the bytes of the
      * packet at an offset specified by register0 don't match {@code bytes}.
      * R=0 means check for not equal.
      */
-    public final Type addJumpIfBytesAtR0NotEqual(byte[] bytes, String tgt) {
-        return append(new Instruction(Opcodes.JNEBS).addUnsigned(
+    public final Type addJumpIfBytesAtR0NotEqual(@NonNull byte[] bytes, String tgt) {
+        validateBytes(bytes);
+        return append(new Instruction(Opcodes.JBSMATCH).addUnsigned(
                 bytes.length).setTargetLabel(tgt).setBytesImm(bytes));
     }
 
