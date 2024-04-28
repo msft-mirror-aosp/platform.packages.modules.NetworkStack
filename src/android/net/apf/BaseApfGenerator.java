@@ -84,7 +84,12 @@ public abstract class BaseApfGenerator {
         JGT(17),   // Compare greater than and branch, e.g. "jgt R0,5,label"
         JLT(18),   // Compare less than and branch, e.g. "jlt R0,5,label"
         JSET(19),  // Compare any bits set and branch, e.g. "jset R0,5,label"
-        JNEBS(20), // Compare not equal byte sequence, e.g. "jnebs R0,5,label,0x1122334455"
+        // Compare not equal byte sequence, e.g. "jnebs R0,5,label,0x1122334455"
+        // NOTE: Only APFv6+ implements R=1 'jbseq' version and multi match
+        // imm1 is jmp target, imm2 is (cnt - 1) * 2048 + compare_len,
+        // which is followed by cnt * compare_len bytes to compare against.
+        // Warning: do not specify the same byte sequence multiple times.
+        JBSMATCH(20),
         EXT(21),   // Followed by immediate indicating ExtendedOpcodes.
         LDDW(22),  // Load 4 bytes from data memory address (register + immediate): "lddw R0, [5]R1"
         STDW(23),  // Store 4 bytes to data memory address (register + immediate): "stdw R0, [5]R1"
@@ -170,7 +175,16 @@ public abstract class BaseApfGenerator {
         //       "jdnsane R0,label,0xc,\002aa\005local\0\0"
 
         JDNSAMATCH(44),
-        JDNSAMATCHSAFE(46);
+        JDNSAMATCHSAFE(46),
+        // Jump if register is [not] one of the list of values
+        // R bit - specifies the register (R0/R1) to test
+        // imm1: Extended opcode
+        // imm2: Jump label offset
+        // imm3(u8): top 5 bits - number of following u8/be16/be32 values - 1
+        //        middle 2 bits - 1..4 length of immediates - 1
+        //        bottom 1 bit  - =0 jmp if in set, =1 if not in set
+        // imm4(imm3 * 1/2/3/4 bytes): the *UNIQUE* values to compare against
+        JONEOF(47);
 
         final int value;
 
@@ -659,7 +673,7 @@ public abstract class BaseApfGenerator {
     /**
      * Calculate the size of the imm.
      */
-    private static int calculateImmSize(int imm, boolean signed) {
+    static int calculateImmSize(int imm, boolean signed) {
         if (imm == 0) {
             return 0;
         }
