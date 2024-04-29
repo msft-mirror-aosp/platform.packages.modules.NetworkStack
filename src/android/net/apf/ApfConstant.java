@@ -56,7 +56,7 @@ public final class ApfConstant {
 
     public static final int IPPROTO_HOPOPTS = 0;
 
-    // NOTE: this must be added to the IPv4 header length in IPV4_HEADER_SIZE_MEMORY_SLOT
+    // NOTE: this must be added to the IPv4 header length in MemorySlot.IPV4_HEADER_SIZE
     public static final int TCP_UDP_DESTINATION_PORT_OFFSET = ETH_HEADER_LEN + 2;
     public static final int UDP_HEADER_LEN = 8;
 
@@ -64,7 +64,6 @@ public final class ApfConstant {
 
     public static final int DHCP_SERVER_PORT = 67;
     public static final int DHCP_CLIENT_PORT = 68;
-    // NOTE: this must be added to the IPv4 header length in IPV4_HEADER_SIZE_MEMORY_SLOT
 
     public static final int ARP_HEADER_OFFSET = ETH_HEADER_LEN;
     public static final byte[] ARP_IPV4_HEADER = {
@@ -92,11 +91,18 @@ public final class ApfConstant {
     public static final int ECHO_PORT = 7;
     public static final int DNS_HEADER_LEN = 12;
     public static final int DNS_QDCOUNT_OFFSET = 4;
-    // NOTE: this must be added to the IPv4 header length in IPV4_HEADER_SIZE_MEMORY_SLOT, or the
+    // NOTE: this must be added to the IPv4 header length in MemorySlot.IPV4_HEADER_SIZE, or the
     // IPv6 header length.
     public static final int DHCP_CLIENT_MAC_OFFSET = ETH_HEADER_LEN + UDP_HEADER_LEN + 28;
     public static final int MDNS_QDCOUNT_OFFSET =
             ETH_HEADER_LEN + UDP_HEADER_LEN + DNS_QDCOUNT_OFFSET;
     public static final int MDNS_QNAME_OFFSET =
             ETH_HEADER_LEN + UDP_HEADER_LEN + DNS_HEADER_LEN;
+
+    /**
+     * Fixed byte sequence representing the following part of the ARP reply header:
+     * EtherType + HTYPE + PTYPE + HLEN + PLEN + ops reply (0x0002)
+     */
+    public static final byte[] FIXED_ARP_REPLY_HEADER =
+            new byte[]{0x08, 0x06, 0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x02};
 }
