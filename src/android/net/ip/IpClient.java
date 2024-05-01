@@ -991,10 +991,11 @@ public class IpClient extends StateMachine {
 
                     @Override
                     public void onClatInterfaceStateUpdate(boolean add) {
-                        // TODO: when clat interface was removed, consider sending a message to
-                        // the IpClient main StateMachine thread, in case "NDO enabled" state
-                        // becomes tied to more things that 464xlat operation.
                         getHandler().post(() -> {
+                            if (mHasClatInterface == add) return;
+                            // Clat interface information is spliced into LinkProperties by
+                            // ConnectivityService, so it cannot be added to the LinkProperties
+                            // here as those propagate back to ConnectivityService.
                             mCallback.setNeighborDiscoveryOffload(add ? false : true);
                             mHasClatInterface = add;
                             if (mApfFilter != null) {
@@ -1152,7 +1153,7 @@ public class IpClient extends StateMachine {
     }
 
     private boolean isGratuitousArpNaRoamingEnabled() {
-        return mDependencies.isFeatureEnabled(mContext, IPCLIENT_GARP_NA_ROAMING_VERSION);
+        return mDependencies.isFeatureNotChickenedOut(mContext, IPCLIENT_GARP_NA_ROAMING_VERSION);
     }
 
     @VisibleForTesting
