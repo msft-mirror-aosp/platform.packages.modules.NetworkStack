@@ -15,8 +15,6 @@
  */
 package android.net.apf;
 
-import static android.net.apf.BaseApfGenerator.Register.R1;
-
 import com.android.internal.annotations.VisibleForTesting;
 
 import java.util.Objects;
@@ -35,26 +33,28 @@ public final class ApfV6Generator extends ApfV6GeneratorBase<ApfV6Generator> {
     }
 
     /**
-     * Creates an ApfV6Generator instance which is able to emit instructions for the specified
-     * {@code version} of the APF interpreter. Throws {@code IllegalInstructionException} if
-     * the requested version is unsupported.
+     * Creates an ApfV6Generator instance which emits instructions for APFv6.
      */
-    @VisibleForTesting(visibility = VisibleForTesting.Visibility.PACKAGE)
-    public ApfV6Generator() throws IllegalInstructionException {
-        super();
-        addData(new byte[0]);
+    public ApfV6Generator(int maximumApfProgramSize) throws IllegalInstructionException {
+        this(new byte[0], maximumApfProgramSize);
+    }
+
+    @Override
+    void updateExceptionBufferSize(int programSize) throws IllegalInstructionException {
+        mInstructions.get(1).updateExceptionBufferSize(
+                mMaximumApfProgramSize - ApfCounterTracker.Counter.totalSize() - programSize);
     }
 
     /**
-     * Creates an ApfV6Generator instance which is able to emit instructions for the specified
-     * {@code version} of the APF interpreter. Throws {@code IllegalInstructionException} if
-     * the requested version is unsupported.
+     * Creates an ApfV6Generator instance which emits instructions APFv6.
      * Initializes the data region with {@code bytes}.
      */
     @VisibleForTesting(visibility = VisibleForTesting.Visibility.PACKAGE)
-    public ApfV6Generator(byte[] bytes) throws IllegalInstructionException {
-        super();
+    public ApfV6Generator(byte[] bytes, int maximumApfProgramSize)
+            throws IllegalInstructionException {
+        super(maximumApfProgramSize);
         Objects.requireNonNull(bytes);
         addData(bytes);
+        addExceptionBuffer(0);
     }
 }
