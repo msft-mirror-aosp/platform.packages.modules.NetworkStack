@@ -16,9 +16,12 @@
 
 package android.net.apf;
 
-import android.net.apf.ApfGenerator;
-import android.net.apf.ApfGenerator.IllegalInstructionException;
-import android.net.apf.ApfGenerator.Register;
+import static android.net.apf.BaseApfGenerator.MemorySlot;
+import static android.net.apf.BaseApfGenerator.Register.R0;
+import static android.net.apf.BaseApfGenerator.Register.R1;
+
+import android.net.apf.BaseApfGenerator.IllegalInstructionException;
+import android.net.apf.BaseApfGenerator.Register;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -30,7 +33,7 @@ import java.io.InputStreamReader;
  *       translation of all BPF programs.
  *
  * Example usage:
- *   javac net/java/android/net/apf/ApfGenerator.java \
+ *   javac net/java/android/net/apf/ApfV4Generator.java \
  *         tests/servicestests/src/android/net/apf/Bpf2Apf.java
  *   sudo tcpdump -i em1 -d icmp | java -classpath tests/servicestests/src:net/java \
  *                                      android.net.apf.Bpf2Apf
@@ -52,7 +55,7 @@ public class Bpf2Apf {
      * APF instruction(s) and append them to {@code gen}. Here's an example line:
      * (001) jeq      #0x86dd          jt 2    jf 7
      */
-    private static void convertLine(String line, ApfGenerator gen)
+    private static void convertLine(String line, ApfV4Generator gen)
             throws IllegalInstructionException {
         if (line.indexOf("(") != 0 || line.indexOf(")") != 4 || line.indexOf(" ") != 5) {
             throw new IllegalArgumentException("Unhandled instruction: " + line);
@@ -68,19 +71,19 @@ public class Bpf2Apf {
             case "ldx":
             case "ldxb":
             case "ldxh":
-                Register dest = opcode.contains("x") ? Register.R1 : Register.R0;
+                Register dest = opcode.contains("x") ? R1 : R0;
                 if (arg.equals("4*([14]&0xf)")) {
                     if (!opcode.equals("ldxb")) {
                         throw new IllegalArgumentException("Unhandled instruction: " + line);
                     }
-                    gen.addLoadFromMemory(dest, gen.IPV4_HEADER_SIZE_MEMORY_SLOT);
+                    gen.addLoadFromMemory(dest, MemorySlot.IPV4_HEADER_SIZE);
                     break;
                 }
                 if (arg.equals("#pktlen")) {
                     if (!opcode.equals("ld")) {
                         throw new IllegalArgumentException("Unhandled instruction: " + line);
                     }
-                    gen.addLoadFromMemory(dest, gen.PACKET_SIZE_MEMORY_SLOT);
+                    gen.addLoadFromMemory(dest, MemorySlot.PACKET_SIZE);
                     break;
                 }
                 if (arg.startsWith("#0x")) {
@@ -98,11 +101,11 @@ public class Bpf2Apf {
                     if (memory_slot < 0 || memory_slot >= gen.MEMORY_SLOTS ||
                             // Disallow use of pre-filled slots as BPF programs might
                             // wrongfully assume they're initialized to 0.
-                            (memory_slot >= gen.FIRST_PREFILLED_MEMORY_SLOT &&
-                                    memory_slot <= gen.LAST_PREFILLED_MEMORY_SLOT)) {
+                            (memory_slot >= MemorySlot.FIRST_PREFILLED.value
+                                    && memory_slot <= MemorySlot.LAST_PREFILLED.value)) {
                         throw new IllegalArgumentException("Unhandled instruction: " + line);
                     }
-                    gen.addLoadFromMemory(dest, memory_slot);
+                    gen.addLoadFromMemory(dest, MemorySlot.byIndex(memory_slot));
                     break;
                 }
                 if (arg.startsWith("[x + ")) {
@@ -141,18 +144,18 @@ public class Bpf2Apf {
                 break;
             case "st":
             case "stx":
-                Register src = opcode.contains("x") ? Register.R1 : Register.R0;
+                Register src = opcode.contains("x") ? R1 : R0;
                 if (!arg.startsWith("M[")) {
                     throw new IllegalArgumentException("Unhandled instruction: " + line);
                 }
                 int memory_slot = Integer.parseInt(arg.substring(2, arg.length() - 1));
                 if (memory_slot < 0 || memory_slot >= gen.MEMORY_SLOTS ||
                         // Disallow overwriting pre-filled slots
-                        (memory_slot >= gen.FIRST_PREFILLED_MEMORY_SLOT &&
-                                memory_slot <= gen.LAST_PREFILLED_MEMORY_SLOT)) {
+                        (memory_slot >= MemorySlot.FIRST_PREFILLED.value
+                                && memory_slot <= MemorySlot.LAST_PREFILLED.value)) {
                     throw new IllegalArgumentException("Unhandled instruction: " + line);
                 }
-                gen.addStoreToMemory(src, memory_slot);
+                gen.addStoreToMemory(MemorySlot.byIndex(memory_slot), src);
                 break;
             case "add":
             case "and":
@@ -161,18 +164,18 @@ public class Bpf2Apf {
                 if (arg.equals("x")) {
                     switch(opcode) {
                         case "add":
-                            gen.addAddR1();
+                            gen.addAddR1ToR0();
                             break;
                         case "and":
-                            gen.addAndR1();
+                            gen.addAndR0WithR1();
                             break;
                         case "or":
-                            gen.addOrR1();
+                            gen.addOrR0WithR1();
                             break;
                         case "sub":
-                            gen.addNeg(Register.R1);
-                            gen.addAddR1();
-                            gen.addNeg(Register.R1);
+                            gen.addNeg(R1);
+                            gen.addAddR1ToR0();
+                            gen.addNeg(R1);
                             break;
                     }
                 } else {
@@ -292,10 +295,10 @@ public class Bpf2Apf {
                 }
                 break;
             case "tax":
-                gen.addMove(Register.R1);
+                gen.addMove(R1);
                 break;
             case "txa":
-                gen.addMove(Register.R0);
+                gen.addMove(R0);
                 break;
             default:
                 throw new IllegalArgumentException("Unhandled instruction: " + line);
@@ -307,7 +310,7 @@ public class Bpf2Apf {
      * program and return it.
      */
     public static byte[] convert(String bpf) throws IllegalInstructionException {
-        ApfGenerator gen = new ApfGenerator(3);
+        ApfV4Generator gen = new ApfV4Generator(3);
         for (String line : bpf.split("\\n")) convertLine(line, gen);
         return gen.generate();
     }
@@ -320,7 +323,7 @@ public class Bpf2Apf {
         BufferedReader in = new BufferedReader(new InputStreamReader(System.in));
         String line = null;
         StringBuilder responseData = new StringBuilder();
-        ApfGenerator gen = new ApfGenerator(3);
+        ApfV4Generator gen = new ApfV4Generator(3);
         while ((line = in.readLine()) != null) convertLine(line, gen);
         System.out.write(gen.generate());
     }

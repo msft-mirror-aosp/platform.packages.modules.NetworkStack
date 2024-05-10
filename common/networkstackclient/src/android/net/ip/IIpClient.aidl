@@ -20,6 +20,7 @@ import android.net.ProxyInfo;
 import android.net.ProvisioningConfigurationParcelable;
 import android.net.NattKeepalivePacketDataParcelable;
 import android.net.TcpKeepalivePacketDataParcelable;
+import android.net.apf.ApfCapabilities;
 
 /** @hide */
 oneway interface IIpClient {
@@ -53,6 +54,21 @@ oneway interface IIpClient {
      */
     const int PROV_IPV6_LINKLOCAL = 0x02;
 
+    /**
+     * Unset hostname setting.
+     */
+    const int HOSTNAME_SETTING_UNSET = 0x00;
+
+    /**
+     * Send hostname to IP provisioning server.
+     */
+    const int HOSTNAME_SETTING_SEND = 0x01;
+
+    /**
+     * Do not send hostname to IP provisioning server.
+     */
+    const int HOSTNAME_SETTING_DO_NOT_SEND = 0x02;
+
     void completedPreDhcpAction();
     void confirmConfiguration();
     void readPacketFilterComplete(in byte[] data);
@@ -69,4 +85,16 @@ oneway interface IIpClient {
     void addNattKeepalivePacketFilter(int slot, in NattKeepalivePacketDataParcelable pkt);
     void notifyPreconnectionComplete(boolean success);
     void updateLayer2Information(in Layer2InformationParcelable info);
+    /**
+     * Update the APF capabilities.
+     *
+     * This method will update the APF capabilities used in IpClient and decide if a new APF
+     * program should be installed to filter the incoming packets based on that. So far this
+     * method only allows for the APF capabilities to go from null to non-null, and no other
+     * changes are allowed. One use case is when WiFi interface switches from secondary to
+     * primary in STA+STA mode.
+     *
+     * @param apfCapabilities the APF capabilities to update, should be non-null.
+     */
+    void updateApfCapabilities(in ApfCapabilities apfCapabilities);
 }

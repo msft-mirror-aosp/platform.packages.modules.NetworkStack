@@ -21,11 +21,15 @@ import static android.net.dhcp.IDhcpServer.STATUS_SUCCESS;
 import static android.net.dhcp.IDhcpServer.STATUS_UNKNOWN_ERROR;
 
 import static com.android.net.module.util.DeviceConfigUtils.getResBooleanConfig;
+import static com.android.net.module.util.FeatureVersions.FEATURE_IS_UID_NETWORKING_BLOCKED;
+import static com.android.networkstack.util.NetworkStackUtils.IGNORE_TCP_INFO_FOR_BLOCKED_UIDS;
+import static com.android.networkstack.util.NetworkStackUtils.SKIP_TCP_POLL_IN_LIGHT_DOZE;
 import static com.android.server.util.PermissionUtil.checkDumpPermission;
 
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.net.ConnectivityManager;
 import android.net.IIpMemoryStore;
 import android.net.IIpMemoryStoreCallbacks;
 import android.net.INetd;
@@ -49,6 +53,7 @@ import android.os.Build;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 import android.text.TextUtils;
 import android.util.ArraySet;
@@ -59,6 +64,8 @@ import androidx.annotation.VisibleForTesting;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.util.IndentingPrintWriter;
+import com.android.modules.utils.BasicShellCommandHandler;
+import com.android.net.module.util.DeviceConfigUtils;
 import com.android.net.module.util.SharedLog;
 import com.android.networkstack.NetworkStackNotifier;
 import com.android.networkstack.R;
@@ -78,6 +85,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.ListIterator;
 import java.util.Objects;
 import java.util.SortedSet;
 import java.util.TreeSet;
@@ -172,9 +180,9 @@ public class NetworkStackService extends Service {
         /** @see IpClient */
         @NonNull
         public IpClient makeIpClient(@NonNull Context context, @NonNull String ifName,
-                @NonNull IIpClientCallbacks cb, @NonNull NetworkObserverRegistry observerRegistry,
+                @NonNull IIpClientCallbacks cb,
                 @NonNull NetworkStackServiceManager nsServiceManager) {
-            return new IpClient(context, ifName, cb, observerRegistry, nsServiceManager);
+            return new IpClient(context, ifName, cb, nsServiceManager);
         }
     }
 
@@ -189,7 +197,6 @@ public class NetworkStackService extends Service {
         private final PermissionChecker mPermChecker;
         private final Dependencies mDeps;
         private final INetd mNetd;
-        private final NetworkObserverRegistry mObserverRegistry;
         @GuardedBy("mIpClients")
         private final ArrayList<WeakReference<IpClient>> mIpClients = new ArrayList<>();
         private final IpMemoryStoreService mIpMemoryStoreService;
@@ -287,7 +294,6 @@ public class NetworkStackService extends Service {
             mDeps = deps;
             mNetd = INetd.Stub.asInterface(
                     (IBinder) context.getSystemService(Context.NETD_SERVICE));
-            mObserverRegistry = new NetworkObserverRegistry();
             mIpMemoryStoreService = mDeps.makeIpMemoryStoreService(context);
             // NetworkStackNotifier only shows notifications relevant for API level > Q
             if (ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.Q)) {
@@ -310,12 +316,6 @@ public class NetworkStackService extends Service {
                 netdHash = HASH_UNKNOWN;
             }
             updateNetdAidlVersion(netdVersion, netdHash);
-
-            try {
-                mObserverRegistry.register(mNetd);
-            } catch (RemoteException e) {
-                mLog.e("Error registering observer on Netd", e);
-            }
         }
 
         private void updateNetdAidlVersion(final int version, final String hash) {
@@ -378,7 +378,7 @@ public class NetworkStackService extends Service {
             mPermChecker.enforceNetworkStackCallingPermission();
             updateNetworkStackAidlVersion(cb.getInterfaceVersion(), cb.getInterfaceHash());
             final IpClient ipClient = mDeps.makeIpClient(
-                    mContext, ifName, cb, mObserverRegistry, this);
+                    mContext, ifName, cb, this);
 
             synchronized (mIpClients) {
                 final Iterator<WeakReference<IpClient>> it = mIpClients.iterator();
@@ -435,6 +435,20 @@ public class NetworkStackService extends Service {
                 return;
             }
 
+            pw.println("Device Configs:");
+            pw.increaseIndent();
+            pw.println("SKIP_TCP_POLL_IN_LIGHT_DOZE="
+                    + DeviceConfigUtils.isNetworkStackFeatureNotChickenedOut(
+                            mContext, SKIP_TCP_POLL_IN_LIGHT_DOZE));
+            pw.println("FEATURE_IS_UID_NETWORKING_BLOCKED=" + DeviceConfigUtils.isFeatureSupported(
+                            mContext, FEATURE_IS_UID_NETWORKING_BLOCKED));
+            pw.println("IGNORE_TCP_INFO_FOR_BLOCKED_UIDS="
+                    + DeviceConfigUtils.isNetworkStackFeatureNotChickenedOut(mContext,
+                            IGNORE_TCP_INFO_FOR_BLOCKED_UIDS));
+            pw.decreaseIndent();
+            pw.println();
+
+
             pw.println("NetworkStack logs:");
             mLog.dump(fd, pw, args);
 
@@ -480,6 +494,116 @@ public class NetworkStackService extends Service {
             pw.print("useNeighborResource: ");
             pw.println(getResBooleanConfig(mContext,
                     R.bool.config_no_sim_card_uses_neighbor_mcc, false));
+        }
+
+        @Override
+        public int handleShellCommand(@NonNull ParcelFileDescriptor in,
+                @NonNull ParcelFileDescriptor out, @NonNull ParcelFileDescriptor err,
+                @NonNull String[] args) {
+            return new ShellCmd().exec(this, in.getFileDescriptor(), out.getFileDescriptor(),
+                    err.getFileDescriptor(), args);
+        }
+
+        private String apfShellCommand(String iface, String cmd, @Nullable String optarg) {
+            synchronized (mIpClients) {
+                // HACK: An old IpClient serving the given interface name might not have been
+                // garbage collected. Since new IpClients are always appended to the list, iterate
+                // through it in reverse order to get the most up-to-date IpClient instance.
+                // Create a ListIterator at the end of the list.
+                final ListIterator it = mIpClients.listIterator(mIpClients.size());
+                while (it.hasPrevious()) {
+                    final IpClient ipClient = ((WeakReference<IpClient>) it.previous()).get();
+                    if (ipClient != null && ipClient.getInterfaceName().equals(iface)) {
+                        return ipClient.apfShellCommand(cmd, optarg);
+                    }
+                }
+            }
+            throw new IllegalArgumentException("No active IpClient found for interface " + iface);
+        }
+
+        private class ShellCmd extends BasicShellCommandHandler {
+            @Override
+            public int onCommand(String cmd) {
+                if (cmd == null) {
+                    return handleDefaultCommands(cmd);
+                }
+                final PrintWriter pw = getOutPrintWriter();
+                switch (cmd) {
+                    case "is-uid-networking-blocked":
+                        if (!DeviceConfigUtils.isFeatureSupported(mContext,
+                                FEATURE_IS_UID_NETWORKING_BLOCKED)) {
+                            throw new IllegalStateException("API is unsupported");
+                        }
+
+                        // Usage : cmd network_stack is-uid-networking-blocked <uid> <metered>
+                        // If no argument, get and display the usage help.
+                        if (getRemainingArgsCount() != 2) {
+                            onHelp();
+                            throw new IllegalArgumentException("Incorrect number of arguments");
+                        }
+                        final int uid;
+                        final boolean metered;
+                        uid = Integer.parseInt(getNextArg());
+                        metered = Boolean.parseBoolean(getNextArg());
+                        final ConnectivityManager cm =
+                                mContext.getSystemService(ConnectivityManager.class);
+                        pw.println(cm.isUidNetworkingBlocked(uid, metered /* isNetworkMetered */));
+                        return 0;
+                    case "apf":
+                        // Usage: cmd network_stack apf <iface> <cmd>
+                        final String iface = getNextArg();
+                        if (iface == null) {
+                            throw new IllegalArgumentException("No <iface> specified");
+                        }
+
+                        final String subcmd = getNextArg();
+                        if (subcmd == null) {
+                            throw new IllegalArgumentException("No <cmd> specified");
+                        }
+
+                        final String optarg = getNextArg();
+                        if (getRemainingArgsCount() != 0) {
+                            throw new IllegalArgumentException("Too many arguments passed");
+                        }
+
+                        final String result = apfShellCommand(iface, subcmd, optarg);
+                        pw.println(result);
+                        return 0;
+
+                    default:
+                        return handleDefaultCommands(cmd);
+                }
+            }
+
+            @Override
+            public void onHelp() {
+                PrintWriter pw = getOutPrintWriter();
+                pw.println("NetworkStack service commands:");
+                pw.println("  help");
+                pw.println("    Print this help text.");
+                pw.println("  is-uid-networking-blocked <uid> <metered>");
+                pw.println("    Get whether the networking is blocked for given uid and metered.");
+                pw.println("    <uid>: The target uid.");
+                pw.println("    <metered>: [true|false], Whether the target network is metered.");
+                pw.println("  apf <iface> <cmd>");
+                pw.println("    APF utility commands for integration tests.");
+                pw.println("    <iface>: the network interface the provided command operates on.");
+                pw.println("    <cmd>: [status]");
+                pw.println("      status");
+                pw.println("        returns whether the APF filter is \"running\" or \"paused\".");
+                pw.println("      pause");
+                pw.println("        pause APF filter generation.");
+                pw.println("      resume");
+                pw.println("        resume APF filter generation.");
+                pw.println("      install <program-hex-string>");
+                pw.println("        install the APF program contained in <program-hex-string>.");
+                pw.println("        The filter must be paused before installing a new program.");
+                pw.println("      capabilities");
+                pw.println("        return the reported APF capabilities.");
+                pw.println("        Format: <apfVersion>,<maxProgramSize>,<packetFormat>");
+                pw.println("      read");
+                pw.println("        reads and returns the current state of APF memory.");
+            }
         }
 
         /**

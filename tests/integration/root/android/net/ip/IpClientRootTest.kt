@@ -16,7 +16,7 @@
 
 package android.net.ip
 
-import android.Manifest
+import android.Manifest.permission.NETWORK_SETTINGS
 import android.Manifest.permission.READ_DEVICE_CONFIG
 import android.Manifest.permission.WRITE_DEVICE_CONFIG
 import android.net.IIpMemoryStore
@@ -28,11 +28,12 @@ import android.net.ipmemorystore.Status
 import android.net.networkstack.TestNetworkStackServiceClient
 import android.os.Process
 import android.provider.DeviceConfig
+import android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY
 import android.util.ArrayMap
 import android.util.Log
 import androidx.test.platform.app.InstrumentationRegistry
-import com.android.net.module.util.DeviceConfigUtils
 import java.lang.System.currentTimeMillis
+import java.lang.UnsupportedOperationException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -82,7 +83,7 @@ class IpClientRootTest : IpClientIntegrationTestCommon() {
             // Connect to the NetworkStack only once, as it is relatively expensive (~50ms plus any
             // polling time waiting for the test UID to be allowed), and there should be minimal
             // side-effects between tests compared to reconnecting every time.
-            automation.adoptShellPermissionIdentity(Manifest.permission.NETWORK_SETTINGS)
+            automation.adoptShellPermissionIdentity(NETWORK_SETTINGS)
             try {
                 automation.executeShellCommand("su root service call network_stack " +
                         "$ALLOW_TEST_UID_INDEX i32 " + Process.myUid())
@@ -124,7 +125,7 @@ class IpClientRootTest : IpClientIntegrationTestCommon() {
         @JvmStatic @AfterClass
         fun tearDownClass() {
             nsClient.disconnect()
-            automation.adoptShellPermissionIdentity(Manifest.permission.NETWORK_SETTINGS)
+            automation.adoptShellPermissionIdentity(NETWORK_SETTINGS)
             try {
                 // Reset the test UID as -1.
                 // This may not be called if the test process is terminated before completing,
@@ -138,8 +139,6 @@ class IpClientRootTest : IpClientIntegrationTestCommon() {
         }
     }
 
-    private val originalFlagValues = ArrayMap<String, String>()
-
     /**
      * Wrapper class for IIpClientCallbacks.
      *
@@ -151,21 +150,6 @@ class IpClientRootTest : IpClientIntegrationTestCommon() {
         // asBinder is implemented by both base class and delegate: specify explicitly
         override fun asBinder() = super.asBinder()
         override fun getInterfaceVersion() = IIpClientCallbacks.VERSION
-    }
-
-    @After
-    fun tearDownFlags() {
-        if (testSkipped()) return
-        automation.adoptShellPermissionIdentity(READ_DEVICE_CONFIG, WRITE_DEVICE_CONFIG)
-        try {
-            for ((key, value) in originalFlagValues.entries) {
-                if (key == null) continue
-                DeviceConfig.setProperty(DeviceConfig.NAMESPACE_CONNECTIVITY, key,
-                        value, false /* makeDefault */)
-            }
-        } finally {
-            automation.dropShellPermissionIdentity()
-        }
     }
 
     @After
@@ -195,30 +179,47 @@ class IpClientRootTest : IpClientIntegrationTestCommon() {
         return ipClientCaptor.value
     }
 
-    override fun setFeatureEnabled(feature: String, enabled: Boolean) {
+    // These are not needed in IpClientRootTest because there is no dependency injection and
+    // IpClient always uses the production implementations.
+    override fun getDeviceConfigProperty(name: String) = throw UnsupportedOperationException()
+    override fun isFeatureEnabled(name: String) = throw UnsupportedOperationException()
+    override fun isFeatureNotChickenedOut(name: String) = throw UnsupportedOperationException()
+
+    private val mOriginalPropertyValues = ArrayMap<String, String>()
+
+    override fun setDeviceConfigProperty(name: String?, value: String?) {
         automation.adoptShellPermissionIdentity(READ_DEVICE_CONFIG, WRITE_DEVICE_CONFIG)
         try {
-            // Do not use computeIfAbsent as it would overwrite null values (flag originally unset)
-            if (!originalFlagValues.containsKey(feature)) {
-                originalFlagValues[feature] =
-                        DeviceConfig.getProperty(DeviceConfig.NAMESPACE_CONNECTIVITY, feature)
+            // Do not use computeIfAbsent as it would overwrite null values,
+            // property originally unset.
+            if (!mOriginalPropertyValues.containsKey(name)) {
+                mOriginalPropertyValues[name] = DeviceConfig.getProperty(
+                    DeviceConfig.NAMESPACE_CONNECTIVITY,
+                    (name)!!
+                )
             }
-            // The feature is enabled if the flag is lower than the package version.
-            // Package versions follow a standard format with 9 digits.
-            // TODO: consider resetting flag values on reboot when set to special values like "1" or
-            // "999999999"
-            DeviceConfig.setProperty(DeviceConfig.NAMESPACE_CONNECTIVITY, feature,
-                    if (enabled) "1" else "999999999", false)
+            DeviceConfig.setProperty(
+                DeviceConfig.NAMESPACE_CONNECTIVITY,
+                (name)!!, value,
+                false /* makeDefault */
+            )
         } finally {
             automation.dropShellPermissionIdentity()
         }
     }
 
-    override fun isFeatureEnabled(name: String, defaultEnabled: Boolean): Boolean {
+    @After
+    fun tearDownDeviceConfigProperties() {
+        if (testSkipped()) return
         automation.adoptShellPermissionIdentity(READ_DEVICE_CONFIG, WRITE_DEVICE_CONFIG)
         try {
-            return DeviceConfigUtils.isFeatureEnabled(mContext, DeviceConfig.NAMESPACE_CONNECTIVITY,
-                    name, defaultEnabled)
+            for (key in mOriginalPropertyValues.keys) {
+                if (key == null) continue
+                DeviceConfig.setProperty(
+                    DeviceConfig.NAMESPACE_CONNECTIVITY, key,
+                    mOriginalPropertyValues[key], false /* makeDefault */
+                )
+            }
         } finally {
             automation.dropShellPermissionIdentity()
         }

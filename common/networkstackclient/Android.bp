@@ -16,6 +16,7 @@
 
 // AIDL interfaces between the core system and the networking mainline module.
 package {
+    default_team: "trendy_team_fwk_core_networking",
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
@@ -38,8 +39,8 @@ aidl_interface {
                 "com.android.wifi",
                 "com.android.tethering",
             ],
-            // this is part of updatable modules(NetworkStack) which targets 29(Q)
-            min_sdk_version: "29",
+            // this is part of updatable modules(NetworkStack) which targets 30(R)
+            min_sdk_version: "30",
         },
         ndk: {
             enabled: false,
@@ -47,22 +48,58 @@ aidl_interface {
         cpp: {
             enabled: false,
         },
+        rust: {
+            enabled: false,
+        },
     },
-    versions: [
-        "1",
-        "2",
-        "3",
-        "4",
-        "5",
-        "6",
-        "7",
-        "8",
-        "9",
-        "10",
-    ],
+
     visibility: [
         "//system/tools/aidl/build",
     ],
+    versions_with_info: [
+        {
+            version: "1",
+            imports: [],
+        },
+        {
+            version: "2",
+            imports: [],
+        },
+        {
+            version: "3",
+            imports: [],
+        },
+        {
+            version: "4",
+            imports: [],
+        },
+        {
+            version: "5",
+            imports: [],
+        },
+        {
+            version: "6",
+            imports: [],
+        },
+        {
+            version: "7",
+            imports: [],
+        },
+        {
+            version: "8",
+            imports: [],
+        },
+        {
+            version: "9",
+            imports: [],
+        },
+        {
+            version: "10",
+            imports: [],
+        },
+
+    ],
+
 }
 
 aidl_interface {
@@ -114,8 +151,8 @@ aidl_interface {
                 "com.android.wifi",
                 "com.android.tethering",
             ],
-            // this is part of updatable modules(NetworkStack) which targets 29(Q)
-            min_sdk_version: "29",
+            // this is part of updatable modules(NetworkStack) which targets 30(R)
+            min_sdk_version: "30",
             lint: {
                 enabled: false,
             },
@@ -126,41 +163,67 @@ aidl_interface {
         cpp: {
             enabled: false,
         },
+        rust: {
+            enabled: false,
+        },
     },
     imports: ["ipmemorystore-aidl-interfaces-V10"],
-    versions: [
-        "1",
-        "2",
-        "3",
-        "4",
-        "5",
-        "6",
-        "7",
-        "8",
-        "9",
-        "10",
-        "11",
-        "12",
-        "13",
-        "14",
-        "15",
-        "16",
-    ],
     // TODO: have tethering depend on networkstack-client and set visibility to private
     visibility: [
         "//system/tools/aidl/build",
         "//frameworks/base/packages/Tethering",
         "//packages/modules/Connectivity/Tethering",
     ],
+    versions_with_info: [
+        // Remove old networkstack aidl interface version info that is no longer used.
+        {
+            version: "13",
+            imports: ["ipmemorystore-aidl-interfaces-V10"],
+        },
+        {
+            version: "14",
+            imports: ["ipmemorystore-aidl-interfaces-V10"],
+        },
+        {
+            version: "15",
+            imports: ["ipmemorystore-aidl-interfaces-V10"],
+        },
+        {
+            version: "16",
+            imports: ["ipmemorystore-aidl-interfaces-V10"],
+        },
+        {
+            version: "17",
+            imports: ["ipmemorystore-aidl-interfaces-V10"],
+        },
+        {
+            version: "18",
+            imports: ["ipmemorystore-aidl-interfaces-V10"],
+        },
+        {
+            version: "19",
+            imports: ["ipmemorystore-aidl-interfaces-V10"],
+        },
+        {
+            version: "20",
+            imports: ["ipmemorystore-aidl-interfaces-V10"],
+        },
+        {
+            version: "21",
+            imports: ["ipmemorystore-aidl-interfaces-V10"],
+        },
+
+    ],
+    frozen: true,
 }
 
 java_library {
     name: "networkstack-aidl-latest",
     sdk_version: "system_current",
-    min_sdk_version: "29",
+    min_sdk_version: "30",
     static_libs: [
         "ipmemorystore-aidl-interfaces-V10-java",
-        "networkstack-aidl-interfaces-V16-java",
+        "networkstack-aidl-interfaces-V21-java",
     ],
     visibility: ["//packages/modules/NetworkStack:__subpackages__"],
     apex_available: [
@@ -174,8 +237,8 @@ java_library {
 java_library {
     name: "networkstack-client",
     sdk_version: "module_current",
-    // this is part of updatable modules(NetworkStack) which runs on Q and above
-    min_sdk_version: "29",
+    // this is part of updatable modules(NetworkStack) which runs on R and above
+    min_sdk_version: "30",
     srcs: [
         "src/android/net/ip/**/*.java",
         "src/android/net/IpMemoryStore.java",
@@ -197,7 +260,6 @@ java_library {
         "networkstack-aidl-latest",
     ],
     visibility: [
-        "//frameworks/base/packages/Connectivity/service",
         "//packages/modules/Connectivity/Tethering",
         "//packages/modules/Connectivity/service",
         "//frameworks/base/services/net",

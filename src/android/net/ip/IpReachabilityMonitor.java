@@ -20,11 +20,12 @@ import static android.net.metrics.IpReachabilityEvent.NUD_FAILED;
 import static android.net.metrics.IpReachabilityEvent.NUD_FAILED_ORGANIC;
 import static android.net.metrics.IpReachabilityEvent.PROVISIONING_LOST;
 import static android.net.metrics.IpReachabilityEvent.PROVISIONING_LOST_ORGANIC;
-import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
 
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_MCAST_RESOLICIT_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION;
 
 import android.content.Context;
 import android.net.ConnectivityManager;
@@ -63,6 +64,7 @@ import com.android.networkstack.R;
 import com.android.networkstack.metrics.IpReachabilityMonitorMetrics;
 
 import java.io.PrintWriter;
+import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.util.ArrayList;
@@ -182,7 +184,8 @@ public class IpReachabilityMonitor {
     public interface Dependencies {
         void acquireWakeLock(long durationMs);
         IpNeighborMonitor makeIpNeighborMonitor(Handler h, SharedLog log, NeighborEventConsumer cb);
-        boolean isFeatureEnabled(Context context, String name, boolean defaultEnabled);
+        boolean isFeatureEnabled(Context context, String name);
+        boolean isFeatureNotChickenedOut(Context context, String name);
         IpReachabilityMonitorMetrics getIpReachabilityMonitorMetrics();
 
         static Dependencies makeDefault(Context context, String iface) {
@@ -200,10 +203,12 @@ public class IpReachabilityMonitor {
                     return new IpNeighborMonitor(h, log, cb);
                 }
 
-                public boolean isFeatureEnabled(final Context context, final String name,
-                        boolean defaultEnabled) {
-                    return DeviceConfigUtils.isFeatureEnabled(context, NAMESPACE_CONNECTIVITY, name,
-                            defaultEnabled);
+                public boolean isFeatureEnabled(final Context context, final String name) {
+                    return DeviceConfigUtils.isNetworkStackFeatureEnabled(context, name);
+                }
+
+                public boolean isFeatureNotChickenedOut(final Context context, final String name) {
+                    return DeviceConfigUtils.isNetworkStackFeatureNotChickenedOut(context, name);
                 }
 
                 public IpReachabilityMonitorMetrics getIpReachabilityMonitorMetrics() {
@@ -237,6 +242,8 @@ public class IpReachabilityMonitor {
     private final boolean mMulticastResolicitEnabled;
     private final boolean mIgnoreIncompleteIpv6DnsServerEnabled;
     private final boolean mIgnoreIncompleteIpv6DefaultRouterEnabled;
+    private final boolean mMacChangeFailureOnlyAfterRoam;
+    private final boolean mIgnoreOrganicNudFailure;
 
     public IpReachabilityMonitor(
             Context context, InterfaceParams ifParams, Handler h, SharedLog log, Callback callback,
@@ -258,14 +265,16 @@ public class IpReachabilityMonitor {
         mUsingMultinetworkPolicyTracker = usingMultinetworkPolicyTracker;
         mCm = context.getSystemService(ConnectivityManager.class);
         mDependencies = dependencies;
-        mMulticastResolicitEnabled = dependencies.isFeatureEnabled(context,
-                IP_REACHABILITY_MCAST_RESOLICIT_VERSION, false /* defaultEnabled */);
-        mIgnoreIncompleteIpv6DnsServerEnabled = dependencies.isFeatureEnabled(context,
-                IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION,
-                false /* defaultEnabled */);
+        mMulticastResolicitEnabled = dependencies.isFeatureNotChickenedOut(context,
+                IP_REACHABILITY_MCAST_RESOLICIT_VERSION);
+        mIgnoreIncompleteIpv6DnsServerEnabled = dependencies.isFeatureNotChickenedOut(context,
+                IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION);
         mIgnoreIncompleteIpv6DefaultRouterEnabled = dependencies.isFeatureEnabled(context,
-                IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION,
-                false /* defaultEnabled */);
+                IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION);
+        mMacChangeFailureOnlyAfterRoam = dependencies.isFeatureNotChickenedOut(context,
+                IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION);
+        mIgnoreOrganicNudFailure = dependencies.isFeatureEnabled(context,
+                IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION);
         mMetricsLog = metricsLog;
         mNetd = netd;
         Preconditions.checkNotNull(mNetd);
@@ -355,7 +364,15 @@ public class IpReachabilityMonitor {
 
     private boolean hasDefaultRouterNeighborMacAddressChanged(
             @Nullable final NeighborEvent prev, @NonNull final NeighborEvent event) {
-        if (prev == null || !isNeighborDefaultRouter(event)) return false;
+        // TODO: once this rolls out safely, merge something like aosp/2908139 and remove this code.
+        if (mMacChangeFailureOnlyAfterRoam) {
+            if (!isNeighborDefaultRouter(event)) return false;
+            if (prev == null || prev.nudState != StructNdMsg.NUD_PROBE) return false;
+            if (!isNudFailureDueToRoam()) return false;
+        } else {
+            // Previous, incorrect, behaviour: MAC address changes are a failure at all times.
+            if (prev == null || !isNeighborDefaultRouter(event)) return false;
+        }
         return !event.macAddr.equals(prev.macAddr);
     }
 
@@ -433,18 +450,21 @@ public class IpReachabilityMonitor {
         maybeRestoreNeighborParameters();
     }
 
-    private boolean shouldIgnoreIncompleteIpv6Neighbor(@Nullable final NeighborEvent prev,
+    private boolean shouldIgnoreIncompleteNeighbor(@Nullable final NeighborEvent prev,
             @NonNull final NeighborEvent event) {
-        // If it isn't IPv6 neighbor, return false.
-        if (!(event.ip instanceof Inet6Address)) return false;
+        if (!(event.ip instanceof Inet6Address || event.ip instanceof Inet4Address)) {
+            Log.e(TAG, "Invalid IP address " + event.ip);
+            return false;
+        }
 
         // If neighbor isn't in the watch list, return false.
         if (!mNeighborWatchList.containsKey(event.ip)) return false;
 
-        // For on-link IPv6 DNS server or default router that never ever responds to address
-        // resolution, kernel will send RTM_NEWNEIGH with NUD_FAILED to user space directly,
-        // and there is no netlink neighbor events related to this neighbor received before.
-        return (prev == null || event.nudState == StructNdMsg.NUD_FAILED);
+        // For on-link IPv4/v6 DNS server or default router that never ever responds to
+        // address resolution(e.g. ARP or NS), kernel will send RTM_NEWNEIGH with NUD_FAILED
+        // to user space directly, and there is no netlink neighbor events related to this
+        // neighbor received before.
+        return (prev == null && event.nudState == StructNdMsg.NUD_FAILED);
     }
 
     private void handleNeighborLost(@Nullable final NeighborEvent prev,
@@ -481,7 +501,7 @@ public class IpReachabilityMonitor {
         final boolean ignoreIncompleteIpv6DnsServer =
                 mIgnoreIncompleteIpv6DnsServerEnabled
                         && isNeighborDnsServer(event)
-                        && shouldIgnoreIncompleteIpv6Neighbor(prev, event);
+                        && shouldIgnoreIncompleteNeighbor(prev, event);
 
         // Generally Router Advertisement should take SLLA option, then device won't do address
         // resolution for default router's IPv6 link-local address automatically. But sometimes
@@ -489,7 +509,7 @@ public class IpReachabilityMonitor {
         final boolean ignoreIncompleteIpv6DefaultRouter =
                 mIgnoreIncompleteIpv6DefaultRouterEnabled
                         && isNeighborDefaultRouter(event)
-                        && shouldIgnoreIncompleteIpv6Neighbor(prev, event);
+                        && shouldIgnoreIncompleteNeighbor(prev, event);
 
         // Only ignore the incomplete IPv6 neighbor iff IPv4 is still provisioned. For IPv6-only
         // networks, we MUST not ignore any incomplete IPv6 neighbor.
@@ -507,19 +527,32 @@ public class IpReachabilityMonitor {
             mNeighborWatchList.remove(event.ip);
         }
 
-        final boolean lostProvisioning =
-                (mLinkProperties.isIpv4Provisioned() && !whatIfLp.isIpv4Provisioned())
-                        || (mLinkProperties.isIpv6Provisioned() && !whatIfLp.isIpv6Provisioned()
-                                && !ignoreIncompleteIpv6Neighbor);
+        final boolean lostIpv4Provisioning =
+                mLinkProperties.isIpv4Provisioned() && !whatIfLp.isIpv4Provisioned();
+        final boolean lostIpv6Provisioning =
+                mLinkProperties.isIpv6Provisioned() && !whatIfLp.isIpv6Provisioned()
+                        && !ignoreIncompleteIpv6Neighbor;
+        final boolean lostProvisioning = lostIpv4Provisioning || lostIpv6Provisioning;
         final NudEventType type = getNudFailureEventType(isFromProbe(),
                 isNudFailureDueToRoam(), lostProvisioning);
 
         if (lostProvisioning) {
-            final String logMsg = "FAILURE: LOST_PROVISIONING, " + event;
+            final boolean isOrganicNudFailureAndToBeIgnored =
+                    ((type == NudEventType.NUD_ORGANIC_FAILED_CRITICAL)
+                            && mIgnoreOrganicNudFailure);
+            final String logMsg = "FAILURE: LOST_PROVISIONING, " + event
+                    + ", NUD event type: " + type.name()
+                    + (isOrganicNudFailureAndToBeIgnored ? ", to be ignored" : "");
             Log.w(TAG, logMsg);
             // TODO: remove |ip| when the callback signature no longer has
             // an InetAddress argument.
-            mCallback.notifyLost(ip, logMsg, type);
+            // Notify critical neighbor lost as long as the NUD failures
+            // are not from kernel organic or the NUD failure event type is
+            // NUD_ORGANIC_FAILED_CRITICAL but the experiment flag is not
+            // enabled. Regardless, the event metrics are still recoreded.
+            if (!isOrganicNudFailureAndToBeIgnored) {
+                mCallback.notifyLost(ip, logMsg, type);
+            }
         }
         logNudFailed(event, type);
     }
