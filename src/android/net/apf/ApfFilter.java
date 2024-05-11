@@ -101,6 +101,7 @@ import android.stats.connectivity.NetworkQuirkEvent;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.text.format.DateUtils;
+import android.util.ArraySet;
 import android.util.Log;
 import android.util.SparseArray;
 
@@ -126,6 +127,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.FileDescriptor;
 import java.io.IOException;
 import java.net.Inet4Address;
+import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.SocketAddress;
 import java.net.SocketException;
@@ -138,6 +140,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * For networks that support packet filtering via APF programs, {@code ApfFilter}
@@ -228,6 +231,7 @@ public class ApfFilter implements AndroidPacketFilter {
     private final TokenBucket mTokenBucket;
 
     @VisibleForTesting
+    @NonNull
     public byte[] mHardwareAddress;
     @VisibleForTesting
     public ReceiveThread mReceiveThread;
@@ -323,6 +327,10 @@ public class ApfFilter implements AndroidPacketFilter {
     // The subnet prefix length of our IPv4 network. Only valid if mIPv4Address is not null.
     @GuardedBy("this")
     private int mIPv4PrefixLength;
+
+    // Our IPv6 addresses
+    @GuardedBy("this")
+    private Set<Inet6Address> mIPv6Addresses = new ArraySet<>();
 
     // Whether CLAT is enabled.
     @GuardedBy("this")
@@ -1559,7 +1567,7 @@ public class ApfFilter implements AndroidPacketFilter {
                     Counter.DROPPED_ARP_OTHER_HOST);
 
             ApfV6Generator v6Gen = tryToConvertToApfV6Generator(gen);
-            if (mHardwareAddress != null && v6Gen != null) {
+            if (v6Gen != null) {
                 // Ethernet requires that all packets be at least 60 bytes long
                 v6Gen.addAllocate(60)
                         .addPacketCopy(ETHER_SRC_ADDR_OFFSET, ETHER_ADDR_LEN)
@@ -2361,8 +2369,8 @@ public class ApfFilter implements AndroidPacketFilter {
         return mInDozeMode;
     }
 
-    /** Find the single IPv4 LinkAddress if there is one, otherwise return null. */
-    private static LinkAddress findIPv4LinkAddress(LinkProperties lp) {
+    /** Retrieve the single IPv4 LinkAddress if there is one, otherwise return null. */
+    private static LinkAddress retrieveIPv4LinkAddress(LinkProperties lp) {
         LinkAddress ipv4Address = null;
         for (LinkAddress address : lp.getLinkAddresses()) {
             if (!(address.getAddress() instanceof Inet4Address)) {
@@ -2377,16 +2385,38 @@ public class ApfFilter implements AndroidPacketFilter {
         return ipv4Address;
     }
 
+    /** Retrieve the IPv6 LinkAddress list, otherwise return empty list. */
+    private static Set<Inet6Address> retrieveIPv6LinkAddress(LinkProperties lp) {
+        final Set<Inet6Address> ipv6Addresses = new ArraySet<>();
+
+        for (LinkAddress address : lp.getLinkAddresses()) {
+            if (!(address.getAddress() instanceof Inet6Address)) {
+                continue;
+            }
+
+            ipv6Addresses.add((Inet6Address) address.getAddress());
+        }
+
+        return ipv6Addresses;
+    }
+
     public synchronized void setLinkProperties(LinkProperties lp) {
         // NOTE: Do not keep a copy of LinkProperties as it would further duplicate state.
-        final LinkAddress ipv4Address = findIPv4LinkAddress(lp);
+        final LinkAddress ipv4Address = retrieveIPv4LinkAddress(lp);
         final byte[] addr = (ipv4Address != null) ? ipv4Address.getAddress().getAddress() : null;
         final int prefix = (ipv4Address != null) ? ipv4Address.getPrefixLength() : 0;
-        if ((prefix == mIPv4PrefixLength) && Arrays.equals(addr, mIPv4Address)) {
+        final Set<Inet6Address> ipv6Addresses = retrieveIPv6LinkAddress(lp);
+
+        if ((prefix == mIPv4PrefixLength)
+                && Arrays.equals(addr, mIPv4Address)
+                && ipv6Addresses.equals(mIPv6Addresses)
+        ) {
             return;
         }
         mIPv4Address = addr;
         mIPv4PrefixLength = prefix;
+        mIPv6Addresses = ipv6Addresses;
+
         installNewProgramLocked();
     }
 
@@ -2462,6 +2492,12 @@ public class ApfFilter implements AndroidPacketFilter {
         pw.println("Minimum RDNSS lifetime: " + mMinRdnssLifetimeSec);
         try {
             pw.println("IPv4 address: " + InetAddress.getByAddress(mIPv4Address).getHostAddress());
+            pw.println("IPv6 addresses: ");
+            pw.increaseIndent();
+            for (Inet6Address addr: mIPv6Addresses) {
+                pw.println(addr.getHostAddress());
+            }
+            pw.decreaseIndent();
         } catch (UnknownHostException|NullPointerException e) {}
 
         if (mLastTimeInstalledProgram == 0) {
