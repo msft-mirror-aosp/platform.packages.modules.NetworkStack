@@ -19,7 +19,11 @@ import static android.net.apf.BaseApfGenerator.Rbit.Rbit1;
 import static android.net.apf.BaseApfGenerator.Register.R0;
 import static android.net.apf.BaseApfGenerator.Register.R1;
 
+import android.annotation.NonNull;
+
 import com.android.internal.annotations.VisibleForTesting;
+
+import java.util.Set;
 
 /**
  * APFv4 assembler/generator. A tool for generating an APFv4 program.
@@ -131,6 +135,18 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
     }
 
     @Override
+    public ApfV4Generator addCountAndDropIfR0AnyBitsSet(long val, ApfCounterTracker.Counter cnt) {
+        checkDropCounterRange(cnt);
+        return maybeAddLoadCounterOffset(R1, cnt).addJumpIfR0AnyBitsSet(val, mCountAndDropLabel);
+    }
+
+    @Override
+    public ApfV4Generator addCountAndPassIfR0AnyBitsSet(long val, ApfCounterTracker.Counter cnt) {
+        checkPassCounterRange(cnt);
+        return maybeAddLoadCounterOffset(R1, cnt).addJumpIfR0AnyBitsSet(val, mCountAndPassLabel);
+    }
+
+    @Override
     public ApfV4Generator addCountAndDropIfR0LessThan(long val, ApfCounterTracker.Counter cnt) {
         checkDropCounterRange(cnt);
         if (val <= 0) {
@@ -162,6 +178,54 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
         checkPassCounterRange(cnt);
         return maybeAddLoadCounterOffset(R1, cnt).addJumpIfBytesAtR0NotEqual(bytes,
                 mCountAndPassLabel);
+    }
+
+    @Override
+    public ApfV4Generator addCountAndPassIfR0IsOneOf(@NonNull Set<Long> values,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        checkPassCounterRange(cnt);
+        maybeAddLoadCounterOffset(R1, cnt);
+        for (Long v : values) {
+            addJumpIfR0Equals(v, mCountAndPassLabel);
+        }
+        return this;
+    }
+
+    @Override
+    public ApfV4Generator addCountAndDropIfR0IsOneOf(@NonNull Set<Long> values,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        checkDropCounterRange(cnt);
+        maybeAddLoadCounterOffset(R1, cnt);
+        for (Long v : values) {
+            addJumpIfR0Equals(v, mCountAndDropLabel);
+        }
+        return this;
+    }
+
+    @Override
+    public ApfV4Generator addCountAndPassIfR0IsNoneOf(@NonNull Set<Long> values,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        checkPassCounterRange(cnt);
+        String tgt = getUniqueLabel();
+        for (Long v : values) {
+            addJumpIfR0Equals(v, tgt);
+        }
+        addCountAndPass(cnt);
+        defineLabel(tgt);
+        return this;
+    }
+
+    @Override
+    public ApfV4Generator addCountAndDropIfR0IsNoneOf(@NonNull Set<Long> values,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        checkDropCounterRange(cnt);
+        String tgt = getUniqueLabel();
+        for (Long v : values) {
+            addJumpIfR0Equals(v, tgt);
+        }
+        addCountAndDrop(cnt);
+        defineLabel(tgt);
+        return this;
     }
 
     /**

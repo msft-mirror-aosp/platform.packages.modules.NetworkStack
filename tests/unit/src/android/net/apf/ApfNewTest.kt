@@ -16,6 +16,7 @@
 package android.net.apf
 
 import android.content.Context
+import android.net.InetAddresses
 import android.net.LinkAddress
 import android.net.LinkProperties
 import android.net.apf.ApfCounterTracker.Counter
@@ -59,6 +60,7 @@ import com.android.networkstack.metrics.NetworkQuirkMetrics
 import com.android.testutils.DevSdkIgnoreRule
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo
 import com.android.testutils.DevSdkIgnoreRunner
+import java.net.Inet6Address
 import java.net.InetAddress
 import java.nio.ByteBuffer
 import kotlin.test.assertContentEquals
@@ -74,11 +76,11 @@ import org.mockito.Mockito
 import org.mockito.MockitoAnnotations
 
 /**
- * Tests for APFv6 specific instructions.
+ * Tests for APF instructions.
  */
 @RunWith(DevSdkIgnoreRunner::class)
 @SmallTest
-class ApfV5Test {
+class ApfNewTest {
 
     @get:Rule
     val ignoreRule = DevSdkIgnoreRule()
@@ -100,8 +102,12 @@ class ApfV5Test {
     private val senderIpv4Address = byteArrayOf(10, 0, 0, 2)
     private val arpBroadcastMacAddress = intArrayOf(0xff, 0xff, 0xff, 0xff, 0xff, 0xff)
             .map { it.toByte() }.toByteArray()
-    private val senderMacAddress = intArrayOf(0x11, 0x22, 0x33, 0x44, 0x55, 0x66)
+    private val senderMacAddress = intArrayOf(0x01, 0x22, 0x33, 0x44, 0x55, 0x66)
             .map { it.toByte() }.toByteArray()
+    private val hostIpv6AddressList = listOf(
+        InetAddresses.parseNumericAddress("2001::200:1a:3344:1122") as Inet6Address,
+        InetAddresses.parseNumericAddress("2001::100:1b:4455:6677") as Inet6Address
+    )
 
     @Before
     fun setUp() {
@@ -305,6 +311,24 @@ class ApfV5Test {
             gen.addCountAndDropIfBytesAtR0NotEqual(byteArrayOf(1), PASSED_ARP)
         }
         assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndDropIfR0AnyBitsSet(3, PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndPassIfR0AnyBitsSet(3, DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndDropIfR0IsOneOf(setOf(3), PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndPassIfR0IsOneOf(setOf(3), DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndDropIfR0IsNoneOf(setOf(3), PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndPassIfR0IsNoneOf(setOf(3), DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
             gen.addWrite32(byteArrayOf())
         }
         assertFailsWith<IllegalArgumentException> {
@@ -352,6 +376,24 @@ class ApfV5Test {
         }
         assertFailsWith<IllegalArgumentException> {
             v4gen.addCountAndDropIfBytesAtR0NotEqual(byteArrayOf(1), PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndDropIfR0AnyBitsSet(3, PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndPassIfR0AnyBitsSet(3, DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndDropIfR0IsOneOf(setOf(3), PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndPassIfR0IsOneOf(setOf(3), DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndDropIfR0IsNoneOf(setOf(3), PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndPassIfR0IsNoneOf(setOf(3), DROPPED_ETH_BROADCAST)
         }
     }
 
@@ -873,11 +915,15 @@ class ApfV5Test {
     }
 
     @Test
-    fun testCountAndPassDropCompareR0() {
+    fun testV4CountAndPassDropCompareR0() {
         doTestCountAndPassDropCompareR0(
                 { mutableMapOf() },
                 { ApfV4Generator(APF_VERSION_4) }
         )
+    }
+
+    @Test
+    fun testV6CountAndPassDropCompareR0() {
         doTestCountAndPassDropCompareR0(
                 { mutableMapOf(Counter.TOTAL_PACKETS to 1) },
                 { ApfV6Generator(defaultMaximumApfProgramSize) }
@@ -984,6 +1030,84 @@ class ApfV5Test {
                 .addLoadImmediate(R0, 1)
                 .addCountAndPassIfBytesAtR0NotEqual(
                         byteArrayOf(5, 5), PASSED_ARP)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        dataRegion = ByteArray(Counter.totalSize()) { 0 }
+        assertVerdict(APF_VERSION_6, PASS, program, testPacket, dataRegion)
+        counterMap = decodeCountersIntoMap(dataRegion)
+        expectedMap = getInitialMap()
+        expectedMap[PASSED_ARP] = 1
+        assertEquals(expectedMap, counterMap)
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 1)
+                .addCountAndDropIfR0AnyBitsSet(0xffff, DROPPED_ETH_BROADCAST)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        dataRegion = ByteArray(Counter.totalSize()) { 0 }
+        assertVerdict(APF_VERSION_6, DROP, program, testPacket, dataRegion)
+        counterMap = decodeCountersIntoMap(dataRegion)
+        expectedMap = getInitialMap()
+        expectedMap[DROPPED_ETH_BROADCAST] = 1
+        assertEquals(expectedMap, counterMap)
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 1)
+                .addCountAndPassIfR0AnyBitsSet(0xffff, PASSED_ARP)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        dataRegion = ByteArray(Counter.totalSize()) { 0 }
+        assertVerdict(APF_VERSION_6, PASS, program, testPacket, dataRegion)
+        counterMap = decodeCountersIntoMap(dataRegion)
+        expectedMap = getInitialMap()
+        expectedMap[PASSED_ARP] = 1
+        assertEquals(expectedMap, counterMap)
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 123)
+                .addCountAndDropIfR0IsOneOf(setOf(123, 124), DROPPED_ETH_BROADCAST)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        dataRegion = ByteArray(Counter.totalSize()) { 0 }
+        assertVerdict(APF_VERSION_6, DROP, program, testPacket, dataRegion)
+        counterMap = decodeCountersIntoMap(dataRegion)
+        expectedMap = getInitialMap()
+        expectedMap[DROPPED_ETH_BROADCAST] = 1
+        assertEquals(expectedMap, counterMap)
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 123)
+                .addCountAndPassIfR0IsOneOf(setOf(123, 124), PASSED_ARP)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        dataRegion = ByteArray(Counter.totalSize()) { 0 }
+        assertVerdict(APF_VERSION_6, PASS, program, testPacket, dataRegion)
+        counterMap = decodeCountersIntoMap(dataRegion)
+        expectedMap = getInitialMap()
+        expectedMap[PASSED_ARP] = 1
+        assertEquals(expectedMap, counterMap)
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 123)
+                .addCountAndDropIfR0IsNoneOf(setOf(122, 124), DROPPED_ETH_BROADCAST)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        dataRegion = ByteArray(Counter.totalSize()) { 0 }
+        assertVerdict(APF_VERSION_6, DROP, program, testPacket, dataRegion)
+        counterMap = decodeCountersIntoMap(dataRegion)
+        expectedMap = getInitialMap()
+        expectedMap[DROPPED_ETH_BROADCAST] = 1
+        assertEquals(expectedMap, counterMap)
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 123)
+                .addCountAndPassIfR0IsNoneOf(setOf(122, 124), PASSED_ARP)
                 .addPass()
                 .addCountTrampoline()
                 .generate()
@@ -1467,6 +1591,46 @@ class ApfV5Test {
                 decodeCountersIntoMap(data)
         )
         apfFilter.shutdown()
+    }
+
+    @Test
+    fun testApfProgramUpdate() {
+        val ipClientCallback = ApfTestUtils.MockIpClientCallback()
+        val apfFilter = TestApfFilter(
+            context,
+            getDefaultConfig(),
+            ipClientCallback,
+            metrics,
+            dependencies
+        )
+
+        val lp = LinkProperties()
+
+        // add IPv4 address, expect to have apf program update
+        ipClientCallback.resetApfProgramWait()
+        val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
+        lp.addLinkAddress(linkAddress)
+        apfFilter.setLinkProperties(lp)
+        ipClientCallback.assertProgramUpdateAndGet()
+
+        // add the same IPv4 address, expect to have no apf program update
+        ipClientCallback.resetApfProgramWait()
+        apfFilter.setLinkProperties(lp)
+        ipClientCallback.assertNoProgramUpdate()
+
+        // add IPv6 addresses, expect to have apf program update
+        ipClientCallback.resetApfProgramWait()
+        for (addr in hostIpv6AddressList) {
+            lp.addLinkAddress(LinkAddress(addr, 64))
+        }
+
+        apfFilter.setLinkProperties(lp)
+        ipClientCallback.assertProgramUpdateAndGet()
+
+        // add the same IPv6 addresses, expect to have no apf program update
+        ipClientCallback.resetApfProgramWait()
+        apfFilter.setLinkProperties(lp)
+        ipClientCallback.assertNoProgramUpdate()
     }
 
     private fun decodeCountersIntoMap(counterBytes: ByteArray): Map<Counter, Long> {
