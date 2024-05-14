@@ -20,15 +20,17 @@ import static android.net.apf.BaseApfGenerator.Rbit.Rbit0;
 import static android.net.apf.BaseApfGenerator.Rbit.Rbit1;
 import static android.net.apf.BaseApfGenerator.Register.R0;
 
-import androidx.annotation.NonNull;
+import android.annotation.NonNull;
 
 import com.android.net.module.util.ByteUtils;
 import com.android.net.module.util.CollectionUtils;
 import com.android.net.module.util.HexDump;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * The base class for APF assembler/generator.
@@ -798,6 +800,46 @@ public abstract class BaseApfGenerator {
         return bytecode;
     }
 
+    void validateBytes(byte[] bytes) {
+        Objects.requireNonNull(bytes);
+        if (bytes.length > 2047) {
+            throw new IllegalArgumentException(
+                    "bytes array size must be in less than 2048, current size: " + bytes.length);
+        }
+    }
+
+    List<byte[]> validateDeduplicateBytesList(List<byte[]> bytesList) {
+        if (bytesList == null || bytesList.size() == 0) {
+            throw new IllegalArgumentException(
+                    "bytesList size must > 0, current size: "
+                            + (bytesList == null ? "null" : bytesList.size()));
+        }
+        for (byte[] bytes : bytesList) {
+            validateBytes(bytes);
+        }
+        final int elementSize = bytesList.get(0).length;
+        if (elementSize > 2097151) { // 2 ^ 21 - 1
+            throw new IllegalArgumentException("too many elements");
+        }
+        List<byte[]> deduplicatedList = new ArrayList<>();
+        deduplicatedList.add(bytesList.get(0));
+        for (int i = 1; i < bytesList.size(); ++i) {
+            if (elementSize != bytesList.get(i).length) {
+                throw new IllegalArgumentException("byte arrays in the set have different size");
+            }
+            int j = 0;
+            for (; j < deduplicatedList.size(); ++j) {
+                if (Arrays.equals(bytesList.get(i), deduplicatedList.get(j))) {
+                    break;
+                }
+            }
+            if (j == deduplicatedList.size()) {
+                deduplicatedList.add(bytesList.get(i));
+            }
+        }
+        return deduplicatedList;
+    }
+
     void requireApfVersion(int minimumVersion) throws IllegalInstructionException {
         if (mVersion < minimumVersion) {
             throw new IllegalInstructionException("Requires APF >= " + minimumVersion);
@@ -917,7 +959,7 @@ public abstract class BaseApfGenerator {
     // This version number syncs up with APF_VERSION in hardware/google/apf/apf_interpreter.h
     public static final int APF_VERSION_2 = 2;
     public static final int APF_VERSION_4 = 4;
-    public static final int APF_VERSION_6 = 6;
+    public static final int APF_VERSION_6 = 6000;
 
 
     final ArrayList<Instruction> mInstructions = new ArrayList<Instruction>();
