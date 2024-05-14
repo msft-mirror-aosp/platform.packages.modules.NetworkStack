@@ -84,6 +84,8 @@ import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ROUTER_SO
 import static com.android.net.module.util.NetworkStackConstants.IPV4_ADDR_LEN;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_LEN;
 
+import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -101,11 +103,9 @@ import android.stats.connectivity.NetworkQuirkEvent;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.text.format.DateUtils;
+import android.util.ArraySet;
 import android.util.Log;
 import android.util.SparseArray;
-
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
@@ -137,9 +137,9 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * For networks that support packet filtering via APF programs, {@code ApfFilter}
@@ -230,6 +230,7 @@ public class ApfFilter implements AndroidPacketFilter {
     private final TokenBucket mTokenBucket;
 
     @VisibleForTesting
+    @NonNull
     public byte[] mHardwareAddress;
     @VisibleForTesting
     public ReceiveThread mReceiveThread;
@@ -328,7 +329,7 @@ public class ApfFilter implements AndroidPacketFilter {
 
     // Our IPv6 addresses
     @GuardedBy("this")
-    private List<byte[]> mIPv6Addresses = new ArrayList<>();
+    private Set<Inet6Address> mIPv6Addresses = new ArraySet<>();
 
     // Whether CLAT is enabled.
     @GuardedBy("this")
@@ -1565,7 +1566,7 @@ public class ApfFilter implements AndroidPacketFilter {
                     Counter.DROPPED_ARP_OTHER_HOST);
 
             ApfV6Generator v6Gen = tryToConvertToApfV6Generator(gen);
-            if (mHardwareAddress != null && v6Gen != null) {
+            if (v6Gen != null) {
                 // Ethernet requires that all packets be at least 60 bytes long
                 v6Gen.addAllocate(60)
                         .addPacketCopy(ETHER_SRC_ADDR_OFFSET, ETHER_ADDR_LEN)
@@ -1818,7 +1819,6 @@ public class ApfFilter implements AndroidPacketFilter {
         final String skipMdnsFilter = "skip_mdns_filter";
         final String checkMdnsUdpPort = "check_mdns_udp_port";
         final String mDnsAcceptPacket = "mdns_accept_packet";
-        final String mDnsDropPacket = "mdns_drop_packet";
 
         // Only turn on the filter if multicast filter is on and the qname allowlist is non-empty.
         if (!mMulticastFilter || mMdnsAllowList.isEmpty()) {
@@ -1894,23 +1894,27 @@ public class ApfFilter implements AndroidPacketFilter {
         gen.addLoadImmediate(R0, MDNS_QNAME_OFFSET);
         gen.addAddR1ToR0();
 
+        ApfV6Generator v6Gen = tryToConvertToApfV6Generator(gen);
+
         // Check first QNAME against allowlist
         for (int i = 0; i < mMdnsAllowList.size(); ++i) {
-            final String mDnsNextAllowedQnameCheck = "mdns_next_allowed_qname_check" + i;
             final byte[] encodedQname = encodeQname(mMdnsAllowList.get(i));
-            gen.addJumpIfBytesAtR0NotEqual(encodedQname, mDnsNextAllowedQnameCheck);
-            // QNAME matched
-            gen.addJump(mDnsAcceptPacket);
-            // QNAME not matched
-            gen.defineLabel(mDnsNextAllowedQnameCheck);
+            if (v6Gen != null) {
+                v6Gen.addJumpIfBytesAtR0Equal(encodedQname, mDnsAcceptPacket);
+            } else {
+                final String mDnsNextAllowedQnameCheck = "mdns_next_allowed_qname_check" + i;
+                gen.addJumpIfBytesAtR0NotEqual(encodedQname, mDnsNextAllowedQnameCheck);
+                // QNAME matched
+                gen.addJump(mDnsAcceptPacket);
+                // QNAME not matched
+                gen.defineLabel(mDnsNextAllowedQnameCheck);
+            }
         }
         // If QNAME doesn't match any entries in allowlist, drop the packet.
-        gen.defineLabel(mDnsDropPacket);
         gen.addCountAndDrop(Counter.DROPPED_MDNS);
 
         gen.defineLabel(mDnsAcceptPacket);
         gen.addCountAndPass(Counter.PASSED_MDNS);
-
 
         gen.defineLabel(skipMdnsFilter);
     }
@@ -2384,18 +2388,18 @@ public class ApfFilter implements AndroidPacketFilter {
     }
 
     /** Retrieve the IPv6 LinkAddress list, otherwise return empty list. */
-    private static List<LinkAddress> retrieveIPv6LinkAddress(LinkProperties lp) {
-        final List<LinkAddress> ipv6AddressList = new ArrayList<>();
+    private static Set<Inet6Address> retrieveIPv6LinkAddress(LinkProperties lp) {
+        final Set<Inet6Address> ipv6Addresses = new ArraySet<>();
 
-        for (LinkAddress address: lp.getLinkAddresses()) {
+        for (LinkAddress address : lp.getLinkAddresses()) {
             if (!(address.getAddress() instanceof Inet6Address)) {
                 continue;
             }
 
-            ipv6AddressList.add(address);
+            ipv6Addresses.add((Inet6Address) address.getAddress());
         }
 
-        return ipv6AddressList;
+        return ipv6Addresses;
     }
 
     public synchronized void setLinkProperties(LinkProperties lp) {
@@ -2403,21 +2407,17 @@ public class ApfFilter implements AndroidPacketFilter {
         final LinkAddress ipv4Address = retrieveIPv4LinkAddress(lp);
         final byte[] addr = (ipv4Address != null) ? ipv4Address.getAddress().getAddress() : null;
         final int prefix = (ipv4Address != null) ? ipv4Address.getPrefixLength() : 0;
-        final List<LinkAddress> ipv6Addresses = retrieveIPv6LinkAddress(lp);
-        final List<byte[]> addrList = new ArrayList<>();
-        for (LinkAddress v6Addr: ipv6Addresses) {
-            addrList.add(v6Addr.getAddress().getAddress());
-        }
+        final Set<Inet6Address> ipv6Addresses = retrieveIPv6LinkAddress(lp);
 
         if ((prefix == mIPv4PrefixLength)
                 && Arrays.equals(addr, mIPv4Address)
-                && isByteArrayListEquals(addrList, mIPv6Addresses)
+                && ipv6Addresses.equals(mIPv6Addresses)
         ) {
             return;
         }
         mIPv4Address = addr;
         mIPv4PrefixLength = prefix;
-        mIPv6Addresses = addrList;
+        mIPv6Addresses = ipv6Addresses;
 
         installNewProgramLocked();
     }
@@ -2496,8 +2496,8 @@ public class ApfFilter implements AndroidPacketFilter {
             pw.println("IPv4 address: " + InetAddress.getByAddress(mIPv4Address).getHostAddress());
             pw.println("IPv6 addresses: ");
             pw.increaseIndent();
-            for (byte[] addr: mIPv6Addresses) {
-                pw.println(Inet6Address.getByAddress(addr));
+            for (Inet6Address addr: mIPv6Addresses) {
+                pw.println(addr.getHostAddress());
             }
             pw.decreaseIndent();
         } catch (UnknownHostException|NullPointerException e) {}
@@ -2652,33 +2652,6 @@ public class ApfFilter implements AndroidPacketFilter {
                 + (uint8(bytes[3]));
     }
 
-    private static boolean isByteArrayListEquals(List<byte[]> a, List<byte[]> b) {
-        if (a.size() != b.size()) {
-            return false;
-        }
-
-        final Comparator<byte[]> byteArrayComparator = (first, second) -> {
-            int length = Math.min(first.length, second.length);
-            for (int i = 0; i < length; i++) {
-                if (first[i] != second[i]) {
-                    return Byte.compare(first[i], second[i]);
-                }
-            }
-
-            return Integer.compare(first.length, second.length);
-        };
-
-        // sort these 2 list first, it can be replaced by Arrays::compareUnsigned after API level 33
-        a.sort(byteArrayComparator);
-        b.sort(byteArrayComparator);
-        for (int i = 0; i < a.size(); i++) {
-            if (!Arrays.equals(a.get(i), b.get(i))) {
-                return false;
-            }
-        }
-
-        return true;
-    }
     private static byte[] concatArrays(final byte[]... arr) {
         int size = 0;
         for (byte[] a : arr) {
