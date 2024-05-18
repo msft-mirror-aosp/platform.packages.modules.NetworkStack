@@ -25,7 +25,8 @@ import android.annotation.NonNull;
 
 import com.android.internal.annotations.VisibleForTesting;
 
-import java.util.Objects;
+import java.util.List;
+import java.util.Set;
 
 /**
  * APF assembler/generator.  A tool for generating an APF program.
@@ -384,6 +385,38 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
             throws IllegalInstructionException;
 
     /**
+     * Add an instruction to the end of the program to count and drop if the bytes of the
+     * packet at an offset specified by register R0 match any of the elements in {@code bytesList}.
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndDropIfBytesAtR0EqualsAnyOf(@NonNull List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
+
+    /**
+     * Add an instruction to the end of the program to count and pass if the bytes of the
+     * packet at an offset specified by register R0 match any of the elements in {@code bytesList}.
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndPassIfBytesAtR0EqualsAnyOf(@NonNull List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
+
+    /**
+     * Add an instruction to the end of the program to count and drop if the bytes of the
+     * packet at an offset specified by register R0 match none the elements in {@code bytesList}.
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndDropIfBytesAtR0EqualsNoneOf(@NonNull List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
+
+    /**
+     * Add an instruction to the end of the program to count and pass if the bytes of the
+     * packet at an offset specified by register R0 match none of the elements in {@code bytesList}.
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndPassIfBytesAtR0EqualsNoneOf(@NonNull List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
+
+    /**
      * Add an instruction to the end of the program to jump to {@code target} if register R0's
      * value equals register R1's value.
      */
@@ -423,14 +456,6 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
         return append(new Instruction(Opcodes.JSET, R1).setTargetLabel(tgt));
     }
 
-    void validateBytes(byte[] bytes) {
-        Objects.requireNonNull(bytes);
-        if (bytes.length > 2047) {
-            throw new IllegalArgumentException(
-                    "bytes array size must be in less than 2048, current size: " + bytes.length);
-        }
-    }
-
     /**
      * Add an instruction to the end of the program to jump to {@code tgt} if the bytes of the
      * packet at an offset specified by register0 don't match {@code bytes}.
@@ -456,6 +481,38 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
      * WARNING: may modify R1
      */
     public abstract Type addCountAndPassIfBytesAtR0NotEqual(byte[] bytes,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
+
+    /**
+     * Add instructions to the end of the program to increase counter and pass packet if the
+     * value in register0 is one of {@code values}.
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndPassIfR0IsOneOf(@NonNull Set<Long> values,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
+
+    /**
+     * Add instructions to the end of the program to increase counter and drop packet if the
+     * value in register0 is one of {@code values}.
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndDropIfR0IsOneOf(@NonNull Set<Long> values,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
+
+    /**
+     * Add instructions to the end of the program to increase counter and pass packet if the
+     * value in register0 is none of {@code values}.
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndPassIfR0IsNoneOf(@NonNull Set<Long> values,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
+
+    /**
+     * Add instructions to the end of the program to increase counter and drop packet if the
+     * value in register0 is none of {@code values}.
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndDropIfR0IsNoneOf(@NonNull Set<Long> values,
             ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
 
     /**
