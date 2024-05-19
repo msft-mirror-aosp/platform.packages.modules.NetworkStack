@@ -184,6 +184,9 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
     @Override
     public ApfV4Generator addCountAndPassIfR0IsOneOf(@NonNull Set<Long> values,
             ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        if (values.isEmpty()) {
+            throw new IllegalArgumentException("values cannot be empty");
+        }
         checkPassCounterRange(cnt);
         maybeAddLoadCounterOffset(R1, cnt);
         for (Long v : values) {
@@ -195,6 +198,9 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
     @Override
     public ApfV4Generator addCountAndDropIfR0IsOneOf(@NonNull Set<Long> values,
             ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        if (values.isEmpty()) {
+            throw new IllegalArgumentException("values cannot be empty");
+        }
         checkDropCounterRange(cnt);
         maybeAddLoadCounterOffset(R1, cnt);
         for (Long v : values) {
@@ -206,7 +212,9 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
     @Override
     public ApfV4Generator addCountAndPassIfR0IsNoneOf(@NonNull Set<Long> values,
             ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
-        checkPassCounterRange(cnt);
+        if (values.isEmpty()) {
+            throw new IllegalArgumentException("values cannot be empty");
+        }
         String tgt = getUniqueLabel();
         for (Long v : values) {
             addJumpIfR0Equals(v, tgt);
@@ -219,7 +227,9 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
     @Override
     public ApfV4Generator addCountAndDropIfR0IsNoneOf(@NonNull Set<Long> values,
             ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
-        checkDropCounterRange(cnt);
+        if (values.isEmpty()) {
+            throw new IllegalArgumentException("values cannot be empty");
+        }
         String tgt = getUniqueLabel();
         for (Long v : values) {
             addJumpIfR0Equals(v, tgt);
@@ -229,10 +239,9 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
         return this;
     }
 
-    @Override
-    public ApfV4Generator addCountAndDropIfBytesAtR0EqualsAnyOf(@NonNull List<byte[]> bytesList,
-            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
-        checkDropCounterRange(cnt);
+    private ApfV4Generator addCountAndDropOrPassByMatchingBytesAtR0(@NonNull List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt, boolean matchAny, boolean drop)
+            throws IllegalInstructionException {
         final List<byte[]> deduplicatedList = validateDeduplicateBytesList(bytesList);
         maybeAddLoadCounterOffset(R1, cnt);
         String matchLabel = getUniqueLabel();
@@ -243,68 +252,49 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
             addJump(matchLabel);
             defineLabel(notMatchLabel);
         }
-        addJump(allNoMatchLabel);
-        defineLabel(matchLabel);
-        addCountAndDrop(cnt);
-        defineLabel(allNoMatchLabel);
+        if (matchAny) {
+            addJump(allNoMatchLabel);
+            defineLabel(matchLabel);
+        }
+        if (drop) {
+            addCountAndDrop(cnt);
+        } else {
+            addCountAndPass(cnt);
+        }
+        if (matchAny) {
+            defineLabel(allNoMatchLabel);
+        } else {
+            defineLabel(matchLabel);
+        }
         return this;
+    }
+
+    @Override
+    public ApfV4Generator addCountAndDropIfBytesAtR0EqualsAnyOf(@NonNull List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        return addCountAndDropOrPassByMatchingBytesAtR0(bytesList, cnt, true /* matchAny */,
+                true /* drop */);
     }
 
     @Override
     public ApfV4Generator addCountAndPassIfBytesAtR0EqualsAnyOf(@NonNull List<byte[]> bytesList,
             ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
-        checkPassCounterRange(cnt);
-        final List<byte[]> deduplicatedList = validateDeduplicateBytesList(bytesList);
-        maybeAddLoadCounterOffset(R1, cnt);
-        String matchLabel = getUniqueLabel();
-        String allNoMatchLabel = getUniqueLabel();
-        for (byte[] v : deduplicatedList) {
-            String notMatchLabel = getUniqueLabel();
-            addJumpIfBytesAtR0NotEqual(v, notMatchLabel);
-            addJump(matchLabel);
-            defineLabel(notMatchLabel);
-        }
-        addJump(allNoMatchLabel);
-        defineLabel(matchLabel);
-        addCountAndPass(cnt);
-        defineLabel(allNoMatchLabel);
-        return this;
+        return addCountAndDropOrPassByMatchingBytesAtR0(bytesList, cnt, true /* matchAny */,
+                false /* drop */);
     }
 
     @Override
     public ApfV4Generator addCountAndDropIfBytesAtR0EqualsNoneOf(@NonNull List<byte[]> bytesList,
             ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
-        checkDropCounterRange(cnt);
-        final List<byte[]> deduplicatedList = validateDeduplicateBytesList(bytesList);
-        maybeAddLoadCounterOffset(R1, cnt);
-        String matchLabel = getUniqueLabel();
-        for (byte[] v : deduplicatedList) {
-            String notMatchLabel = getUniqueLabel();
-            addJumpIfBytesAtR0NotEqual(v, notMatchLabel);
-            addJump(matchLabel);
-            defineLabel(notMatchLabel);
-        }
-        addCountAndDrop(cnt);
-        defineLabel(matchLabel);
-        return this;
+        return addCountAndDropOrPassByMatchingBytesAtR0(bytesList, cnt, false /* matchAny */,
+                true /* drop */);
     }
 
     @Override
     public ApfV4Generator addCountAndPassIfBytesAtR0EqualsNoneOf(@NonNull List<byte[]> bytesList,
             ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
-        checkPassCounterRange(cnt);
-        final List<byte[]> deduplicatedList = validateDeduplicateBytesList(bytesList);
-        maybeAddLoadCounterOffset(R1, cnt);
-        String matchLabel = getUniqueLabel();
-        for (byte[] v : deduplicatedList) {
-            String notMatchLabel = getUniqueLabel();
-            addJumpIfBytesAtR0NotEqual(v, notMatchLabel);
-            addJump(matchLabel);
-            defineLabel(notMatchLabel);
-        }
-        addCountAndPass(cnt);
-        defineLabel(matchLabel);
-        return this;
+        return addCountAndDropOrPassByMatchingBytesAtR0(bytesList, cnt, false /* matchAny */,
+                false /* drop */);
     }
 
     /**
