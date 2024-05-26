@@ -23,6 +23,7 @@ import static android.net.metrics.IpReachabilityEvent.PROVISIONING_LOST_ORGANIC;
 
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_MCAST_RESOLICIT_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION;
@@ -64,13 +65,14 @@ import com.android.networkstack.R;
 import com.android.networkstack.metrics.IpReachabilityMonitorMetrics;
 
 import java.io.PrintWriter;
-import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 
 /**
@@ -173,7 +175,7 @@ public class IpReachabilityMonitor {
          *
          * TODO: refactor to something like notifyProvisioningLost(String msg).
          */
-        void notifyLost(InetAddress ip, String logMsg, NudEventType type);
+        void notifyLost(String logMsg, NudEventType type);
     }
 
     /**
@@ -244,6 +246,9 @@ public class IpReachabilityMonitor {
     private final boolean mIgnoreIncompleteIpv6DefaultRouterEnabled;
     private final boolean mMacChangeFailureOnlyAfterRoam;
     private final boolean mIgnoreOrganicNudFailure;
+    private final boolean mIgnoreNeverReachableNeighbor;
+    // A set to track whether a neighbor has ever entered NUD_REACHABLE state before.
+    private final Set<InetAddress> mEverReachableNeighbors = new HashSet<>();
 
     public IpReachabilityMonitor(
             Context context, InterfaceParams ifParams, Handler h, SharedLog log, Callback callback,
@@ -275,6 +280,8 @@ public class IpReachabilityMonitor {
                 IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION);
         mIgnoreOrganicNudFailure = dependencies.isFeatureEnabled(context,
                 IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION);
+        mIgnoreNeverReachableNeighbor = dependencies.isFeatureEnabled(context,
+                IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION);
         mMetricsLog = metricsLog;
         mNetd = netd;
         Preconditions.checkNotNull(mNetd);
@@ -298,6 +305,9 @@ public class IpReachabilityMonitor {
                     if (!mNeighborWatchList.containsKey(event.ip)) return;
 
                     final NeighborEvent prev = mNeighborWatchList.put(event.ip, event);
+                    if (DBG) {
+                        Log.d(TAG, "neighbor went from: " + prev + " to: " + event);
+                    }
 
                     // TODO: Consider what to do with other states that are not within
                     // NeighborEvent#isValid() (i.e. NUD_NONE, NUD_INCOMPLETE).
@@ -307,6 +317,14 @@ public class IpReachabilityMonitor {
                         mLog.w("ALERT neighbor went from: " + prev + " to: " + event);
                         handleNeighborLost(prev, event);
                     } else if (event.nudState == StructNdMsg.NUD_REACHABLE) {
+                        // TODO: do not ignore NUD_REACHABLE events before neighbors are added to
+                        // the watchlist.
+                        // If the NUD_REACHABLE event is received before the neighbor is put in the
+                        // watchlist via updateLinkProperties, it is not recorded in
+                        // mEverReachableNeighbors. This means that if a NUD_FAILURE occurs before
+                        // another NUD_REACHABLE, it is ignored. This race already exists today for
+                        // incomplete IPv6 neighbors.
+                        mEverReachableNeighbors.add(event.ip);
                         handleNeighborReachable(prev, event);
                     }
                 });
@@ -420,12 +438,16 @@ public class IpReachabilityMonitor {
         }
 
         mNeighborWatchList = newNeighborWatchList;
+        // Remove the corresponding neighbor from mEverReachableNeighbors if it was removed from the
+        // watchlist.
+        mEverReachableNeighbors.removeIf(addr -> !newNeighborWatchList.containsKey(addr));
         if (DBG) { Log.d(TAG, "watch: " + describeWatchList()); }
     }
 
     public void clearLinkProperties() {
         mLinkProperties.clear();
         mNeighborWatchList.clear();
+        mEverReachableNeighbors.clear();
         if (DBG) { Log.d(TAG, "clear: " + describeWatchList()); }
     }
 
@@ -443,7 +465,7 @@ public class IpReachabilityMonitor {
             final NudEventType type =
                     getMacAddressChangedEventType(isFromProbe(), isNudFailureDueToRoam());
             mLog.w(logMsg);
-            mCallback.notifyLost(event.ip, logMsg, type);
+            mCallback.notifyLost(logMsg, type);
             logNudFailed(event, type);
             return;
         }
@@ -452,13 +474,9 @@ public class IpReachabilityMonitor {
 
     private boolean shouldIgnoreIncompleteNeighbor(@Nullable final NeighborEvent prev,
             @NonNull final NeighborEvent event) {
-        if (!(event.ip instanceof Inet6Address || event.ip instanceof Inet4Address)) {
-            Log.e(TAG, "Invalid IP address " + event.ip);
-            return false;
-        }
-
-        // If neighbor isn't in the watch list, return false.
-        if (!mNeighborWatchList.containsKey(event.ip)) return false;
+        // mIgnoreNeverReachableNeighbor already takes care of incomplete IPv6 neighbors, so do not
+        // apply this logic.
+        if (mIgnoreNeverReachableNeighbor) return false;
 
         // For on-link IPv4/v6 DNS server or default router that never ever responds to
         // address resolution(e.g. ARP or NS), kernel will send RTM_NEWNEIGH with NUD_FAILED
@@ -471,12 +489,12 @@ public class IpReachabilityMonitor {
             @NonNull final NeighborEvent event) {
         final LinkProperties whatIfLp = new LinkProperties(mLinkProperties);
 
-        InetAddress ip = null;
         for (Map.Entry<InetAddress, NeighborEvent> entry : mNeighborWatchList.entrySet()) {
             // TODO: Consider using NeighborEvent#isValid() here; it's more
             // strict but may interact badly if other entries are somehow in
             // NUD_INCOMPLETE (say, during network attach).
             final NeighborEvent val = entry.getValue();
+            final InetAddress ip = entry.getKey();
 
             // Find all the neighbors that have gone into FAILED state.
             // Ignore entries for which we have never received an event. If there are neighbors
@@ -485,7 +503,12 @@ public class IpReachabilityMonitor {
             // populate the map and the subsequent FAILED event will be processed.
             if (val == null || val.nudState != StructNdMsg.NUD_FAILED) continue;
 
-            ip = entry.getKey();
+            // Also ignore entry for any neighbor which is never ever reachable.
+            // Pretend neighbors that have never been reachable are still there. Leaving them
+            // inside whatIfLp has the benefit that the logic that compares provisioning loss
+            // below works consistently independent of the current event being processed.
+            if (mIgnoreNeverReachableNeighbor && !mEverReachableNeighbors.contains(ip)) continue;
+
             for (RouteInfo route : mLinkProperties.getRoutes()) {
                 if (ip.equals(route.getGateway())) {
                     whatIfLp.removeRoute(route);
@@ -498,6 +521,8 @@ public class IpReachabilityMonitor {
             }
         }
 
+        // TODO: cleanup below code(checking if the incomplete IPv6 neighbor should be ignored)
+        // once the feature of ignoring the neighbor was never ever reachable rolls out.
         final boolean ignoreIncompleteIpv6DnsServer =
                 mIgnoreIncompleteIpv6DnsServerEnabled
                         && isNeighborDnsServer(event)
@@ -544,14 +569,12 @@ public class IpReachabilityMonitor {
                     + ", NUD event type: " + type.name()
                     + (isOrganicNudFailureAndToBeIgnored ? ", to be ignored" : "");
             Log.w(TAG, logMsg);
-            // TODO: remove |ip| when the callback signature no longer has
-            // an InetAddress argument.
             // Notify critical neighbor lost as long as the NUD failures
             // are not from kernel organic or the NUD failure event type is
             // NUD_ORGANIC_FAILED_CRITICAL but the experiment flag is not
             // enabled. Regardless, the event metrics are still recoreded.
             if (!isOrganicNudFailureAndToBeIgnored) {
-                mCallback.notifyLost(ip, logMsg, type);
+                mCallback.notifyLost(logMsg, type);
             }
         }
         logNudFailed(event, type);
@@ -559,11 +582,18 @@ public class IpReachabilityMonitor {
 
     private void maybeRestoreNeighborParameters() {
         for (Map.Entry<InetAddress, NeighborEvent> entry : mNeighborWatchList.entrySet()) {
-            if (DBG) {
-                Log.d(TAG, "neighbour IPv4(v6): " + entry.getKey() + " neighbour state: "
-                        + StructNdMsg.stringForNudState(entry.getValue().nudState));
-            }
             final NeighborEvent val = entry.getValue();
+            final InetAddress ip = entry.getKey();
+            if (DBG) {
+                Log.d(TAG, "neighbour IPv4(v6): " + ip + " neighbour state: "
+                        + (val != null ? StructNdMsg.stringForNudState(val.nudState) : "null"));
+            }
+
+            // Skip the neighbor which is never ever reachable, we ignore the NUD failure for it,
+            // pretend neighbor that has never been reachable is still there no matter of neighbor
+            // event state.
+            if (mIgnoreNeverReachableNeighbor && !mEverReachableNeighbors.contains(ip)) continue;
+
             // If an entry is null, consider that probing for that neighbour has completed.
             if (val == null || val.nudState != StructNdMsg.NUD_REACHABLE) return;
         }
