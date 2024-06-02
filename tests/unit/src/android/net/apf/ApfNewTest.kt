@@ -315,6 +315,12 @@ class ApfNewTest {
             gen.addCountAndPassIfR0LessThan(3, DROPPED_ETH_BROADCAST)
         }
         assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndDropIfR0GreaterThan(3, PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndPassIfR0GreaterThan(3, DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
             gen.addCountAndDropIfBytesAtR0NotEqual(byteArrayOf(1), PASSED_ARP)
         }
         assertFailsWith<IllegalArgumentException> {
@@ -395,6 +401,12 @@ class ApfNewTest {
         }
         assertFailsWith<IllegalArgumentException> {
             v4gen.addCountAndPassIfR0LessThan(3, DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndDropIfR0GreaterThan(3, PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndPassIfR0GreaterThan(3, DROPPED_ETH_BROADCAST)
         }
         assertFailsWith<IllegalArgumentException> {
             v4gen.addCountAndDropIfBytesAtR0NotEqual(byteArrayOf(1), PASSED_ARP)
@@ -1023,6 +1035,28 @@ class ApfNewTest {
         program = getGenerator()
                 .addLoadImmediate(R0, 123)
                 .addCountAndPassIfR0LessThan(124, Counter.PASSED_ARP)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_ARP, incTotal = incTotal)
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 123)
+                .addCountAndDropIfR0GreaterThan(122, Counter.DROPPED_ETH_BROADCAST)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                testPacket,
+                DROPPED_ETH_BROADCAST,
+                incTotal = incTotal
+        )
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 123)
+                .addCountAndPassIfR0GreaterThan(122, Counter.PASSED_ARP)
                 .addPass()
                 .addCountTrampoline()
                 .generate()
@@ -1841,7 +1875,12 @@ class ApfNewTest {
         if (incTotal) {
             cntMap[TOTAL_PACKETS] = cntMap.getOrDefault(TOTAL_PACKETS, 0) + 1
         }
-        assertEquals(cntMap, decodeCountersIntoMap(dataRegion))
+        val errMsg = "Counter is not increased properly. To debug: \n" +
+                     " apf_run --program ${HexDump.toHexString(program)} " +
+                     "--packet ${HexDump.toHexString(pkt)} " +
+                     "--data ${HexDump.toHexString(dataRegion)} --age 0 " +
+                     "${if (version == APF_VERSION_6) "--v6" else "" } --trace  | less \n"
+        assertEquals(cntMap, decodeCountersIntoMap(dataRegion), errMsg)
     }
 
     private fun decodeCountersIntoMap(counterBytes: ByteArray): Map<Counter, Long> {
