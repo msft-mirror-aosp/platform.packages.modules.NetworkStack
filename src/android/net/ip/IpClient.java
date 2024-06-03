@@ -177,6 +177,8 @@ import java.util.StringJoiner;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
@@ -210,6 +212,8 @@ public class IpClient extends StateMachine {
     private final NetworkInformationShim mShim = NetworkInformationShimImpl.newInstance();
     private final IpProvisioningMetrics mIpProvisioningMetrics = new IpProvisioningMetrics();
     private final NetworkQuirkMetrics mNetworkQuirkMetrics;
+
+    private boolean mHasSeenClatInterface = false;
 
     /**
      * Dump all state machine and connectivity packet logs to the specified writer.
@@ -404,8 +408,8 @@ public class IpClient extends StateMachine {
          * Called to indicate that the APF Program & data buffer must be read asynchronously from
          * the wifi driver.
          */
-        public void startReadPacketFilter() {
-            log("startReadPacketFilter()");
+        public void startReadPacketFilter(@NonNull String event) {
+            log("startReadPacketFilter(), event: " + event);
             try {
                 mCallback.startReadPacketFilter();
             } catch (RemoteException e) {
@@ -987,11 +991,16 @@ public class IpClient extends StateMachine {
 
                     @Override
                     public void onClatInterfaceStateUpdate(boolean add) {
-                        // TODO: when clat interface was removed, consider sending a message to
-                        // the IpClient main StateMachine thread, in case "NDO enabled" state
-                        // becomes tied to more things that 464xlat operation.
                         getHandler().post(() -> {
+                            if (mHasSeenClatInterface == add) return;
+                            // Clat interface information is spliced into LinkProperties by
+                            // ConnectivityService, so it cannot be added to the LinkProperties
+                            // here as those propagate back to ConnectivityService.
                             mCallback.setNeighborDiscoveryOffload(add ? false : true);
+                            mHasSeenClatInterface = add;
+                            if (mApfFilter != null) {
+                                mApfFilter.updateClatInterfaceState(add);
+                            }
                         });
                     }
                 },
@@ -1144,7 +1153,7 @@ public class IpClient extends StateMachine {
     }
 
     private boolean isGratuitousArpNaRoamingEnabled() {
-        return mDependencies.isFeatureEnabled(mContext, IPCLIENT_GARP_NA_ROAMING_VERSION);
+        return mDependencies.isFeatureNotChickenedOut(mContext, IPCLIENT_GARP_NA_ROAMING_VERSION);
     }
 
     @VisibleForTesting
@@ -1357,7 +1366,7 @@ public class IpClient extends StateMachine {
             if (apfCapabilities.hasDataAccess()) {
                 // Request a new snapshot, then wait for it.
                 mApfDataSnapshotComplete.close();
-                mCallback.startReadPacketFilter();
+                mCallback.startReadPacketFilter("dumpsys");
                 if (!mApfDataSnapshotComplete.block(1000)) {
                     pw.print("TIMEOUT: DUMPING STALE APF SNAPSHOT");
                 }
@@ -1416,20 +1425,20 @@ public class IpClient extends StateMachine {
     public String apfShellCommand(String cmd, @Nullable String optarg) {
         final long oneDayInMs = 86400 * 1000;
         if (SystemClock.elapsedRealtime() >= oneDayInMs) {
-            return "Error: This test interface requires uptime < 24h";
+            throw new IllegalStateException("Error: This test interface requires uptime < 24h");
         }
 
         // Waiting for a "read" result cannot block the handler thread, since the result gets
         // processed on it. This is test only code, so mApfFilter going away is not a concern.
         if (cmd.equals("read")) {
             if (mApfFilter == null) {
-                return "Error: No active APF filter";
+                throw new IllegalStateException("Error: No active APF filter");
             }
             // Request a new snapshot, then wait for it.
             mApfDataSnapshotComplete.close();
-            mCallback.startReadPacketFilter();
+            mCallback.startReadPacketFilter("shell command");
             if (!mApfDataSnapshotComplete.block(5000 /* ms */)) {
-                return "Error: Failed to read APF program";
+                throw new RuntimeException("Error: Failed to read APF program");
             }
         }
 
@@ -1474,7 +1483,7 @@ public class IpClient extends StateMachine {
                         result.complete(snapshot);
                         break;
                     default:
-                        throw new IllegalArgumentException("Invalid apf read command: " + cmd);
+                        throw new IllegalArgumentException("Invalid apf command: " + cmd);
                 }
             } catch (Exception e) {
                 result.completeExceptionally(e);
@@ -1482,8 +1491,8 @@ public class IpClient extends StateMachine {
         });
 
         try {
-            return result.get();
-        } catch (ExecutionException | InterruptedException e) {
+            return result.get(30, TimeUnit.SECONDS);
+        } catch (ExecutionException | InterruptedException | TimeoutException e) {
             // completeExceptionally is solely used to return error messages back to the user, so
             // the stack trace is not all that interesting. (A similar argument can be made for
             // InterruptedException). Only extract the message from the checked exception.
@@ -2122,8 +2131,17 @@ public class IpClient extends StateMachine {
     // Returns false if we have lost provisioning, true otherwise.
     private boolean handleLinkPropertiesUpdate(boolean sendCallbacks) {
         final LinkProperties newLp = assembleLinkProperties();
+        // LinkProperties.equals just compares if the interface addresses are identical,
+        // it doesn't compare the LinkAddress objects, so it considers two LinkProperties
+        // objects are identical even with different address lifetime. However, we may want
+        // to notify the caller whenever the link address lifetime is updated, especially
+        // after we enable populating the deprecationTime/expirationTime fields. The caller
+        // can get the latest address lifetime from the onLinkPropertiesChange callback.
         if (Objects.equals(newLp, mLinkProperties)) {
-            return true;
+            if (!mPopulateLinkAddressLifetime) return true;
+            if (LinkPropertiesUtils.isIdenticalAllLinkAddresses(newLp, mLinkProperties)) {
+                return true;
+            }
         }
 
         // Set an alarm to wait for IPv6 autoconf via SLAAC to succeed after receiving an RA,
@@ -2373,7 +2391,7 @@ public class IpClient extends StateMachine {
                     mLog,
                     new IpReachabilityMonitor.Callback() {
                         @Override
-                        public void notifyLost(InetAddress ip, String logMsg, NudEventType type) {
+                        public void notifyLost(String logMsg, NudEventType type) {
                             final int version = mCallback.getInterfaceVersion();
                             if (version >= VERSION_ADDED_REACHABILITY_FAILURE) {
                                 final int reason = nudEventTypeToInt(type);
@@ -2512,7 +2530,7 @@ public class IpClient extends StateMachine {
         apfConfig.apfCapabilities = apfCapabilities;
         if (apfCapabilities != null && !SdkLevel.isAtLeastV()
                 && apfCapabilities.apfVersionSupported <= 4) {
-            apfConfig.installableProgramSizeClamp = 2000;
+            apfConfig.installableProgramSizeClamp = 1024;
         }
         apfConfig.multicastFilter = mMulticastFiltering;
         // Get the Configuration for ApfFilter from Context
@@ -2540,6 +2558,7 @@ public class IpClient extends StateMachine {
         }
         apfConfig.shouldHandleLightDoze = mApfShouldHandleLightDoze;
         apfConfig.minMetricsSessionDurationMs = mApfCounterPollingIntervalMs;
+        apfConfig.hasClatInterface = mHasSeenClatInterface;
         return mDependencies.maybeCreateApfFilter(mContext, apfConfig, mInterfaceParams,
                 mCallback, mNetworkQuirkMetrics, mUseNewApfFilter);
     }
@@ -2753,7 +2772,7 @@ public class IpClient extends StateMachine {
         }
         mDhcpClient.sendMessage(DhcpClient.CMD_START_DHCP, new DhcpClient.Configuration(mL2Key,
                 isUsingPreconnection(), options, isManagedWifiProfile,
-                mConfiguration.mHostnameSetting));
+                mConfiguration.mHostnameSetting, mPopulateLinkAddressLifetime));
     }
 
     private boolean hasPermission(String permissionName) {
@@ -3027,6 +3046,13 @@ public class IpClient extends StateMachine {
 
         @Override
         public void enter() {
+            // While it's possible that a stale clat interface still exists when IpClient starts,
+            // such an interface would not be used for the network that IpClient is currently
+            // running on, so it's OK to ignore it. This means that there is no need to check
+            // whether a clat interface exists when IpClient starts - even if one did exist, it's
+            // guaranteed to be stale. As a result, mHasSeenClatInterface can always be set to false
+            // at the beginning.
+            mHasSeenClatInterface = false;
             mApfFilter = maybeCreateApfFilter(mCurrentApfCapabilities);
             // TODO: investigate the effects of any multicast filtering racing/interfering with the
             // rest of this IP configuration startup.
@@ -3128,14 +3154,33 @@ public class IpClient extends StateMachine {
             }
         }
 
+        private void deleteInterfaceAddress(final LinkAddress address) {
+            if (!address.isIpv6()) {
+                // NetlinkUtils.sendRtmDelAddressRequest does not support deleting IPv4 addresses.
+                Log.wtf(TAG, "Deleting IPv4 address not supported " + address);
+                return;
+            }
+            final Inet6Address in6addr = (Inet6Address) address.getAddress();
+            final short plen = (short) address.getPrefixLength();
+            if (!NetlinkUtils.sendRtmDelAddressRequest(mInterfaceParams.index, in6addr, plen)) {
+                Log.e(TAG, "Failed to delete IPv6 address " + address);
+            }
+        }
+
         private void deleteIpv6PrefixDelegationAddresses(final IpPrefix prefix) {
-            for (LinkAddress la : mLinkProperties.getLinkAddresses()) {
-                final InetAddress address = la.getAddress();
-                if (prefix.contains(address)) {
-                    if (!NetlinkUtils.sendRtmDelAddressRequest(mInterfaceParams.index,
-                            (Inet6Address) address, (short) la.getPrefixLength())) {
-                        Log.e(TAG, "Failed to delete IPv6 address " + address.getHostAddress());
-                    }
+            // b/290747921: some kernels require the mngtmpaddr to be deleted first, to prevent the
+            // creation of a new tempaddr.
+            final List<LinkAddress> linkAddresses = mLinkProperties.getLinkAddresses();
+            // delete addresses with IFA_F_MANAGETEMPADDR contained in the prefix.
+            for (LinkAddress la : linkAddresses) {
+                if (hasFlag(la, IFA_F_MANAGETEMPADDR) && prefix.contains(la.getAddress())) {
+                    deleteInterfaceAddress(la);
+                }
+            }
+            // delete all other addresses contained in the prefix.
+            for (LinkAddress la : linkAddresses) {
+                if (!hasFlag(la, IFA_F_MANAGETEMPADDR) && prefix.contains(la.getAddress())) {
+                    deleteInterfaceAddress(la);
                 }
             }
         }
@@ -3467,7 +3512,7 @@ public class IpClient extends StateMachine {
                     break;
 
                 case CMD_UPDATE_APF_DATA_SNAPSHOT:
-                    mCallback.startReadPacketFilter();
+                    mCallback.startReadPacketFilter("polling");
                     sendMessageDelayed(CMD_UPDATE_APF_DATA_SNAPSHOT, mApfCounterPollingIntervalMs);
                     break;
 

@@ -19,6 +19,8 @@ package android.net.apf;
 import android.util.ArrayMap;
 import android.util.Log;
 
+import com.android.internal.annotations.VisibleForTesting;
+
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -46,43 +48,56 @@ public class ApfCounterTracker {
         FILTER_AGE_SECONDS,
         FILTER_AGE_16384THS,
         APF_VERSION,
-        PASSED_ARP,
+        APF_PROGRAM_ID,
+        // TODO: removing PASSED_ARP after remove LegacyApfFilter.java
+        PASSED_ARP,  // see also MIN_PASS_COUNTER below.
+        PASSED_ARP_BROADCAST_REPLY,
+        // TODO: removing PASSED_ARP_NON_IPV4 after remove LegacyApfFilter.java
+        PASSED_ARP_NON_IPV4,
+        PASSED_ARP_REQUEST,
+        PASSED_ARP_UNICAST_REPLY,
+        PASSED_ARP_UNKNOWN,
         PASSED_DHCP,
         PASSED_IPV4,
-        PASSED_IPV6_NON_ICMP,
+        PASSED_IPV4_FROM_DHCPV4_SERVER,
         PASSED_IPV4_UNICAST,
         PASSED_IPV6_ICMP,
+        PASSED_IPV6_NON_ICMP,
+        PASSED_IPV6_NS_MULTIPLE_OPTIONS,
         PASSED_IPV6_UNICAST_NON_ICMP,
-        PASSED_ARP_NON_IPV4,
-        PASSED_ARP_UNKNOWN,
-        PASSED_ARP_UNICAST_REPLY,
         PASSED_NON_IP_UNICAST,
         PASSED_MDNS,
-        PASSED_MLD,
-        DROPPED_ETH_BROADCAST,
+        PASSED_MLD,  // see also MAX_PASS_COUNTER below
+        DROPPED_ETH_BROADCAST,  // see also MIN_DROP_COUNTER below
         DROPPED_RA,
-        DROPPED_GARP_REPLY,
-        DROPPED_ARP_OTHER_HOST,
-        DROPPED_ARP_REQUEST_NO_ADDRESS,
         DROPPED_IPV4_L2_BROADCAST,
         DROPPED_IPV4_BROADCAST_ADDR,
         DROPPED_IPV4_BROADCAST_NET,
         DROPPED_IPV4_MULTICAST,
+        DROPPED_IPV4_NON_DHCP4,
         DROPPED_IPV6_ROUTER_SOLICITATION,
         DROPPED_IPV6_MULTICAST_NA,
         DROPPED_IPV6_MULTICAST,
         DROPPED_IPV6_MULTICAST_PING,
         DROPPED_IPV6_NON_ICMP_MULTICAST,
+        DROPPED_IPV6_NS_INVALID,
+        DROPPED_IPV6_NS_NO_ADDRESS,
+        DROPPED_IPV6_NS_OTHER_HOST,
         DROPPED_802_3_FRAME,
-        DROPPED_ETHERTYPE_DENYLISTED,
-        DROPPED_ARP_REPLY_SPA_NO_HOST,
+        DROPPED_ETHERTYPE_NOT_ALLOWED,
         DROPPED_IPV4_KEEPALIVE_ACK,
         DROPPED_IPV6_KEEPALIVE_ACK,
         DROPPED_IPV4_NATT_KEEPALIVE,
         DROPPED_MDNS,
         DROPPED_IPV4_TCP_PORT7_UNICAST,
         DROPPED_ARP_NON_IPV4,
-        DROPPED_ARP_UNKNOWN;
+        DROPPED_ARP_OTHER_HOST,
+        DROPPED_ARP_REPLY_SPA_NO_HOST,
+        DROPPED_ARP_REQUEST_ANYHOST,
+        DROPPED_ARP_REQUEST_REPLIED,
+        DROPPED_ARP_UNKNOWN,
+        DROPPED_ARP_V6_ONLY,
+        DROPPED_GARP_REPLY;  // see also MAX_DROP_COUNTER below
 
         /**
          * Returns the negative byte offset from the end of the APF data segment for
@@ -106,7 +121,25 @@ public class ApfCounterTracker {
         public static int totalSize() {
             return (Counter.class.getEnumConstants().length - 1) * 4;
         }
+
+        /**
+         * Returns the counter enum based on the offset.
+         */
+        @VisibleForTesting(visibility = VisibleForTesting.Visibility.PACKAGE)
+        public static Counter getCounterEnumFromOffset(int offset) {
+            for (Counter cnt : Counter.class.getEnumConstants()) {
+                if (cnt.offset() == offset) {
+                    return cnt;
+                }
+            }
+            return RESERVED_OOB;
+        }
     }
+
+    public static final Counter MIN_DROP_COUNTER = Counter.DROPPED_ETH_BROADCAST;
+    public static final Counter MAX_DROP_COUNTER = Counter.DROPPED_GARP_REPLY;
+    public static final Counter MIN_PASS_COUNTER = Counter.PASSED_ARP;
+    public static final Counter MAX_PASS_COUNTER = Counter.PASSED_MLD;
 
     private static final String TAG = ApfCounterTracker.class.getSimpleName();
 

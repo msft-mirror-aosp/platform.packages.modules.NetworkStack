@@ -165,8 +165,11 @@ public class ApfTestUtils {
         if (ignoreInterpreterVersion) {
             final int apfVersionIdx = ApfCounterTracker.Counter.totalSize()
                     + ApfCounterTracker.Counter.APF_VERSION.offset();
+            final int apfProgramIdIdx = ApfCounterTracker.Counter.totalSize()
+                    + ApfCounterTracker.Counter.APF_PROGRAM_ID.offset();
             for (int i = 0; i < 4; ++i) {
                 data[apfVersionIdx + i] = 0;
+                data[apfProgramIdIdx + i] = 0;
             }
         }
         // assertArrayEquals() would only print one byte, making debugging difficult.
@@ -288,7 +291,7 @@ public class ApfTestUtils {
      * The test apf filter class.
      */
     public static class TestApfFilter extends ApfFilter implements TestAndroidPacketFilter {
-        public static final byte[] MOCK_MAC_ADDR = {1, 2, 3, 4, 5, 6};
+        public static final byte[] MOCK_MAC_ADDR = {2, 3, 4, 5, 6, 7};
         private static final byte[] MOCK_IPV4_ADDR = {10, 0, 0, 1};
 
         private FileDescriptor mWriteSocket;
