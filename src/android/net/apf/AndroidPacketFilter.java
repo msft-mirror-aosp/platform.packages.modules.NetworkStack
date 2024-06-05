@@ -15,6 +15,7 @@
  */
 package android.net.apf;
 
+import android.annotation.Nullable;
 import android.net.LinkProperties;
 import android.net.NattKeepalivePacketDataParcelable;
 import android.net.TcpKeepalivePacketDataParcelable;
@@ -77,4 +78,24 @@ public interface AndroidPacketFilter {
      * Dump the status of APF.
      */
     void dump(IndentingPrintWriter pw);
+
+    /**
+     * Indicates whether the ApfFilter is currently running / paused for test and debugging
+     * purposes.
+     */
+    boolean isRunning();
+
+    /**
+     * Indicates whether the clat interface is added or removed.
+     */
+    default void updateClatInterfaceState(boolean add) {}
+
+    /** Pause ApfFilter updates for testing purposes. */
+    void pause();
+
+    /** Resume ApfFilter updates for testing purposes. */
+    void resume();
+
+    /** Return hex string of current APF snapshot for testing purposes. */
+    @Nullable String getDataSnapshotHexString();
 }

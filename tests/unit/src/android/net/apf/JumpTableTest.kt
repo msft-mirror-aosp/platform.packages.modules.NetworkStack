@@ -16,6 +16,8 @@
 
 package android.net.apf
 
+import android.net.apf.BaseApfGenerator.MemorySlot
+import android.net.apf.BaseApfGenerator.Register.R0
 import androidx.test.filters.SmallTest
 import androidx.test.runner.AndroidJUnit4
 import com.android.testutils.assertThrows
@@ -34,7 +36,7 @@ import org.mockito.MockitoAnnotations
 class JumpTableTest {
 
     @Mock
-    lateinit var gen: ApfGenerator
+    lateinit var gen: ApfV4Generator
 
     @Before
     fun setUp() {
@@ -44,36 +46,31 @@ class JumpTableTest {
     @Test(expected = NullPointerException::class)
     fun testNullStartLabel() {
         // Can't use "null" because the method is @NonNull.
-        JumpTable(AtomicReference<String>(null).get(), 10)
-    }
-
-    @Test(expected = IllegalArgumentException::class)
-    fun testNegativeSlot() {
-        JumpTable("my_jump_table", -1)
+        JumpTable(AtomicReference<String>(null).get(), MemorySlot.SLOT_0)
     }
 
     @Test(expected = IllegalArgumentException::class)
     fun testSlotTooLarge() {
-        JumpTable("my_jump_table", 13)
+        JumpTable("my_jump_table", MemorySlot.IPV4_HEADER_SIZE)
     }
 
     @Test
     fun testValidSlotNumbers() {
-        JumpTable("my_jump_table", 1)
-        JumpTable("my_jump_table", 10)
-        JumpTable("my_jump_table", 12)
+        JumpTable("my_jump_table", MemorySlot.SLOT_1)
+        JumpTable("my_jump_table", MemorySlot.SLOT_4)
+        JumpTable("my_jump_table", MemorySlot.SLOT_6)
     }
 
     @Test
     fun testGetStartLabel() {
-        assertEquals("xyz", JumpTable("xyz", 3).startLabel)
-        assertEquals("abc", JumpTable("abc", 9).startLabel)
+        assertEquals("xyz", JumpTable("xyz", MemorySlot.SLOT_3).startLabel)
+        assertEquals("abc", JumpTable("abc", MemorySlot.SLOT_5).startLabel)
     }
 
     @Test
     fun testCodeGeneration() {
         val name = "my_jump_table"
-        val slot = 7
+        val slot = MemorySlot.SLOT_7
 
         val j = JumpTable(name, slot)
         j.addLabel("foo")
@@ -94,11 +91,11 @@ class JumpTableTest {
         j.generate(gen)
 
         inOrder.verify(gen).defineLabel(name)
-        inOrder.verify(gen).addLoadFromMemory(ApfGenerator.Register.R0, slot)
+        inOrder.verify(gen).addLoadFromMemory(R0, slot)
         inOrder.verify(gen).addJumpIfR0Equals(0, "foo")
         inOrder.verify(gen).addJumpIfR0Equals(1, "bar")
         inOrder.verify(gen).addJumpIfR0Equals(2, "baz")
-        inOrder.verify(gen).addJump(ApfGenerator.PASS_LABEL)
+        inOrder.verify(gen).addJump(ApfV4Generator.PASS_LABEL)
         inOrder.verifyNoMoreInteractions()
     }
 }

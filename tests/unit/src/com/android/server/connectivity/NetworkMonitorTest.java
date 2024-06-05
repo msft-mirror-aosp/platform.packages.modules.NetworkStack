@@ -81,6 +81,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.junit.Assume.assumeFalse;
 import static org.junit.Assume.assumeTrue;
+import static org.mockito.AdditionalMatchers.aryEq;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -130,6 +131,8 @@ import android.net.PrivateDnsConfigParcel;
 import android.net.Uri;
 import android.net.captiveportal.CaptivePortalProbeResult;
 import android.net.metrics.IpConnectivityLog;
+import android.net.metrics.NetworkEvent;
+import android.net.metrics.ValidationProbeEvent;
 import android.net.networkstack.aidl.NetworkMonitorParameters;
 import android.net.shared.PrivateDnsConfig;
 import android.net.wifi.WifiInfo;
@@ -154,8 +157,8 @@ import android.telephony.TelephonyManager;
 import android.util.ArrayMap;
 
 import androidx.test.filters.SmallTest;
-import androidx.test.runner.AndroidJUnit4;
 
+import com.android.internal.annotations.GuardedBy;
 import com.android.modules.utils.build.SdkLevel;
 import com.android.net.module.util.SharedLog;
 import com.android.networkstack.NetworkStackNotifier;
@@ -177,9 +180,11 @@ import com.android.server.NetworkStackService.NetworkStackServiceManager;
 import com.android.server.connectivity.nano.CellularData;
 import com.android.server.connectivity.nano.DnsEvent;
 import com.android.server.connectivity.nano.WifiData;
+import com.android.testutils.ConcurrentUtils;
 import com.android.testutils.DevSdkIgnoreRule;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreAfter;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo;
+import com.android.testutils.DevSdkIgnoreRunner;
 import com.android.testutils.HandlerUtils;
 
 import com.google.protobuf.nano.MessageNano;
@@ -194,6 +199,7 @@ import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
+import org.mockito.Mockito;
 import org.mockito.MockitoAnnotations;
 import org.mockito.Spy;
 import org.mockito.invocation.InvocationOnMock;
@@ -223,12 +229,15 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Predicate;
 
 import javax.net.ssl.SSLHandshakeException;
 
-@RunWith(AndroidJUnit4.class)
+@DevSdkIgnoreRunner.MonitorThreadLeak
+@RunWith(DevSdkIgnoreRunner.class)
 @SmallTest
 @SuppressLint("NewApi")  // Uses hidden APIs, which the linter would identify as missing APIs.
 public class NetworkMonitorTest {
@@ -272,8 +281,10 @@ public class NetworkMonitorTest {
     private @Mock TcpSocketTracker.Dependencies mTstDependencies;
     private @Mock INetd mNetd;
     private @Mock TcpSocketTracker mTst;
-    private HashSet<WrappedNetworkMonitor> mCreatedNetworkMonitors;
-    private HashSet<BroadcastReceiver> mRegisteredReceivers;
+    @GuardedBy("mCreatedNetworkMonitors")
+    private final HashSet<WrappedNetworkMonitor> mCreatedNetworkMonitors = new HashSet<>();
+    @GuardedBy("mRegisteredReceivers")
+    private final HashSet<BroadcastReceiver> mRegisteredReceivers = new HashSet<>();
     private @Mock Context mMccContext;
     private @Mock Resources mMccResource;
     private @Mock WifiInfo mWifiInfo;
@@ -321,6 +332,8 @@ public class NetworkMonitorTest {
     private static final NetworkAgentConfigShim TEST_AGENT_CONFIG =
             NetworkAgentConfigShimImpl.newInstance(null);
     private static final LinkProperties TEST_LINK_PROPERTIES = new LinkProperties();
+    // Each thread that runs isCaptivePortal could generate 2 more probing threads.
+    private static final int THREAD_QUIT_MAX_RETRY_COUNT = 3;
 
     // Cannot have a static member for the LinkProperties with captive portal API information, as
     // the initializer would crash on Q (the members in LinkProperties were introduced in R).
@@ -564,6 +577,11 @@ public class NetworkMonitorTest {
 
     private FakeDns mFakeDns;
 
+    @GuardedBy("mThreadsToBeCleared")
+    private final ArrayList<Thread> mThreadsToBeCleared = new ArrayList<>();
+    @GuardedBy("mExecutorServiceToBeCleared")
+    private final ArrayList<ExecutorService> mExecutorServiceToBeCleared = new ArrayList<>();
+
     @Before
     public void setUp() throws Exception {
         MockitoAnnotations.initMocks(this);
@@ -578,6 +596,18 @@ public class NetworkMonitorTest {
                 .getSetting(any(), eq(Settings.Global.CAPTIVE_PORTAL_HTTP_URL), any());
         doReturn(TEST_HTTPS_URL).when(mDependencies)
                 .getSetting(any(), eq(Settings.Global.CAPTIVE_PORTAL_HTTPS_URL), any());
+        doAnswer((invocation) -> {
+            synchronized (mThreadsToBeCleared) {
+                mThreadsToBeCleared.add(invocation.getArgument(0));
+            }
+            return null;
+        }).when(mDependencies).onThreadCreated(any());
+        doAnswer((invocation) -> {
+            synchronized (mExecutorServiceToBeCleared) {
+                mExecutorServiceToBeCleared.add(invocation.getArgument(0));
+            }
+            return null;
+        }).when(mDependencies).onExecutorServiceCreated(any());
 
         doReturn(mCleartextDnsNetwork).when(mNetwork).getPrivateDnsBypassingCopy();
 
@@ -603,6 +633,7 @@ public class NetworkMonitorTest {
         doReturn(0).when(mRandom).nextInt();
 
         doReturn(mNetd).when(mTstDependencies).getNetd();
+        doNothing().when(mTst).init(any(), any(), any());
         // DNS probe timeout should not be defined more than half of HANDLER_TIMEOUT_MS. Otherwise,
         // it will fail the test because of timeout expired for querying AAAA and A sequentially.
         doReturn(200).when(mResources)
@@ -657,16 +688,22 @@ public class NetworkMonitorTest {
         mFakeDns.setAnswer(PRIVATE_DNS_PROBE_HOST_SUFFIX, new String[]{"2001:db8::1"}, TYPE_AAAA);
 
         doAnswer((invocation) -> {
-            mRegisteredReceivers.add(invocation.getArgument(0));
+            synchronized (mRegisteredReceivers) {
+                mRegisteredReceivers.add(invocation.getArgument(0));
+            }
             return new Intent();
         }).when(mContext).registerReceiver(any(BroadcastReceiver.class), any());
         doAnswer((invocation) -> {
-            mRegisteredReceivers.add(invocation.getArgument(0));
+            synchronized (mRegisteredReceivers) {
+                mRegisteredReceivers.add(invocation.getArgument(0));
+            }
             return new Intent();
         }).when(mContext).registerReceiver(any(BroadcastReceiver.class), any(), anyInt());
 
         doAnswer((invocation) -> {
-            mRegisteredReceivers.remove(invocation.getArgument(0));
+            synchronized (mRegisteredReceivers) {
+                mRegisteredReceivers.remove(invocation.getArgument(0));
+            }
             return null;
         }).when(mContext).unregisterReceiver(any());
 
@@ -676,25 +713,64 @@ public class NetworkMonitorTest {
         setDataStallEvaluationType(DATA_STALL_EVALUATION_TYPE_DNS);
         setValidDataStallDnsTimeThreshold(TEST_MIN_VALID_STALL_DNS_TIME_THRESHOLD_MS);
         setConsecutiveDnsTimeoutThreshold(5);
-        mCreatedNetworkMonitors = new HashSet<>();
-        mRegisteredReceivers = new HashSet<>();
+    }
+
+    private void quitNetworkMonitors() throws Exception {
+        ConcurrentUtils.quitResources(THREAD_QUIT_MAX_RETRY_COUNT, () -> {
+            synchronized (mCreatedNetworkMonitors) {
+                final ArrayList<WrappedNetworkMonitor> ret =
+                        new ArrayList<>(mCreatedNetworkMonitors);
+                mCreatedNetworkMonitors.clear();
+                return ret;
+            }
+        }, nm -> {
+            nm.notifyNetworkDisconnected();
+            nm.awaitQuit();
+        });
+        synchronized (mRegisteredReceivers) {
+            assertEquals("BroadcastReceiver still registered after disconnect",
+                    0, mRegisteredReceivers.size());
+        }
+        quitThreads();
+        quitExecutorServices();
+    }
+
+    private void quitExecutorServices() throws Exception {
+        ConcurrentUtils.quitExecutorServices(
+                THREAD_QUIT_MAX_RETRY_COUNT,
+                // ExecutorService should already have been terminated by NetworkMonitor.
+                false /* interrupt */,
+                HANDLER_TIMEOUT_MS,
+                () -> {
+                    synchronized (mExecutorServiceToBeCleared) {
+                        final ArrayList<ExecutorService> ret =
+                                new ArrayList<>(mExecutorServiceToBeCleared);
+                        mExecutorServiceToBeCleared.clear();
+                        return ret;
+                    }
+                });
+    }
+
+    private void quitThreads() throws Exception {
+        ConcurrentUtils.quitThreads(
+                THREAD_QUIT_MAX_RETRY_COUNT,
+                true /* interrupt */,
+                HANDLER_TIMEOUT_MS,
+                () -> {
+                    synchronized (mThreadsToBeCleared) {
+                        final ArrayList<Thread> ret = new ArrayList<>(mThreadsToBeCleared);
+                        mThreadsToBeCleared.clear();
+                        return ret;
+                    }
+                });
     }
 
     @After
-    public void tearDown() {
+    public void tearDown() throws Exception {
         mFakeDns.clearAll();
-        // Make a local copy of mCreatedNetworkMonitors because during the iteration below,
-        // WrappedNetworkMonitor#onQuitting will delete elements from it on the handler threads.
-        WrappedNetworkMonitor[] networkMonitors = mCreatedNetworkMonitors.toArray(
-                new WrappedNetworkMonitor[0]);
-        for (WrappedNetworkMonitor nm : networkMonitors) {
-            nm.notifyNetworkDisconnected();
-            nm.awaitQuit();
-        }
-        assertEquals("NetworkMonitor still running after disconnect",
-                0, mCreatedNetworkMonitors.size());
-        assertEquals("BroadcastReceiver still registered after disconnect",
-                0, mRegisteredReceivers.size());
+        quitNetworkMonitors();
+        // Clear mocks to prevent from stubs holding instances and cause memory leaks.
+        Mockito.framework().clearInlineMocks();
     }
 
     private void initHttpConnection(HttpURLConnection connection) {
@@ -777,7 +853,6 @@ public class NetworkMonitorTest {
         @Override
         protected void onQuitting() {
             super.onQuitting();
-            assertTrue(mCreatedNetworkMonitors.remove(this));
             mQuitCv.open();
         }
 
@@ -1099,7 +1174,9 @@ public class NetworkMonitorTest {
         verify(mContext, never()).registerReceiver(receiverCaptor.capture(),
                 argThat(receiver -> ACTION_CONFIGURATION_CHANGED.equals(receiver.getAction(0))));
         nm.start();
-        mCreatedNetworkMonitors.add(nm);
+        synchronized (mCreatedNetworkMonitors) {
+            mCreatedNetworkMonitors.add(nm);
+        }
         HandlerUtils.waitForIdle(nm.getHandler(), HANDLER_TIMEOUT_MS);
         verify(mContext, times(1)).registerReceiver(receiverCaptor.capture(),
                 argThat(receiver -> ACTION_CONFIGURATION_CHANGED.equals(receiver.getAction(0))));
@@ -2654,12 +2731,30 @@ public class NetworkMonitorTest {
     }
 
     @Test
+    public void testTcpSocketTracker_init() throws Exception {
+        setDataStallEvaluationType(DATA_STALL_EVALUATION_TYPE_TCP);
+        final WrappedNetworkMonitor wnm = makeCellMeteredNetworkMonitor();
+        // makeCellMeteredNetworkMonitor() creates the NM first and then assign
+        // new NetworkCapabilities, so notifyNMCreated() will start with a empty NC
+        // then update CELL_METERED_CAPABILITIES in the follow up call.
+        final InOrder inOrder = inOrder(mTst);
+        inOrder.verify(mTst).init(
+                eq(wnm.getHandler()),
+                eq(new LinkProperties()),
+                eq(new NetworkCapabilities(null)));
+        inOrder.verify(mTst).setNetworkCapabilities(eq(CELL_METERED_CAPABILITIES));
+    }
+
+    @Test
     public void testDataStall_setOpportunisticMode() {
         setDataStallEvaluationType(DATA_STALL_EVALUATION_TYPE_TCP);
         WrappedNetworkMonitor wnm = makeCellNotMeteredNetworkMonitor();
         InOrder inOrder = inOrder(mTst);
-        // Initialized with default value.
-        inOrder.verify(mTst).setOpportunisticMode(false);
+        // Initialized.
+        inOrder.verify(mTst).init(
+                eq(wnm.getHandler()),
+                eq(new LinkProperties()),
+                eq(new NetworkCapabilities(null)));
 
         // Strict mode.
         wnm.notifyPrivateDnsSettingsChanged(new PrivateDnsConfig("dns.google", new InetAddress[0]));
@@ -3182,6 +3277,101 @@ public class NetworkMonitorTest {
                 TEST_REDIRECT_URL, 1 /* interactions */);
     }
 
+    private void doLegacyConnectivityLogTest() throws Exception {
+        mFakeDns.setAnswer("www.google.com", () -> {
+            // Make sure the DNS probes take at least 1ms
+            SystemClock.sleep(1);
+            return List.of(parseNumericAddress("2001:db8::443"));
+        }, TYPE_AAAA);
+        mFakeDns.setAnswer(PRIVATE_DNS_PROBE_HOST_SUFFIX, () -> {
+            SystemClock.sleep(1);
+            return List.of(parseNumericAddress("2001:db8::444"));
+        }, TYPE_AAAA);
+        setStatus(mHttpsConnection, 204);
+        setStatus(mHttpConnection, 204);
+
+        mFakeDns.setAnswer("dns6.google", new String[]{"2001:db8::53"}, TYPE_AAAA);
+        WrappedNetworkMonitor wnm = makeCellNotMeteredNetworkMonitor();
+        wnm.notifyPrivateDnsSettingsChanged(new PrivateDnsConfig("dns6.google",
+                new InetAddress[0]));
+        notifyNetworkConnected(wnm, CELL_NOT_METERED_CAPABILITIES);
+        verifyNetworkTestedValidFromPrivateDns(1 /* interactions */);
+
+
+        final ArgumentCaptor<IpConnectivityLog.Event> eventCaptor =
+                ArgumentCaptor.forClass(IpConnectivityLog.Event.class);
+        verify(mLogger, atLeastOnce()).log(eq(mCleartextDnsNetwork),
+                aryEq(CELL_METERED_CAPABILITIES.getTransportTypes()),
+                eventCaptor.capture());
+
+        final List<IpConnectivityLog.Event> events = eventCaptor.getAllValues();
+        final String msg = "Did not find the expected event; events are " + events;
+
+        final int firstValidation = 1 << 8;
+
+        assertHasEvent(msg, NetworkEvent.class, events, 0,
+                e -> e.eventType == NetworkEvent.NETWORK_CONNECTED);
+
+        final int probesStartIndex = 1;
+        assertHasEvent(msg, ValidationProbeEvent.class, events, probesStartIndex,
+                e -> e.probeType == (firstValidation | ValidationProbeEvent.PROBE_DNS)
+                        && e.returnCode == ValidationProbeEvent.DNS_SUCCESS
+                        && e.durationMs >= 1L && e.durationMs < 1000L);
+        // The first probe has to be DNS, but then the order of the next DNS probe and HTTP/HTTPS
+        // probes is unknown.
+        final int httpProbesStartIndex = 2;
+        assertHasEvent(msg, ValidationProbeEvent.class, events, httpProbesStartIndex,
+                e -> e.probeType == (firstValidation | ValidationProbeEvent.PROBE_DNS)
+                        && e.returnCode == ValidationProbeEvent.DNS_SUCCESS
+                        && e.durationMs >= 1L && e.durationMs < 1000L);
+
+        final int httpsProbeIndex = assertHasEvent(msg, ValidationProbeEvent.class, events,
+                httpProbesStartIndex,
+                e -> e.probeType == (firstValidation | ValidationProbeEvent.PROBE_HTTPS)
+                        && e.returnCode == 204);
+
+        assertHasEvent(msg, ValidationProbeEvent.class, events, httpProbesStartIndex,
+                e -> e.probeType == (firstValidation | ValidationProbeEvent.PROBE_HTTP)
+                        && e.returnCode == 204);
+
+        // Private DNS starts after validation, so at least after the HTTPS probe
+        final int privDnsIndex = assertHasEvent(msg, ValidationProbeEvent.class, events,
+                httpsProbeIndex + 1,
+                e -> e.probeType == (firstValidation | ValidationProbeEvent.PROBE_PRIVDNS)
+                        && e.returnCode == ValidationProbeEvent.DNS_SUCCESS
+                        && e.durationMs >= 1L && e.durationMs < 1000L);
+
+        assertHasEvent(msg, NetworkEvent.class, events, privDnsIndex + 1,
+                e -> e.eventType == NetworkEvent.NETWORK_FIRST_VALIDATION_SUCCESS);
+    }
+
+    private static <T> int assertHasEvent(String msg, Class<T> clazz,
+            List<IpConnectivityLog.Event> events, int startIdx,
+            Predicate<T> predicate) {
+        for (int i = startIdx; i < events.size(); i++) {
+            if (events.get(i).getClass().isAssignableFrom(clazz)
+                    && predicate.test((T) events.get(i))) {
+                return i;
+            }
+        }
+        fail(msg + " at startIdx " + startIdx);
+        return -1;
+    }
+
+    @Test
+    public void testLegacyConnectivityLog_SyncDns() throws Exception {
+        doReturn(false).when(mDependencies).isFeatureEnabled(
+                any(), eq(NetworkStackUtils.NETWORKMONITOR_ASYNC_PRIVDNS_RESOLUTION));
+        doLegacyConnectivityLogTest();
+    }
+
+    @Test
+    public void testLegacyConnectivityLog_AsyncDns() throws Exception {
+        doReturn(true).when(mDependencies).isFeatureEnabled(
+                any(), eq(NetworkStackUtils.NETWORKMONITOR_ASYNC_PRIVDNS_RESOLUTION));
+        doLegacyConnectivityLogTest();
+    }
+
     @Test
     public void testExtractCharset() {
         assertEquals(StandardCharsets.UTF_8, extractCharset(null));
@@ -3701,6 +3891,8 @@ public class NetworkMonitorTest {
         // started. If captive portal app receiver is registered, then the size of the registered
         // receivers will be 2. Otherwise, mRegisteredReceivers should only contain 1 configuration
         // change receiver.
-        assertEquals(isPortal ? 2 : 1, mRegisteredReceivers.size());
+        synchronized (mRegisteredReceivers) {
+            assertEquals(isPortal ? 2 : 1, mRegisteredReceivers.size());
+        }
     }
 }

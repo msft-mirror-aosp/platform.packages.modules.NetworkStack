@@ -378,7 +378,7 @@ public class Dhcp6Client extends StateMachine {
         // excluded before scheduling the lease timer.
         int renewTimeout = mReply.t1;
         int rebindTimeout = mReply.t2;
-        final long preferredTimeout = mReply.getMinimalPreferredLifetime();
+        final long deprecationTimeout = mReply.getMinimalPreferredLifetime();
         final long expirationTimeout = mReply.getMinimalValidLifetime();
 
         // rfc8415#section-14.2: if t1 and / or t2 are 0, the client chooses an appropriate value.
@@ -386,10 +386,10 @@ public class Dhcp6Client extends StateMachine {
         // shortest preferred lifetime of the prefixes in the IA_PD that the server is willing to
         // extend, respectively.
         if (renewTimeout == 0) {
-            renewTimeout = (int) (preferredTimeout * 0.5);
+            renewTimeout = (int) (deprecationTimeout * 0.5);
         }
         if (rebindTimeout == 0) {
-            rebindTimeout = (int) (preferredTimeout * 0.8);
+            rebindTimeout = (int) (deprecationTimeout * 0.8);
         }
 
         // Note: message validation asserts that the received t1 <= t2 if both t1 > 0 and t2 > 0.
@@ -748,7 +748,10 @@ public class Dhcp6Client extends StateMachine {
         @Override
         protected boolean sendPacket(int transId, long elapsedTimeMs) {
             final List<IaPrefixOption> toBeRenewed = mReply.getRenewableIaPrefixes();
-            if (toBeRenewed.isEmpty()) return false;
+            if (toBeRenewed.isEmpty()) {
+                if (DBG) Log.d(TAG, "Do not send Renew message due to no renewable prefix.");
+                return false;
+            }
             return sendRenewPacket(transId, elapsedTimeMs, mReply.build(toBeRenewed));
         }
     }
@@ -766,7 +769,10 @@ public class Dhcp6Client extends StateMachine {
         @Override
         protected boolean sendPacket(int transId, long elapsedTimeMs) {
             final List<IaPrefixOption> toBeRebound = mReply.getRenewableIaPrefixes();
-            if (toBeRebound.isEmpty()) return false;
+            if (toBeRebound.isEmpty()) {
+                if (DBG) Log.d(TAG, "Do not send Rebind message due to no renewable prefix.");
+                return false;
+            }
             return sendRebindPacket(transId, elapsedTimeMs, mReply.build(toBeRebound));
         }
     }

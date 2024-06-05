@@ -151,11 +151,6 @@ public class NetworkStackUtils {
             new String [] {"https://www.google.com/generate_204"};
 
     /**
-     * Minimum module version at which to enable the DHCP INIT-REBOOT state.
-     */
-    public static final String DHCP_INIT_REBOOT_VERSION = "dhcp_init_reboot_version";
-
-    /**
      * Minimum module version at which to enable the DHCP Rapid Commit option.
      */
     public static final String DHCP_RAPID_COMMIT_VERSION = "dhcp_rapid_commit_version";
@@ -191,12 +186,6 @@ public class NetworkStackUtils {
     public static final String VALIDATION_METRICS_VERSION = "validation_metrics_version";
 
     /**
-     * Experiment flag to enable sending gratuitous multicast unsolicited Neighbor Advertisements
-     * to propagate new assigned IPv6 GUA as quickly as possible.
-     */
-    public static final String IPCLIENT_GRATUITOUS_NA_VERSION = "ipclient_gratuitous_na_version";
-
-    /**
      * Experiment flag to enable sending Gratuitous APR and Gratuitous Neighbor Advertisement for
      * all assigned IPv4 and IPv6 GUAs after completing L2 roaming.
      */
@@ -204,12 +193,11 @@ public class NetworkStackUtils {
             "ipclient_garp_na_roaming_version";
 
     /**
-     * Experiment flag to check if an on-link IPv6 link local DNS is acceptable. The default flag
-     * value is true, just add this flag for A/B testing to see if this fix works as expected via
-     * experiment rollout.
+     * Experiment flag to enable "mcast_resolicit" neighbor parameter in IpReachabilityMonitor,
+     * set it to 3 by default.
      */
-    public static final String IPCLIENT_ACCEPT_IPV6_LINK_LOCAL_DNS_VERSION =
-            "ipclient_accept_ipv6_link_local_dns_version";
+    public static final String IP_REACHABILITY_MCAST_RESOLICIT_VERSION =
+            "ip_reachability_mcast_resolicit_version";
 
     /**
      * Experiment flag to attempt to ignore the on-link IPv6 DNS server which fails to respond to
@@ -226,6 +214,18 @@ public class NetworkStackUtils {
             "ip_reachability_ignore_incompleted_ipv6_default_router_version";
 
     /**
+     * Experiment flag to treat router MAC address changes as a failure only on roam.
+     */
+    public static final String IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION =
+            "ip_reachability_router_mac_change_failure_only_after_roam_version";
+
+    /**
+     * Experiment flag to ignore all NUD failures from kernel organic.
+     */
+    public static final String IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION =
+            "ip_reachability_ignore_organic_nud_failure_version";
+
+    /**
      * Experiment flag to enable DHCPv6 Prefix Delegation(RFC8415) in IpClient.
      */
     public static final String IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION =
@@ -235,10 +235,12 @@ public class NetworkStackUtils {
      * Experiment flag to enable new ra filter.
      */
     public static final String APF_NEW_RA_FILTER_VERSION = "apf_new_ra_filter_version";
+
     /**
      * Experiment flag to enable the feature of polling counters in Apf.
      */
     public static final String APF_POLLING_COUNTERS_VERSION = "apf_polling_counters_version";
+
     /**
      * Experiment flag to enable the feature of ignoring any individual RA section with lifetime
      * below accept_ra_min_lft sysctl.
@@ -252,14 +254,20 @@ public class NetworkStackUtils {
     public static final String NETWORKMONITOR_ASYNC_PRIVDNS_RESOLUTION =
             "networkmonitor_async_privdns_resolution";
 
-    /**** BEGIN Feature Kill Switch Flags ****/
+    /**
+     * Experiment flag to populate the IP link address lifetime such as deprecationTime and
+     * expirationtTime.
+     */
+    public static final String IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION =
+            "ipclient_populate_link_address_lifetime_version";
 
     /**
-     * Kill switch flag to disable the feature of parsing netlink events from kernel directly
-     * instead from netd aidl interface by flag push.
+     * Experiment flag to support parsing PIO P flag(DHCPv6-PD preferred).
      */
-    public static final String IPCLIENT_PARSE_NETLINK_EVENTS_FORCE_DISABLE =
-            "ipclient_parse_netlink_events_force_disable";
+    public static final String IPCLIENT_DHCPV6_PD_PREFERRED_FLAG_VERSION =
+            "ipclient_dhcpv6_pd_preferred_flag_version";
+
+    /**** BEGIN Feature Kill Switch Flags ****/
 
     /**
      * Kill switch flag to disable the feature of handle light doze mode in Apf.
@@ -356,9 +364,10 @@ public class NetworkStackUtils {
      * Generate an IPv6 address based on the given prefix(/64) and stable interface
      * identifier(EUI64).
      */
+    @Nullable
     public static Inet6Address createInet6AddressFromEui64(@NonNull final IpPrefix prefix,
             @NonNull final byte[] eui64) {
-        if (prefix.getPrefixLength() != 64) {
+        if (prefix.getPrefixLength() > 64) {
             Log.e(TAG, "Invalid IPv6 prefix length " + prefix.getPrefixLength());
             return null;
         }
