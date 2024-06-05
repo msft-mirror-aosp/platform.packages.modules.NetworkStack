@@ -20,15 +20,17 @@ import static android.net.apf.BaseApfGenerator.Rbit.Rbit0;
 import static android.net.apf.BaseApfGenerator.Rbit.Rbit1;
 import static android.net.apf.BaseApfGenerator.Register.R0;
 
-import androidx.annotation.NonNull;
+import android.annotation.NonNull;
 
 import com.android.net.module.util.ByteUtils;
 import com.android.net.module.util.CollectionUtils;
 import com.android.net.module.util.HexDump;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * The base class for APF assembler/generator.
@@ -37,8 +39,9 @@ import java.util.List;
  */
 public abstract class BaseApfGenerator {
 
-    public BaseApfGenerator(int mVersion) {
+    public BaseApfGenerator(int mVersion, boolean mDisableCounterRangeCheck) {
         this.mVersion = mVersion;
+        this.mDisableCounterRangeCheck = mDisableCounterRangeCheck;
     }
 
     /**
@@ -55,7 +58,7 @@ public abstract class BaseApfGenerator {
         // An optional unsigned immediate value can be provided to encode the counter number.
         // If the value is non-zero, the instruction increments the counter.
         // The counter is located (-4 * counter number) bytes from the end of the data region.
-        // It is a U32 big-endian value and is always incremented by 1.
+        // It is a U32 native-endian value and is always incremented by 1.
         // This is more or less equivalent to: lddw R0, -N4; add R0,1; stdw R0, -N4; {pass,drop}
         // e.g. "pass", "pass 1", "drop", "drop 1"
         PASSDROP(0),
@@ -83,7 +86,12 @@ public abstract class BaseApfGenerator {
         JGT(17),   // Compare greater than and branch, e.g. "jgt R0,5,label"
         JLT(18),   // Compare less than and branch, e.g. "jlt R0,5,label"
         JSET(19),  // Compare any bits set and branch, e.g. "jset R0,5,label"
-        JNEBS(20), // Compare not equal byte sequence, e.g. "jnebs R0,5,label,0x1122334455"
+        // Compare not equal byte sequence, e.g. "jnebs R0,5,label,0x1122334455"
+        // NOTE: Only APFv6+ implements R=1 'jbseq' version and multi match
+        // imm1 is jmp target, imm2 is (cnt - 1) * 2048 + compare_len,
+        // which is followed by cnt * compare_len bytes to compare against.
+        // Warning: do not specify the same byte sequence multiple times.
+        JBSMATCH(20),
         EXT(21),   // Followed by immediate indicating ExtendedOpcodes.
         LDDW(22),  // Load 4 bytes from data memory address (register + immediate): "lddw R0, [5]R1"
         STDW(23),  // Store 4 bytes to data memory address (register + immediate): "stdw R0, [5]R1"
@@ -169,7 +177,21 @@ public abstract class BaseApfGenerator {
         //       "jdnsane R0,label,0xc,\002aa\005local\0\0"
 
         JDNSAMATCH(44),
-        JDNSAMATCHSAFE(46);
+        JDNSAMATCHSAFE(46),
+        // Jump if register is [not] one of the list of values
+        // R bit - specifies the register (R0/R1) to test
+        // imm1: Extended opcode
+        // imm2: Jump label offset
+        // imm3(u8): top 5 bits - number of following u8/be16/be32 values - 1
+        //        middle 2 bits - 1..4 length of immediates - 1
+        //        bottom 1 bit  - =0 jmp if in set, =1 if not in set
+        // imm4(imm3 * 1/2/3/4 bytes): the *UNIQUE* values to compare against
+        JONEOF(47),
+        /* Specify length of exception buffer, which is populated on abnormal program termination.
+         * imm1: Extended opcode
+         * imm2(u16): Length of exception buffer (located *immediately* after the program itself)
+         */
+        EXCEPTIONBUFFER(48);
 
         final int value;
 
@@ -180,6 +202,10 @@ public abstract class BaseApfGenerator {
     public enum Register {
         R0,
         R1;
+
+        Register other() {
+            return (this == R0) ? R1 : R0;
+        }
     }
 
     public enum Rbit {
@@ -486,6 +512,22 @@ public abstract class BaseApfGenerator {
         }
 
         /**
+         * Updates exception buffer size.
+         * @param bufSize the new exception buffer size
+         */
+        void updateExceptionBufferSize(int bufSize) throws IllegalInstructionException {
+            if (mOpcode != Opcodes.EXT || mIntImms.get(0).mValue
+                    != ExtendedOpcodes.EXCEPTIONBUFFER.value) {
+                throw new IllegalInstructionException(
+                        "updateExceptionBuffer() is only valid for EXCEPTIONBUFFER opcode");
+            }
+            // Update the buffer size immediate (second imm) value. Due to mValue within
+            // IntImmediate being final, we must remove and re-add the value to apply changes.
+            mIntImms.remove(1);
+            addU16(bufSize);
+        }
+
+        /**
          * @return size of instruction in bytes.
          */
         int size() {
@@ -654,7 +696,7 @@ public abstract class BaseApfGenerator {
     /**
      * Calculate the size of the imm.
      */
-    private static int calculateImmSize(int imm, boolean signed) {
+    static int calculateImmSize(int imm, boolean signed) {
         if (imm == 0) {
             return 0;
         }
@@ -677,7 +719,8 @@ public abstract class BaseApfGenerator {
                         upperBound));
     }
 
-    static void checkPassCounterRange(ApfCounterTracker.Counter cnt) {
+    void checkPassCounterRange(ApfCounterTracker.Counter cnt) {
+        if (mDisableCounterRangeCheck) return;
         if (cnt.value() < ApfCounterTracker.MIN_PASS_COUNTER.value()
                 || cnt.value() > ApfCounterTracker.MAX_PASS_COUNTER.value()) {
             throw new IllegalArgumentException(
@@ -687,7 +730,8 @@ public abstract class BaseApfGenerator {
         }
     }
 
-    static void checkDropCounterRange(ApfCounterTracker.Counter cnt) {
+    void checkDropCounterRange(ApfCounterTracker.Counter cnt) {
+        if (mDisableCounterRangeCheck) return;
         if (cnt.value() < ApfCounterTracker.MIN_DROP_COUNTER.value()
                 || cnt.value() > ApfCounterTracker.MAX_DROP_COUNTER.value()) {
             throw new IllegalArgumentException(
@@ -704,6 +748,11 @@ public abstract class BaseApfGenerator {
     public int programLengthOverEstimate() {
         return updateInstructionOffsets();
     }
+
+    /**
+     * Updates the exception buffer size.
+     */
+    abstract void updateExceptionBufferSize(int programSize) throws IllegalInstructionException;
 
     /**
      * Generate the bytecode for the APF program.
@@ -744,23 +793,66 @@ public abstract class BaseApfGenerator {
         } while (shrunk);
         // Generate bytecode for instructions.
         byte[] bytecode = new byte[total_size];
+        updateExceptionBufferSize(total_size);
         for (Instruction instruction : mInstructions) {
             instruction.generate(bytecode);
         }
         return bytecode;
     }
 
-    /**
-     * Returns true if the BaseApfGenerator supports the specified {@code version}, otherwise false.
-     */
-    public static boolean supportsVersion(int version) {
-        return version >= MIN_APF_VERSION;
+    void validateBytes(byte[] bytes) {
+        Objects.requireNonNull(bytes);
+        if (bytes.length > 2047) {
+            throw new IllegalArgumentException(
+                    "bytes array size must be in less than 2048, current size: " + bytes.length);
+        }
+    }
+
+    List<byte[]> validateDeduplicateBytesList(List<byte[]> bytesList) {
+        if (bytesList == null || bytesList.size() == 0) {
+            throw new IllegalArgumentException(
+                    "bytesList size must > 0, current size: "
+                            + (bytesList == null ? "null" : bytesList.size()));
+        }
+        for (byte[] bytes : bytesList) {
+            validateBytes(bytes);
+        }
+        final int elementSize = bytesList.get(0).length;
+        if (elementSize > 2097151) { // 2 ^ 21 - 1
+            throw new IllegalArgumentException("too many elements");
+        }
+        List<byte[]> deduplicatedList = new ArrayList<>();
+        deduplicatedList.add(bytesList.get(0));
+        for (int i = 1; i < bytesList.size(); ++i) {
+            if (elementSize != bytesList.get(i).length) {
+                throw new IllegalArgumentException("byte arrays in the set have different size");
+            }
+            int j = 0;
+            for (; j < deduplicatedList.size(); ++j) {
+                if (Arrays.equals(bytesList.get(i), deduplicatedList.get(j))) {
+                    break;
+                }
+            }
+            if (j == deduplicatedList.size()) {
+                deduplicatedList.add(bytesList.get(i));
+            }
+        }
+        return deduplicatedList;
     }
 
     void requireApfVersion(int minimumVersion) throws IllegalInstructionException {
         if (mVersion < minimumVersion) {
             throw new IllegalInstructionException("Requires APF >= " + minimumVersion);
         }
+    }
+
+    private int mLabelCount = 0;
+
+    /**
+     * Return a unique label string.
+     */
+    protected String getUniqueLabel() {
+        return "LABEL_" + mLabelCount++;
     }
 
     /**
@@ -782,45 +874,79 @@ public abstract class BaseApfGenerator {
      */
     public static final int MEMORY_SLOTS = 16;
 
-    /**
-     * Memory slot number that is prefilled with the IPv4 header length.
-     * Note that this memory slot may be overwritten by a program that
-     * executes stores to this memory slot. This must be kept in sync with
-     * the APF interpreter.
-     */
-    public static final int IPV4_HEADER_SIZE_MEMORY_SLOT = 13;
+    public enum MemorySlot {
+        /**
+         * These slots start with value 0 and are unused.
+         */
+        SLOT_0(0),
+        SLOT_1(1),
+        SLOT_2(2),
+        SLOT_3(3),
+        SLOT_4(4),
+        SLOT_5(5),
+        SLOT_6(6),
+        SLOT_7(7),
 
-    /**
-     * Memory slot number that is prefilled with the size of the packet being filtered in bytes.
-     * Note that this memory slot may be overwritten by a program that
-     * executes stores to this memory slot. This must be kept in sync with the APF interpreter.
-     */
-    public static final int PACKET_SIZE_MEMORY_SLOT = 14;
+        /**
+         * First memory slot containing prefilled (ie. non-zero) values.
+         * Can be used in range comparisons to determine if memory slot index
+         * is within prefilled slots.
+         */
+        FIRST_PREFILLED(8),
 
-    /**
-     * Memory slot number that is prefilled with the age of the filter in seconds. The age of the
-     * filter is the time since the filter was installed until now.
-     * Note that this memory slot may be overwritten by a program that
-     * executes stores to this memory slot. This must be kept in sync with the APF interpreter.
-     */
-    public static final int FILTER_AGE_MEMORY_SLOT = 15;
+        /**
+         * Slot #8 is used for the APFv6+ version.
+         */
+        APF_VERSION(8),
 
-    /**
-     * First memory slot containing prefilled values. Can be used in range comparisons to determine
-     * if memory slot index is within prefilled slots.
-     */
-    public static final int FIRST_PREFILLED_MEMORY_SLOT = IPV4_HEADER_SIZE_MEMORY_SLOT;
+        /**
+         * Slot #9 is used for the filter age in 16384ths of a second (APFv6+).
+         */
+        FILTER_AGE_16384THS(9),
 
-    /**
-     * Last memory slot containing prefilled values. Can be used in range comparisons to determine
-     * if memory slot index is within prefilled slots.
-     */
-    public static final int LAST_PREFILLED_MEMORY_SLOT = FILTER_AGE_MEMORY_SLOT;
+        /**
+         * Slot #10 starts at zero, implicitly used as tx buffer output pointer.
+         */
+        TX_BUFFER_OUTPUT_POINTER(10),
+
+        /**
+         * Slot #11 is used for the program byte code size (APFv2+).
+         */
+        PROGRAM_SIZE(11),
+
+        /**
+         * Slot #12 is used for the total RAM length.
+         */
+        RAM_LEN(12),
+
+        /**
+         * Slot #13 is the IPv4 header length (in bytes).
+         */
+        IPV4_HEADER_SIZE(13),
+
+        /**
+         * Slot #14 is the size of the packet being filtered in bytes.
+         */
+        PACKET_SIZE(14),
+
+        /**
+         * Slot #15 is the age of the filter (time since filter was installed
+         * till now) in seconds.
+         */
+        FILTER_AGE_SECONDS(15);
+
+        public final int value;
+
+        MemorySlot(int value) {
+            this.value = value;
+        }
+    }
 
     // This version number syncs up with APF_VERSION in hardware/google/apf/apf_interpreter.h
-    public static final int MIN_APF_VERSION = 2;
-    public static final int MIN_APF_VERSION_IN_DEV = 5;
+    public static final int APF_VERSION_2 = 2;
+    public static final int APF_VERSION_3 = 3;
     public static final int APF_VERSION_4 = 4;
+    public static final int APF_VERSION_6 = 6000;
 
 
     final ArrayList<Instruction> mInstructions = new ArrayList<Instruction>();
@@ -829,4 +955,5 @@ public abstract class BaseApfGenerator {
     private final Instruction mPassLabel = new Instruction(Opcodes.LABEL);
     public final int mVersion;
     public boolean mGenerated;
+    private final boolean mDisableCounterRangeCheck;
 }

@@ -46,10 +46,6 @@ package {
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
-// In some branches, this may be module_current instead of module_34 if the SDK prebuilts are not
-// yet dropped there, meaning module_34 cannot be used yet.
-module_34_version = "module_34"
-
 // TODO: remove this default and replace with ConnectivityNextEnableDefaults. This will need to be
 // done separately in each branch due to merge conflicts.
 // Defaults to enable/disable java targets that depend on
@@ -88,7 +84,7 @@ java_defaults {
 java_defaults {
     name: "NetworkStackReleaseApiLevel",
     defaults: ["NetworkStackReleaseTargetSdk"],
-    sdk_version: module_34_version,
+    sdk_version: "module_current",
     libs: [
         "framework-configinfrastructure",
         "framework-connectivity.stubs.module_lib",
@@ -176,6 +172,7 @@ java_library {
         "NetworkStackApi29Shims",
         "NetworkStackApi30Shims",
         "framework-connectivity",
+        "framework-wifi",
     ],
     sdk_version: "module_31",
     visibility: ["//visibility:private"],
@@ -196,6 +193,7 @@ java_library {
         "framework-connectivity",
         "framework-connectivity-t.stubs.module_lib",
         "framework-tethering",
+        "framework-wifi",
     ],
     sdk_version: "module_33",
     visibility: ["//visibility:private"],
@@ -217,8 +215,9 @@ java_library {
         "framework-connectivity",
         "framework-connectivity-t.stubs.module_lib",
         "framework-tethering",
+        "framework-wifi",
     ],
-    sdk_version: module_34_version,
+    sdk_version: "module_34",
     visibility: ["//visibility:private"],
 }
 
@@ -249,6 +248,7 @@ java_library {
         "framework-connectivity",
         "framework-connectivity-t.stubs.module_lib",
         "framework-tethering",
+        "framework-wifi",
         "android.net.ipsec.ike.stubs.module_lib",
     ],
     sdk_version: "module_current",
@@ -406,6 +406,30 @@ java_library {
     // its contents explicitly.
     visibility: [
         "//packages/modules/Connectivity/Tethering/tests/integration",
+        "//packages/modules/Connectivity/tests/cts/net",
+    ],
+}
+
+java_library {
+    name: "ApfGeneratorLib",
+    defaults: ["NetworkStackReleaseApiLevel"],
+    srcs: [
+        "src/android/net/apf/ApfConstants.java",
+        "src/android/net/apf/ApfCounterTracker.java",
+        "src/android/net/apf/ApfV4Generator.java",
+        "src/android/net/apf/ApfV4GeneratorBase.java",
+        "src/android/net/apf/ApfV6Generator.java",
+        "src/android/net/apf/ApfV6GeneratorBase.java",
+        "src/android/net/apf/BaseApfGenerator.java",
+    ],
+    libs: [
+        "androidx.annotation_annotation",
+        "framework-annotations-lib",
+    ],
+    static_libs: [
+        "net-utils-framework-common",
+    ],
+    visibility: [
         "//packages/modules/Connectivity/tests/cts/net",
     ],
 }

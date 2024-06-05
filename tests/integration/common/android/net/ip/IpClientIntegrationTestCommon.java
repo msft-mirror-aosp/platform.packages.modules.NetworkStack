@@ -79,6 +79,11 @@ import static com.android.net.module.util.NetworkStackConstants.NEIGHBOR_ADVERTI
 import static com.android.net.module.util.NetworkStackConstants.NEIGHBOR_ADVERTISEMENT_FLAG_SOLICITED;
 import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_AUTONOMOUS;
 import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_ON_LINK;
+import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION;
 import static com.android.testutils.MiscAsserts.assertThrows;
 import static com.android.testutils.ParcelUtils.parcelingRoundTrip;
@@ -250,6 +255,7 @@ import java.io.FileDescriptor;
 import java.io.FileReader;
 import java.io.IOException;
 import java.lang.annotation.ElementType;
+import java.lang.annotation.Repeatable;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
@@ -325,6 +331,20 @@ public abstract class IpClientIntegrationTestCommon {
     @Target({ElementType.METHOD})
     private @interface SignatureRequiredTest {
         String reason();
+    }
+
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target({ElementType.METHOD})
+    @Repeatable(FlagArray.class)
+    @interface Flag {
+        String name();
+        boolean enabled();
+    }
+
+    @Target({ElementType.METHOD})
+    @Retention(RetentionPolicy.RUNTIME)
+    @interface FlagArray {
+        Flag[] value();
     }
 
     /**** BEGIN signature required test members ****/
@@ -405,14 +425,10 @@ public abstract class IpClientIntegrationTestCommon {
     private static final int DHCP6_HEADER_OFFSET = ETH_HEADER_LEN + IPV6_HEADER_LEN
             + UDP_HEADER_LEN;
 
-    private static final Inet4Address SERVER_ADDR =
-            (Inet4Address) InetAddresses.parseNumericAddress("192.168.1.100");
-    private static final Inet4Address CLIENT_ADDR =
-            (Inet4Address) InetAddresses.parseNumericAddress("192.168.1.2");
-    private static final Inet4Address CLIENT_ADDR_NEW =
-            (Inet4Address) InetAddresses.parseNumericAddress("192.168.1.3");
-    private static final Inet4Address INADDR_ANY =
-            (Inet4Address) InetAddresses.parseNumericAddress("0.0.0.0");
+    private static final Inet4Address SERVER_ADDR = ipv4Addr("192.168.1.100");
+    private static final Inet4Address CLIENT_ADDR = ipv4Addr("192.168.1.2");
+    private static final Inet4Address CLIENT_ADDR_NEW = ipv4Addr("192.168.1.3");
+    private static final Inet4Address INADDR_ANY = ipv4Addr("0.0.0.0");
     private static final int PREFIX_LENGTH = 24;
     private static final Inet4Address NETMASK = getPrefixMaskAsInet4Address(PREFIX_LENGTH);
     private static final Inet4Address BROADCAST_ADDR = getBroadcastAddress(
@@ -427,8 +443,7 @@ public abstract class IpClientIntegrationTestCommon {
     private static final int TEST_MIN_MTU = 1280;
     private static final MacAddress ROUTER_MAC = MacAddress.fromString("00:1A:11:22:33:44");
     private static final byte[] ROUTER_MAC_BYTES = ROUTER_MAC.toByteArray();
-    private static final Inet6Address ROUTER_LINK_LOCAL =
-                (Inet6Address) InetAddresses.parseNumericAddress("fe80::1");
+    private static final Inet6Address ROUTER_LINK_LOCAL = ipv6Addr("fe80::1");
     private static final byte[] ROUTER_DUID = new byte[] {
             // type: Link-layer address, hardware type: EUI64(27)
             (byte) 0x00, (byte) 0x03, (byte) 0x00, (byte) 0x1b,
@@ -683,6 +698,18 @@ public abstract class IpClientIntegrationTestCommon {
         return !useNetworkStackSignature() && mIsSignatureRequiredTest;
     }
 
+    private static InetAddress ipAddr(String addr) {
+        return InetAddresses.parseNumericAddress(addr);
+    }
+
+    private static Inet4Address ipv4Addr(String addr) {
+        return (Inet4Address) ipAddr(addr);
+    }
+
+    private static Inet6Address ipv6Addr(String addr) {
+        return (Inet6Address) ipAddr(addr);
+    }
+
     private void setDhcpFeatures(final boolean isRapidCommitEnabled,
             final boolean isDhcpIpConflictDetectEnabled) {
         setFeatureEnabled(NetworkStackUtils.DHCP_RAPID_COMMIT_VERSION, isRapidCommitEnabled);
@@ -716,20 +743,10 @@ public abstract class IpClientIntegrationTestCommon {
         setFeatureEnabled(NetworkStackUtils.IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION,
                 true /* isDhcp6PrefixDelegationEnabled */);
 
-        // Enable populating the IP Link Address lifetime.
-        setFeatureEnabled(NetworkStackUtils.IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION,
-                true /* enabled */);
-
-        // Disable the experiment flag IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION
-        // for testIpReachabilityMonitor_incompleteIpv6DnsServerInDualStack_flagoff testcase, given
-        // the experiment flag is read at IpReachabilityMonitor constructor so we have to turn it
-        // off before creating the IpClient instance.
-        // TODO: cleanup this code as well when cleaning up the experiment flag.
-        if (testMethodName.equals(
-                "testIpReachabilityMonitor_incompleteIpv6DnsServerInDualStack_flagoff")) {
-            setFeatureEnabled(
-                    NetworkStackUtils.IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION,
-                    false /* enabled */);
+        // Set flags based on test method annotations.
+        final Flag[] flags = testMethod.getAnnotationsByType(Flag.class);
+        for (Flag flag : flags) {
+            setFeatureEnabled(flag.name(), flag.enabled());
         }
 
         setUpTapInterface();
@@ -3064,8 +3081,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     private LinkProperties performDualStackProvisioning() throws Exception {
-        final Inet6Address dnsServer =
-                (Inet6Address) InetAddresses.parseNumericAddress(IPV6_OFF_LINK_DNS_SERVER);
+        final Inet6Address dnsServer = ipv6Addr(IPV6_OFF_LINK_DNS_SERVER);
         final ByteBuffer pio = buildPioOption(3600, 1800, "2001:db8:1::/64");
         final ByteBuffer rdnss = buildRdnssOption(3600, IPV6_OFF_LINK_DNS_SERVER);
         final ByteBuffer slla = buildSllaOption();
@@ -4240,10 +4256,9 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
+    @Flag(name = IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION, enabled = true)
     public void testIpReachabilityMonitor_ignoreIpv4DefaultRouterOrganicNudFailure()
             throws Exception {
-        setFeatureEnabled(NetworkStackUtils.IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION,
-                true /* ignoreOrganicNudFailure */);
         prepareIpReachabilityMonitorIpv4AddressResolutionTest();
 
         ArpPacket packet;
@@ -4254,10 +4269,9 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
+    @Flag(name = IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION, enabled = false)
     public void testIpReachabilityMonitor_ignoreIpv4DefaultRouterOrganicNudFailure_flagoff()
             throws Exception {
-        setFeatureEnabled(NetworkStackUtils.IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION,
-                false /* ignoreOrganicNudFailure */);
         prepareIpReachabilityMonitorIpv4AddressResolutionTest();
 
         ArpPacket packet;
@@ -4280,28 +4294,24 @@ public abstract class IpClientIntegrationTestCommon {
         socket.send(pkt);
     }
 
-    private void runIpReachabilityMonitorAddressResolutionTest(final String dnsServer,
-            final Inet6Address targetIp,
-            final boolean isIgnoreIncompleteIpv6DnsServerEnabled,
-            final boolean isIgnoreIncompleteIpv6DefaultRouterEnabled,
-            final boolean isIgnoreOrganicNudFailureEnabled,
-            final boolean expectNeighborLost) throws Exception {
+    private void prepareIpReachabilityMonitorAddressResolutionTest(final String dnsServer,
+            final Inet6Address targetIp) throws Exception {
         mNetworkAgentThread =
                 new HandlerThread(IpClientIntegrationTestCommon.class.getSimpleName());
         mNetworkAgentThread.start();
 
         setDhcpFeatures(true /* isRapidCommitEnabled */,
                 false /* isDhcpIpConflictDetectEnabled */);
-        setFeatureEnabled(
-                NetworkStackUtils.IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION,
-                isIgnoreIncompleteIpv6DnsServerEnabled);
-        setFeatureEnabled(
-                NetworkStackUtils.IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION,
-                isIgnoreIncompleteIpv6DefaultRouterEnabled);
-        setFeatureEnabled(
-                NetworkStackUtils.IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION,
-                isIgnoreOrganicNudFailureEnabled);
         final ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
+                // We've found that mCm.shouldAvoidBadWifi() has a flaky behavior in the root test,
+                // probably due to the sim card in the DUT. it doesn't occur in the siganture test
+                // since we mock the return value directly. As a result, sometimes
+                // IpReachabilityMonitor#avoidingBadLinks() returns false, it caused the expected
+                // onReachabilityFailure callback wasn't triggered on the test. In order to make
+                // the root test more stable, do not use MultinetworkPolicyTracker only for IPv6
+                // neighbor reachability checking relevant test cases, that guarantees
+                // avoidingBadLinks() always returns true which is expected.
+                .withoutMultinetworkPolicyTracker()
                 .build();
         startIpClientProvisioning(config);
         verify(mCb, timeout(TEST_TIMEOUT_MS)).setFallbackMulticastFilter(true);
@@ -4315,8 +4325,7 @@ public abstract class IpClientIntegrationTestCommon {
             options.add(buildSllaOption());                         // SLLA
         }
         final ByteBuffer ra = buildRaPacket(options.toArray(new ByteBuffer[options.size()]));
-        final Inet6Address dnsServerIp =
-                (Inet6Address) InetAddresses.parseNumericAddress(dnsServer);
+        final Inet6Address dnsServerIp = ipv6Addr(dnsServer);
         final LinkProperties lp = performDualStackProvisioning(ra, dnsServerIp);
         runAsShell(MANAGE_TEST_NETWORKS, () -> createTestNetworkAgentAndRegister(lp));
 
@@ -4327,6 +4336,12 @@ public abstract class IpClientIntegrationTestCommon {
         final byte[] data = new byte[100];
         random.nextBytes(data);
         sendUdpPacketToNetwork(mNetworkAgent.getNetwork(), dnsServerIp, 1234 /* port */, data);
+    }
+
+    private void runIpReachabilityMonitorAddressResolutionTest(final String dnsServer,
+            final Inet6Address targetIp,
+            final boolean expectNeighborLost) throws Exception {
+        prepareIpReachabilityMonitorAddressResolutionTest(dnsServer, targetIp);
 
         // Wait for the multicast NSes but never respond to them, that results in the on-link
         // DNS gets lost and onReachabilityLost callback will be invoked.
@@ -4352,94 +4367,179 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION, enabled = true)
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION, enabled = false)
     public void testIpReachabilityMonitor_incompleteIpv6DnsServerInDualStack() throws Exception {
-        final Inet6Address targetIp =
-                (Inet6Address) InetAddresses.parseNumericAddress(IPV6_ON_LINK_DNS_SERVER);
+        final Inet6Address targetIp = ipv6Addr(IPV6_ON_LINK_DNS_SERVER);
         runIpReachabilityMonitorAddressResolutionTest(IPV6_ON_LINK_DNS_SERVER, targetIp,
-                true /* isIgnoreIncompleteIpv6DnsServerEnabled */,
-                false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
-                false /* isIgnoreOrganicNudFailureEnabled */,
                 false /* expectNeighborLost */);
     }
 
     @Test
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION, enabled = false)
     public void testIpReachabilityMonitor_incompleteIpv6DnsServerInDualStack_flagoff()
             throws Exception {
-        final Inet6Address targetIp =
-                (Inet6Address) InetAddresses.parseNumericAddress(IPV6_ON_LINK_DNS_SERVER);
+        final Inet6Address targetIp = ipv6Addr(IPV6_ON_LINK_DNS_SERVER);
         runIpReachabilityMonitorAddressResolutionTest(IPV6_ON_LINK_DNS_SERVER, targetIp,
-                false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
-                false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
-                false /* isIgnoreOrganicNudFailureEnabled */,
                 true /* expectNeighborLost */);
     }
 
     @Test
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION, enabled = true)
+    @Flag(name = IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION, enabled = false)
     public void testIpReachabilityMonitor_incompleteIpv6DefaultRouterInDualStack()
             throws Exception {
         runIpReachabilityMonitorAddressResolutionTest(IPV6_OFF_LINK_DNS_SERVER,
                 ROUTER_LINK_LOCAL /* targetIp */,
-                false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
-                true /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
-                false /* isIgnoreOrganicNudFailureEnabled */,
                 false /* expectNeighborLost */);
     }
 
     @Test
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION, enabled = false)
     public void testIpReachabilityMonitor_incompleteIpv6DefaultRouterInDualStack_flagoff()
             throws Exception {
         runIpReachabilityMonitorAddressResolutionTest(IPV6_OFF_LINK_DNS_SERVER,
                 ROUTER_LINK_LOCAL /* targetIp */,
-                false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
-                false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
-                false /* isIgnoreOrganicNudFailureEnabled */,
                 true /* expectNeighborLost */);
     }
 
     @Test
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION, enabled = true)
     public void testIpReachabilityMonitor_ignoreOnLinkIpv6DnsOrganicNudFailure()
             throws Exception {
-        final Inet6Address targetIp =
-                (Inet6Address) InetAddresses.parseNumericAddress(IPV6_ON_LINK_DNS_SERVER);
+        final Inet6Address targetIp = ipv6Addr(IPV6_ON_LINK_DNS_SERVER);
         runIpReachabilityMonitorAddressResolutionTest(IPV6_ON_LINK_DNS_SERVER, targetIp,
-                false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
-                false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
-                true /* isIgnoreOrganicNudFailureEnabled */,
                 false /* expectNeighborLost */);
     }
 
     @Test
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION, enabled = false)
     public void testIpReachabilityMonitor_ignoreOnLinkIpv6DnsOrganicNudFailure_flagoff()
             throws Exception {
-        final Inet6Address targetIp =
-                (Inet6Address) InetAddresses.parseNumericAddress(IPV6_ON_LINK_DNS_SERVER);
+        final Inet6Address targetIp = ipv6Addr(IPV6_ON_LINK_DNS_SERVER);
         runIpReachabilityMonitorAddressResolutionTest(IPV6_ON_LINK_DNS_SERVER, targetIp,
-                false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
-                false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
-                false /* isIgnoreOrganicNudFailureEnabled */,
                 true /* expectNeighborLost */);
     }
 
     @Test
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION, enabled = true)
     public void testIpReachabilityMonitor_ignoreIpv6DefaultRouterOrganicNudFailure()
             throws Exception {
         runIpReachabilityMonitorAddressResolutionTest(IPV6_OFF_LINK_DNS_SERVER,
                 ROUTER_LINK_LOCAL /* targetIp */,
-                false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
-                false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
-                true /* isIgnoreOrganicNudFailureEnabled */,
                 false /* expectNeighborLost */);
     }
 
     @Test
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION, enabled = false)
     public void testIpReachabilityMonitor_ignoreIpv6DefaultRouterOrganicNudFailure_flagoff()
             throws Exception {
         runIpReachabilityMonitorAddressResolutionTest(IPV6_OFF_LINK_DNS_SERVER,
                 ROUTER_LINK_LOCAL /* targetIp */,
-                false /* isIgnoreIncompleteIpv6DnsServerEnabled */,
-                false /* isIgnoreIncompleteIpv6DefaultRouterEnabled */,
-                false /* isIgnoreOrganicNudFailureEnabled */,
                 true /* expectNeighborLost */);
+    }
+
+    private void runIpReachabilityMonitorEverReachableIpv6NeighborTest(final String dnsServer,
+            final Inet6Address targetIp) throws Exception {
+        prepareIpReachabilityMonitorAddressResolutionTest(dnsServer, targetIp);
+
+        // Simulate the default router/DNS was reachable by responding to multicast NS(not for DAD).
+        NeighborSolicitation ns;
+        while ((ns = getNextNeighborSolicitation()) != null) {
+            if (ns.ipv6Hdr.dstIp.isMulticastAddress() // Solicited-node multicast address
+                    && ns.nsHdr.target.equals(targetIp)) {
+                final ByteBuffer na = NeighborAdvertisement.build(ROUTER_MAC /* srcMac */,
+                        ns.ethHdr.srcMac /* dstMac */, ROUTER_LINK_LOCAL /* srcIp */,
+                        ns.ipv6Hdr.srcIp /* dstIp */,
+                        NEIGHBOR_ADVERTISEMENT_FLAG_ROUTER | NEIGHBOR_ADVERTISEMENT_FLAG_SOLICITED,
+                        targetIp);
+                mPacketReader.sendResponse(na);
+                break;
+            }
+        }
+
+        // Trigger the NUD probe manually by sending CMD_CONFIRM command, this will force to start
+        // probing for all neighbors in the watchlist including default router and on-link DNS.
+        mIIpClient.confirmConfiguration();
+
+        // Wait for the next unicast NS probes, but don't respond to them, which should trigger
+        // reachability failure callback because the probe status is from probed to failed, rather
+        // than incomplete to failed.
+        while ((ns = getNextNeighborSolicitation()) != null) {
+            // Respond to NS for default router, it's used to avoid triggering multiple
+            // onReachabilityFailure callbacks.
+            if (!targetIp.equals(ROUTER_LINK_LOCAL)) {
+                final ByteBuffer na = NeighborAdvertisement.build(ROUTER_MAC /* srcMac */,
+                        ns.ethHdr.srcMac /* dstMac */, ROUTER_LINK_LOCAL /* srcIp */,
+                        ns.ipv6Hdr.srcIp /* dstIp */,
+                        NEIGHBOR_ADVERTISEMENT_FLAG_ROUTER | NEIGHBOR_ADVERTISEMENT_FLAG_SOLICITED,
+                        ROUTER_LINK_LOCAL);
+                mPacketReader.sendResponse(na);
+            }
+        }
+        assertNotifyNeighborLost(targetIp, NudEventType.NUD_CONFIRM_FAILED_CRITICAL);
+    }
+
+    @Test
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION, enabled = true)
+    @Flag(name = IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION, enabled = false)
+    public void testIpReachabilityMonitor_ignoreIpv6DefaultRouter_everReachable() throws Exception {
+        runIpReachabilityMonitorEverReachableIpv6NeighborTest(IPV6_OFF_LINK_DNS_SERVER,
+                ROUTER_LINK_LOCAL /* targetIp */);
+    }
+
+    @Test
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION, enabled = true)
+    @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION, enabled = false)
+    public void testIpReachabilityMonitor_ignoreIpv6Dns_everReachable() throws Exception {
+        runIpReachabilityMonitorEverReachableIpv6NeighborTest(IPV6_ON_LINK_DNS_SERVER,
+                ipv6Addr(IPV6_ON_LINK_DNS_SERVER) /* targetIp */);
+    }
+
+    @Test
+    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = true)
+    public void testIpReachabilityMonitor_ignoreNeverReachableIpv6Dns() throws Exception {
+        runIpReachabilityMonitorAddressResolutionTest(IPV6_ON_LINK_DNS_SERVER,
+                ipv6Addr(IPV6_ON_LINK_DNS_SERVER), false /* expectNeighborLost */);
+    }
+
+    @Test
+    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = true)
+    public void testIpReachabilityMonitor_ignoreNeverReachableIpv6Dns_butEverReachable()
+            throws Exception {
+        runIpReachabilityMonitorEverReachableIpv6NeighborTest(IPV6_ON_LINK_DNS_SERVER,
+                ipv6Addr(IPV6_ON_LINK_DNS_SERVER) /* targetIp */);
+    }
+
+    @Test
+    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = true)
+    public void testIpReachabilityMonitor_ignoreNeverReachableIpv6DefaultRouter() throws Exception {
+        runIpReachabilityMonitorAddressResolutionTest(IPV6_OFF_LINK_DNS_SERVER,
+                ROUTER_LINK_LOCAL, false /* expectNeighborLost */);
+    }
+
+    @Test
+    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = true)
+    public void testIpReachabilityMonitor_ignoreNeverReachableIpv6DefaultRouter_butEverReachable()
+            throws Exception {
+        runIpReachabilityMonitorEverReachableIpv6NeighborTest(IPV6_ON_LINK_DNS_SERVER,
+                ROUTER_LINK_LOCAL /* targetIp */);
     }
 
     @Test
@@ -4909,6 +5009,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
+    @Flag(name =  IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION, enabled = true)
     public void testDhcp6Pd() throws Exception {
         final IpPrefix prefix = new IpPrefix("2001:db8:1::/64");
         prepareDhcp6PdTest();
@@ -5378,12 +5479,12 @@ public abstract class IpClientIntegrationTestCommon {
         // Sometimes privacy address or route may appear later along with onLinkPropertiesChange
         // callback, in this case we wait a bit longer to see all of these properties appeared and
         // then verify if they are what we are looking for.
-        if (lp.getLinkAddresses().size() < 5 || lp.getRoutes().size() < 4) {
+        if (lp.getLinkAddresses().size() < 5) { // 1 IPv6 link-local and 4 global IPv6 addresses
+                                                // derived from prefix1 and prefix2
             final CompletableFuture<LinkProperties> lpFuture = new CompletableFuture<>();
             verifyWithTimeout(inOrder, mCb).onLinkPropertiesChange(argThat(x -> {
                 if (!x.isIpv6Provisioned()) return false;
                 if (x.getLinkAddresses().size() != 5) return false;
-                if (x.getRoutes().size() != 4) return false;
                 lpFuture.complete(x);
                 return true;
             }));
@@ -5695,6 +5796,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
+    @Flag(name = IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION, enabled = true)
     public void testPopulateLinkAddressLifetime() throws Exception {
         final LinkProperties lp = doDualStackProvisioning();
         final long now = SystemClock.elapsedRealtime();
@@ -5716,6 +5818,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
+    @Flag(name = IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION, enabled = true)
     public void testPopulateLinkAddressLifetime_infiniteLeaseDuration() throws Exception {
         final ProvisioningConfiguration cfg = new ProvisioningConfiguration.Builder()
                 .withoutIPv6()
@@ -5739,6 +5842,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
+    @Flag(name = IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION, enabled = true)
     public void testPopulateLinkAddressLifetime_minimalLeaseDuration() throws Exception {
         final ProvisioningConfiguration cfg = new ProvisioningConfiguration.Builder()
                 .withoutIPv6()
@@ -5765,6 +5869,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
+    @Flag(name = IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION, enabled = true)
     public void testPopulateLinkAddressLifetime_onDhcpRenew() throws Exception {
         final ProvisioningConfiguration cfg = new ProvisioningConfiguration.Builder()
                 .withoutIPv6()

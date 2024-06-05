@@ -226,6 +226,13 @@ public class NetworkStackUtils {
             "ip_reachability_ignore_organic_nud_failure_version";
 
     /**
+     * Experiment flag to ignore all NUD failures from the neighbor that has never ever entered the
+     * reachable state.
+     */
+    public static final String IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION =
+            "ip_reachability_ignore_never_reachable_neighbor_version";
+
+    /**
      * Experiment flag to enable DHCPv6 Prefix Delegation(RFC8415) in IpClient.
      */
     public static final String IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION =
@@ -261,6 +268,11 @@ public class NetworkStackUtils {
     public static final String IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION =
             "ipclient_populate_link_address_lifetime_version";
 
+    /**
+     * Experiment flag to support parsing PIO P flag(DHCPv6-PD preferred).
+     */
+    public static final String IPCLIENT_DHCPV6_PD_PREFERRED_FLAG_VERSION =
+            "ipclient_dhcpv6_pd_preferred_flag_version";
 
     /**** BEGIN Feature Kill Switch Flags ****/
 

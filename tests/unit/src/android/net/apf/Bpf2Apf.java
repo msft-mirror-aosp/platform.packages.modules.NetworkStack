@@ -16,6 +16,7 @@
 
 package android.net.apf;
 
+import static android.net.apf.BaseApfGenerator.MemorySlot;
 import static android.net.apf.BaseApfGenerator.Register.R0;
 import static android.net.apf.BaseApfGenerator.Register.R1;
 
@@ -49,6 +50,25 @@ public class Bpf2Apf {
         return new Long((val_long << 32) >> 32).intValue();
     }
 
+    private static MemorySlot byIndex(int value) {
+        switch (value) {
+            case 0: return MemorySlot.SLOT_0;
+            case 1: return MemorySlot.SLOT_1;
+            case 2: return MemorySlot.SLOT_2;
+            case 3: return MemorySlot.SLOT_3;
+            case 4: return MemorySlot.SLOT_4;
+            case 5: return MemorySlot.SLOT_5;
+            case 6: return MemorySlot.SLOT_6;
+            case 7: return MemorySlot.SLOT_7;
+        }
+        // Either < 0 or > 15 which aren't valid slot numbers,
+        // or >= Memory.FIRST_PREFILLED (ie. 8),
+        // but we don't need to check that,
+        // since we only handle valid SLOT_X numbers.
+        throw new IllegalArgumentException(
+                String.format("Memory slot %d not in range 0..7", value));
+    }
+
     /**
      * Convert a single line of "tcpdump -d" (human readable BPF program dump) {@code line} into
      * APF instruction(s) and append them to {@code gen}. Here's an example line:
@@ -75,14 +95,14 @@ public class Bpf2Apf {
                     if (!opcode.equals("ldxb")) {
                         throw new IllegalArgumentException("Unhandled instruction: " + line);
                     }
-                    gen.addLoadFromMemory(dest, gen.IPV4_HEADER_SIZE_MEMORY_SLOT);
+                    gen.addLoadFromMemory(dest, MemorySlot.IPV4_HEADER_SIZE);
                     break;
                 }
                 if (arg.equals("#pktlen")) {
                     if (!opcode.equals("ld")) {
                         throw new IllegalArgumentException("Unhandled instruction: " + line);
                     }
-                    gen.addLoadFromMemory(dest, gen.PACKET_SIZE_MEMORY_SLOT);
+                    gen.addLoadFromMemory(dest, MemorySlot.PACKET_SIZE);
                     break;
                 }
                 if (arg.startsWith("#0x")) {
@@ -97,14 +117,7 @@ public class Bpf2Apf {
                         throw new IllegalArgumentException("Unhandled instruction: " + line);
                     }
                     int memory_slot = Integer.parseInt(arg.substring(2, arg.length() - 1));
-                    if (memory_slot < 0 || memory_slot >= gen.MEMORY_SLOTS ||
-                            // Disallow use of pre-filled slots as BPF programs might
-                            // wrongfully assume they're initialized to 0.
-                            (memory_slot >= gen.FIRST_PREFILLED_MEMORY_SLOT &&
-                                    memory_slot <= gen.LAST_PREFILLED_MEMORY_SLOT)) {
-                        throw new IllegalArgumentException("Unhandled instruction: " + line);
-                    }
-                    gen.addLoadFromMemory(dest, memory_slot);
+                    gen.addLoadFromMemory(dest, byIndex(memory_slot));
                     break;
                 }
                 if (arg.startsWith("[x + ")) {
@@ -148,13 +161,7 @@ public class Bpf2Apf {
                     throw new IllegalArgumentException("Unhandled instruction: " + line);
                 }
                 int memory_slot = Integer.parseInt(arg.substring(2, arg.length() - 1));
-                if (memory_slot < 0 || memory_slot >= gen.MEMORY_SLOTS ||
-                        // Disallow overwriting pre-filled slots
-                        (memory_slot >= gen.FIRST_PREFILLED_MEMORY_SLOT &&
-                                memory_slot <= gen.LAST_PREFILLED_MEMORY_SLOT)) {
-                    throw new IllegalArgumentException("Unhandled instruction: " + line);
-                }
-                gen.addStoreToMemory(src, memory_slot);
+                gen.addStoreToMemory(byIndex(memory_slot), src);
                 break;
             case "add":
             case "and":

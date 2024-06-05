@@ -17,13 +17,18 @@ package android.net.apf;
 
 import static android.net.apf.BaseApfGenerator.Rbit.Rbit0;
 import static android.net.apf.BaseApfGenerator.Rbit.Rbit1;
+import static android.net.apf.BaseApfGenerator.Register.R0;
 import static android.net.apf.BaseApfGenerator.Register.R1;
 
-import androidx.annotation.NonNull;
+import android.annotation.NonNull;
 
 import com.android.net.module.util.HexDump;
 
+import java.nio.ByteBuffer;
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * The abstract class for APFv6 assembler/generator.
@@ -35,9 +40,7 @@ import java.util.Objects;
 public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> extends
         ApfV4GeneratorBase<Type> {
 
-    // We have not *yet* switched to APFv6 mode (see addData),
-    // and are thus still in APFv2/4 backward compatibility mode.
-    boolean mIsV6 = false;
+    final int mMaximumApfProgramSize;
 
     /**
      * Creates an ApfV6GeneratorBase instance which is able to emit instructions for the specified
@@ -45,8 +48,9 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
      * the requested version is unsupported.
      *
      */
-    public ApfV6GeneratorBase() throws IllegalInstructionException {
-        super(MIN_APF_VERSION_IN_DEV);
+    public ApfV6GeneratorBase(int maximumApfProgramSize) throws IllegalInstructionException {
+        super(APF_VERSION_6, false);
+        this.mMaximumApfProgramSize = maximumApfProgramSize;
     }
 
     /**
@@ -119,9 +123,16 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
         if (data.length > 65535) {
             throw new IllegalArgumentException("data size larger than 65535");
         }
-        mIsV6 = true;
         return append(new Instruction(Opcodes.JMP, Rbit1).addUnsigned(data.length)
                 .setBytesImm(data).overrideImmSize(2));
+    }
+
+    /**
+     * Add an instruction to the end of the program to set the exception buffer size.
+     * @param bufSize the exception buffer size
+     */
+    public final Type addExceptionBuffer(int bufSize) throws IllegalInstructionException {
+        return append(new Instruction(ExtendedOpcodes.EXCEPTIONBUFFER).addU16(bufSize));
     }
 
     /**
@@ -422,10 +433,47 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
      * packet at an offset specified by register0 match {@code bytes}.
      * R=1 means check for equal.
      */
-    public final Type addJumpIfBytesAtR0Equal(byte[] bytes, String tgt)
+    public final Type addJumpIfBytesAtR0Equal(@NonNull byte[] bytes, String tgt)
             throws IllegalInstructionException {
-        return append(new Instruction(Opcodes.JNEBS, R1).addUnsigned(
+        validateBytes(bytes);
+        return append(new Instruction(Opcodes.JBSMATCH, R1).addUnsigned(
                 bytes.length).setTargetLabel(tgt).setBytesImm(bytes));
+    }
+
+    private Type addJumpIfBytesAtR0EqualsHelper(@NonNull List<byte[]> bytesList, String tgt,
+            boolean jumpOnMatch) {
+        final List<byte[]> deduplicatedList = validateDeduplicateBytesList(bytesList);
+        final int elementSize = deduplicatedList.get(0).length;
+        final int totalElements = deduplicatedList.size();
+        final int totalSize = elementSize * totalElements;
+        final ByteBuffer buffer = ByteBuffer.allocate(totalSize);
+        for (byte[] array : deduplicatedList) {
+            buffer.put(array);
+        }
+        final Rbit rbit = jumpOnMatch ? Rbit1 : Rbit0;
+        final byte[] combinedBytes = buffer.array();
+        return append(new Instruction(Opcodes.JBSMATCH, rbit)
+                .addUnsigned((totalElements - 1) << 11 | elementSize)
+                .setTargetLabel(tgt)
+                .setBytesImm(combinedBytes));
+    }
+
+    /**
+     * Add an instruction to the end of the program to jump to {@code tgt} if the bytes of the
+     * packet at an offset specified by register0 match any of the elements in {@code bytesSet}.
+     * R=1 means check for equal.
+     */
+    public final Type addJumpIfBytesAtR0EqualsAnyOf(@NonNull List<byte[]> bytesList, String tgt) {
+        return addJumpIfBytesAtR0EqualsHelper(bytesList, tgt, true /* jumpOnMatch */);
+    }
+
+    /**
+     * Add an instruction to the end of the program to jump to {@code tgt} if the bytes of the
+     * packet at an offset specified by register0 match none of the elements in {@code bytesSet}.
+     * R=0 means check for not equal.
+     */
+    public final Type addJumpIfBytesAtR0EqualNoneOf(@NonNull List<byte[]> bytesList, String tgt) {
+        return addJumpIfBytesAtR0EqualsHelper(bytesList, tgt, false /* jumpOnMatch */);
     }
 
 
@@ -468,5 +516,302 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
         if (names[len - 1] != 0) {
             throw new IllegalArgumentException(errorMessage);
         }
+    }
+
+    private Type addJumpIfOneOfHelper(Register reg, @NonNull Set<Long> values,
+            boolean jumpOnMatch, @NonNull String tgt) {
+        if (values == null || values.size() < 2 || values.size() > 33)  {
+            throw new IllegalArgumentException(
+                    "size of values set must be >= 2 and <= 33, current size: " + values.size());
+        }
+        final Long max = Collections.max(values);
+        final Long min = Collections.min(values);
+        checkRange("max value in set", max, 0, 4294967295L);
+        checkRange("min value in set", min, 0, 4294967295L);
+        // Since sets are always of size > 1 and in range [0, uint32_max], max is guaranteed > 0,
+        // so maxImmSize can never be 0.
+        final int maxImmSize = calculateImmSize(max.intValue(), false);
+
+        // imm3(u8): top 5 bits - number of following u8/be16/be32 values - 2
+        // middle 2 bits - 1..4 length of immediates - 1
+        // bottom 1 bit - =0 jmp if in set, =1 if not in set
+        Instruction instruction = new Instruction(ExtendedOpcodes.JONEOF, reg)
+                .setTargetLabel(tgt)
+                .addU8((values.size() - 2) << 3 | (maxImmSize - 1) << 1 | (jumpOnMatch ? 0 : 1));
+        for (Long v : values) {
+            switch (maxImmSize) {
+                case 1:
+                    instruction.addU8(v.intValue());
+                    break;
+                case 2:
+                    instruction.addU16(v.intValue());
+                    break;
+                // case 3: instruction.addU24(v); break; -- not supported by generator
+                case 4:
+                    instruction.addU32(v);
+                    break;
+                default:
+                    throw new IllegalArgumentException(
+                            "immLen is not in {1, 2, 4}, immLen: " + maxImmSize);
+            }
+        }
+        return append(instruction);
+    }
+
+    /**
+     * Add an instruction to the end of the program to jump to {@code tgt} if {@code reg} is
+     * one of the {@code values}.
+     */
+    public final Type addJumpIfOneOf(Register reg, @NonNull Set<Long> values,
+            @NonNull String tgt) {
+        return addJumpIfOneOfHelper(reg, values, true /* jumpOnMatch */, tgt);
+    }
+
+    /**
+     * Add an instruction to the end of the program to jump to {@code tgt} if {@code reg} is
+     * not one of the {@code values}.
+     */
+    public final Type addJumpIfNoneOf(Register reg, @NonNull Set<Long> values,
+            @NonNull String tgt) {
+        return addJumpIfOneOfHelper(reg, values, false /* jumpOnMatch */, tgt);
+    }
+
+    @Override
+    void addR0ArithR1(Opcodes opcode) {
+        append(new Instruction(opcode, R0));  // APFv6+: R0 op= R1
+    }
+
+    /**
+     * Add an instruction to the end of the program to increment the counter value and
+     * immediately return PASS.
+     *
+     * @param counter the counter enum to be incremented.
+     */
+    @Override
+    public final Type addCountAndPass(ApfCounterTracker.Counter counter) {
+        checkPassCounterRange(counter);
+        return addCountAndPass(counter.value());
+    }
+
+    /**
+     * Add an instruction to the end of the program to increment the counter value and
+     * immediately return DROP.
+     *
+     * @param counter the counter enum to be incremented.
+     */
+    @Override
+    public final Type addCountAndDrop(ApfCounterTracker.Counter counter) {
+        checkDropCounterRange(counter);
+        return addCountAndDrop(counter.value());
+    }
+
+    @Override
+    public final Type addCountAndDropIfR0Equals(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        final String tgt = getUniqueLabel();
+        return addJumpIfR0NotEquals(val, tgt).addCountAndDrop(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public final Type addCountAndPassIfR0Equals(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        final String tgt = getUniqueLabel();
+        return addJumpIfR0NotEquals(val, tgt).addCountAndPass(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public final Type addCountAndDropIfR0NotEquals(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        final String tgt = getUniqueLabel();
+        return addJumpIfR0Equals(val, tgt).addCountAndDrop(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public final Type addCountAndPassIfR0NotEquals(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        final String tgt = getUniqueLabel();
+        return addJumpIfR0Equals(val, tgt).addCountAndPass(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public Type addCountAndDropIfR0AnyBitsSet(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        final String countAndDropLabel = getUniqueLabel();
+        final String skipLabel = getUniqueLabel();
+        return addJumpIfR0AnyBitsSet(val, countAndDropLabel)
+                .addJump(skipLabel)
+                .defineLabel(countAndDropLabel)
+                .addCountAndDrop(cnt)
+                .defineLabel(skipLabel);
+    }
+
+    @Override
+    public Type addCountAndPassIfR0AnyBitsSet(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        final String countAndPassLabel = getUniqueLabel();
+        final String skipLabel = getUniqueLabel();
+        return addJumpIfR0AnyBitsSet(val, countAndPassLabel)
+                .addJump(skipLabel)
+                .defineLabel(countAndPassLabel)
+                .addCountAndPass(cnt)
+                .defineLabel(skipLabel);
+    }
+
+    @Override
+    public final Type addCountAndDropIfR0LessThan(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        if (val <= 0) {
+            throw new IllegalArgumentException("val must > 0, current val: " + val);
+        }
+        final String tgt = getUniqueLabel();
+        return addJumpIfR0GreaterThan(val - 1, tgt).addCountAndDrop(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public final Type addCountAndPassIfR0LessThan(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        if (val <= 0) {
+            throw new IllegalArgumentException("val must > 0, current val: " + val);
+        }
+        final String tgt = getUniqueLabel();
+        return addJumpIfR0GreaterThan(val - 1, tgt).addCountAndPass(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public Type addCountAndDropIfR0GreaterThan(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        if (val < 0 || val >= 4294967295L) {
+            throw new IllegalArgumentException("val must >= 0 and < 2^32-1, current val: " + val);
+        }
+        final String tgt = getUniqueLabel();
+        return addJumpIfR0LessThan(val + 1, tgt).addCountAndDrop(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public Type addCountAndPassIfR0GreaterThan(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        if (val < 0 || val >= 4294967295L) {
+            throw new IllegalArgumentException("val must >= 0 and < 2^32-1, current val: " + val);
+        }
+        final String tgt = getUniqueLabel();
+        return addJumpIfR0LessThan(val + 1, tgt).addCountAndPass(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public final Type addCountAndDropIfBytesAtR0NotEqual(byte[] bytes,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        final String tgt = getUniqueLabel();
+        return addJumpIfBytesAtR0Equal(bytes, tgt).addCountAndDrop(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public final Type addCountAndPassIfBytesAtR0NotEqual(byte[] bytes,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        final String tgt = getUniqueLabel();
+        return addJumpIfBytesAtR0Equal(bytes, tgt).addCountAndPass(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public Type addCountAndPassIfR0IsOneOf(@NonNull Set<Long> values,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        if (values.isEmpty()) {
+            throw new IllegalArgumentException("values cannot be empty");
+        }
+        if (values.size() == 1) {
+            return addCountAndPassIfR0Equals(values.iterator().next(), cnt);
+        }
+        final String tgt = getUniqueLabel();
+        return addJumpIfNoneOf(R0, values, tgt).addCountAndPass(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public Type addCountAndDropIfR0IsOneOf(@NonNull Set<Long> values,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        if (values.isEmpty()) {
+            throw new IllegalArgumentException("values cannot be empty");
+        }
+        if (values.size() == 1) {
+            return addCountAndDropIfR0Equals(values.iterator().next(), cnt);
+        }
+        final String tgt = getUniqueLabel();
+        return addJumpIfNoneOf(R0, values, tgt).addCountAndDrop(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public Type addCountAndPassIfR0IsNoneOf(@NonNull Set<Long> values,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        if (values.isEmpty()) {
+            throw new IllegalArgumentException("values cannot be empty");
+        }
+        if (values.size() == 1) {
+            return addCountAndPassIfR0NotEquals(values.iterator().next(), cnt);
+        }
+        final String tgt = getUniqueLabel();
+        return addJumpIfOneOf(R0, values, tgt).addCountAndPass(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public Type addCountAndDropIfBytesAtR0EqualsAnyOf(@NonNull List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        final String tgt = getUniqueLabel();
+        return addJumpIfBytesAtR0EqualNoneOf(bytesList, tgt).addCountAndDrop(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public Type addCountAndPassIfBytesAtR0EqualsAnyOf(@NonNull List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        final String tgt = getUniqueLabel();
+        return addJumpIfBytesAtR0EqualNoneOf(bytesList, tgt).addCountAndPass(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public Type addCountAndDropIfBytesAtR0EqualsNoneOf(@NonNull List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        final String tgt = getUniqueLabel();
+        return addJumpIfBytesAtR0EqualsAnyOf(bytesList, tgt).addCountAndDrop(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public Type addCountAndPassIfBytesAtR0EqualsNoneOf(@NonNull List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        final String tgt = getUniqueLabel();
+        return addJumpIfBytesAtR0EqualsAnyOf(bytesList, tgt).addCountAndPass(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public Type addCountAndDropIfR0IsNoneOf(@NonNull Set<Long> values,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        if (values.isEmpty()) {
+            throw new IllegalArgumentException("values cannot be empty");
+        }
+        if (values.size() == 1) {
+            return addCountAndDropIfR0NotEquals(values.iterator().next(), cnt);
+        }
+        final String tgt = getUniqueLabel();
+        return addJumpIfOneOf(R0, values, tgt).addCountAndDrop(cnt).defineLabel(tgt);
+    }
+
+    @Override
+    public final Type addLoadCounter(Register register, ApfCounterTracker.Counter counter)
+            throws IllegalInstructionException {
+        return append(new Instruction(Opcodes.LDDW, register).addUnsigned(counter.value()));
+    }
+
+    @Override
+    public final Type addStoreCounter(ApfCounterTracker.Counter counter, Register register)
+            throws IllegalInstructionException {
+        return append(new Instruction(Opcodes.STDW, register).addUnsigned(counter.value()));
+    }
+
+    /**
+     * This method is noop in APFv6.
+     */
+    @Override
+    public final Type addCountTrampoline() {
+        return self();
     }
 }

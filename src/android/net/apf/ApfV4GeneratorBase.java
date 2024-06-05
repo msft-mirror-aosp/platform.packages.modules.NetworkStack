@@ -20,7 +20,13 @@ import static android.net.apf.BaseApfGenerator.Rbit.Rbit0;
 import static android.net.apf.BaseApfGenerator.Register.R0;
 import static android.net.apf.BaseApfGenerator.Register.R1;
 
+
+import android.annotation.NonNull;
+
 import com.android.internal.annotations.VisibleForTesting;
+
+import java.util.List;
+import java.util.Set;
 
 /**
  * APF assembler/generator.  A tool for generating an APF program.
@@ -46,9 +52,10 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
      * the requested version is unsupported.
      */
     @VisibleForTesting(visibility = VisibleForTesting.Visibility.PACKAGE)
-    public ApfV4GeneratorBase(int version) throws IllegalInstructionException {
-        super(version);
-        requireApfVersion(MIN_APF_VERSION);
+    public ApfV4GeneratorBase(int version, boolean disableCounterRangeCheck)
+            throws IllegalInstructionException {
+        super(version, disableCounterRangeCheck);
+        requireApfVersion(APF_VERSION_2);
     }
 
     final Type self() {
@@ -126,7 +133,7 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
      * the sum of {@code offset} and the value in register R1.
      */
     public final Type addLoad8Indexed(Register r, int ofs) {
-        return append(new Instruction(Opcodes.LDBX, r).addPacketOffset(ofs));
+        return append(new Instruction(Opcodes.LDBX, r).addTwosCompUnsigned(ofs));
     }
 
     /**
@@ -135,7 +142,7 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
      * the sum of {@code offset} and the value in register R1.
      */
     public final Type addLoad16Indexed(Register r, int ofs) {
-        return append(new Instruction(Opcodes.LDHX, r).addPacketOffset(ofs));
+        return append(new Instruction(Opcodes.LDHX, r).addTwosCompUnsigned(ofs));
     }
 
     /**
@@ -144,7 +151,7 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
      * the sum of {@code offset} and the value in register R1.
      */
     public final Type addLoad32Indexed(Register r, int ofs) {
-        return append(new Instruction(Opcodes.LDWX, r).addPacketOffset(ofs));
+        return append(new Instruction(Opcodes.LDWX, r).addTwosCompUnsigned(ofs));
     }
 
     /**
@@ -212,14 +219,14 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
         return addLeftShift(-val);
     }
 
-    // Argument should be one of Opcodes.{ADD,MUL,DIV,AND,OR,SH}
-    abstract void addArithR1(Opcodes opcode);
+    // R0 op= R1, where op should be one of Opcodes.{ADD,MUL,DIV,AND,OR,SH}
+    abstract void addR0ArithR1(Opcodes opcode);
 
     /**
      * Add an instruction to the end of the program to add register R1 to register R0.
      */
     public final Type addAddR1ToR0() {
-        addArithR1(Opcodes.ADD);
+        addR0ArithR1(Opcodes.ADD);  // R0 += R1
         return self();
     }
 
@@ -227,7 +234,7 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
      * Add an instruction to the end of the program to multiply register R0 by register R1.
      */
     public final Type addMulR0ByR1() {
-        addArithR1(Opcodes.MUL);
+        addR0ArithR1(Opcodes.MUL);  // R0 *= R1
         return self();
     }
 
@@ -235,7 +242,7 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
      * Add an instruction to the end of the program to divide register R0 by register R1.
      */
     public final Type addDivR0ByR1() {
-        addArithR1(Opcodes.DIV);
+        addR0ArithR1(Opcodes.DIV);  // R0 /= R1
         return self();
     }
 
@@ -244,7 +251,7 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
      * and store the result back into register R0.
      */
     public final Type addAndR0WithR1() {
-        addArithR1(Opcodes.AND);
+        addR0ArithR1(Opcodes.AND);  // R0 &= R1
         return self();
     }
 
@@ -253,7 +260,7 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
      * and store the result back into register R0.
      */
     public final Type addOrR0WithR1() {
-        addArithR1(Opcodes.OR);
+        addR0ArithR1(Opcodes.OR);  // R0 |= R1
         return self();
     }
 
@@ -262,7 +269,7 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
      * register R1.
      */
     public final Type addLeftShiftR0ByR1() {
-        addArithR1(Opcodes.SH);
+        addR0ArithR1(Opcodes.SH);  // R0 <<= R1
         return self();
     }
 
@@ -330,6 +337,22 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
     }
 
     /**
+     * Add instructions to the end of the program to increase counter and drop packet if R0 greater
+     * than {@code val}
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndDropIfR0GreaterThan(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException;
+
+    /**
+     * Add instructions to the end of the program to increase counter and pass packet if R0 greater
+     * than {@code val}
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndPassIfR0GreaterThan(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException;
+
+    /**
      * Add an instruction to the end of the program to jump to {@code target} if register R0's
      * value is less than {@code value}.
      */
@@ -360,6 +383,55 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
     public final Type addJumpIfR0AnyBitsSet(long val, String tgt) {
         return append(new Instruction(Opcodes.JSET).addTwosCompUnsigned(val).setTargetLabel(tgt));
     }
+
+    /**
+     * Add an instruction to the end of the program to count and drop packet if register R0's
+     * value has any bits set that are also set in {@code value}.
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndDropIfR0AnyBitsSet(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException;
+
+    /**
+     * Add an instruction to the end of the program to count and pass packet if register R0's
+     * value has any bits set that are also set in {@code value}.
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndPassIfR0AnyBitsSet(long val, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException;
+
+    /**
+     * Add an instruction to the end of the program to count and drop if the bytes of the
+     * packet at an offset specified by register R0 match any of the elements in {@code bytesList}.
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndDropIfBytesAtR0EqualsAnyOf(@NonNull List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
+
+    /**
+     * Add an instruction to the end of the program to count and pass if the bytes of the
+     * packet at an offset specified by register R0 match any of the elements in {@code bytesList}.
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndPassIfBytesAtR0EqualsAnyOf(@NonNull List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
+
+    /**
+     * Add an instruction to the end of the program to count and drop if the bytes of the
+     * packet at an offset specified by register R0 match none the elements in {@code bytesList}.
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndDropIfBytesAtR0EqualsNoneOf(@NonNull List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
+
+    /**
+     * Add an instruction to the end of the program to count and pass if the bytes of the
+     * packet at an offset specified by register R0 match none of the elements in {@code bytesList}.
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndPassIfBytesAtR0EqualsNoneOf(@NonNull List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
+
     /**
      * Add an instruction to the end of the program to jump to {@code target} if register R0's
      * value equals register R1's value.
@@ -405,8 +477,9 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
      * packet at an offset specified by register0 don't match {@code bytes}.
      * R=0 means check for not equal.
      */
-    public final Type addJumpIfBytesAtR0NotEqual(byte[] bytes, String tgt) {
-        return append(new Instruction(Opcodes.JNEBS).addUnsigned(
+    public final Type addJumpIfBytesAtR0NotEqual(@NonNull byte[] bytes, String tgt) {
+        validateBytes(bytes);
+        return append(new Instruction(Opcodes.JBSMATCH).addUnsigned(
                 bytes.length).setTargetLabel(tgt).setBytesImm(bytes));
     }
 
@@ -419,21 +492,61 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
             ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
 
     /**
+     * Add instructions to the end of the program to increase counter and pass packet if the
+     * bytes of the packet at an offset specified by register0 don't match {@code bytes}.
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndPassIfBytesAtR0NotEqual(byte[] bytes,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
+
+    /**
+     * Add instructions to the end of the program to increase counter and pass packet if the
+     * value in register0 is one of {@code values}.
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndPassIfR0IsOneOf(@NonNull Set<Long> values,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
+
+    /**
+     * Add instructions to the end of the program to increase counter and drop packet if the
+     * value in register0 is one of {@code values}.
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndDropIfR0IsOneOf(@NonNull Set<Long> values,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
+
+    /**
+     * Add instructions to the end of the program to increase counter and pass packet if the
+     * value in register0 is none of {@code values}.
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndPassIfR0IsNoneOf(@NonNull Set<Long> values,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
+
+    /**
+     * Add instructions to the end of the program to increase counter and drop packet if the
+     * value in register0 is none of {@code values}.
+     * WARNING: may modify R1
+     */
+    public abstract Type addCountAndDropIfR0IsNoneOf(@NonNull Set<Long> values,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
+
+    /**
      * Add an instruction to the end of the program to load memory slot {@code slot} into
      * {@code register}.
      */
-    public final Type addLoadFromMemory(Register r, int slot)
+    public final Type addLoadFromMemory(Register r, MemorySlot slot)
             throws IllegalInstructionException {
-        return append(new BaseApfGenerator.Instruction(ExtendedOpcodes.LDM, slot, r));
+        return append(new BaseApfGenerator.Instruction(ExtendedOpcodes.LDM, slot.value, r));
     }
 
     /**
      * Add an instruction to the end of the program to store {@code register} into memory slot
      * {@code slot}.
      */
-    public final Type addStoreToMemory(Register r, int slot)
+    public final Type addStoreToMemory(MemorySlot slot, Register r)
             throws IllegalInstructionException {
-        return append(new Instruction(ExtendedOpcodes.STM, slot, r));
+        return append(new Instruction(ExtendedOpcodes.STM, slot.value, r));
     }
 
     /**
@@ -485,28 +598,42 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
 
     /**
      * Add an instruction to the end of the program to load 32 bits from the data memory into
-     * {@code register}. The source address is computed by adding the signed immediate
-     * @{code offset} to the other register.
-     * Requires APF v4 or greater.
+     * {@code register}.
+     * In APFv2, it is a noop.
+     * WARNING: clobbers the *other* register.
      */
-    public final Type addLoadData(Register dst, int ofs)
-            throws IllegalInstructionException {
-        requireApfVersion(APF_VERSION_4);
-        return append(new Instruction(Opcodes.LDDW, dst).addSigned(ofs));
-    }
+    public abstract Type addLoadCounter(Register register, ApfCounterTracker.Counter counter)
+            throws IllegalInstructionException;
 
     /**
      * Add an instruction to the end of the program to store 32 bits from {@code register} into the
-     * data memory. The destination address is computed by adding the signed immediate
-     * @{code offset} to the other register.
-     * Requires APF v4 or greater.
+     * data memory.
+     * In APFv2, it is a noop.
+     * WARNING: clobbers the *other* register.
      */
-    public final Type addStoreData(Register src, int ofs)
+    public abstract Type addStoreCounter(ApfCounterTracker.Counter counter, Register register)
+            throws IllegalInstructionException;
+
+    /**
+     * Add an instruction to the end of the program to increment counter value by {@code val).
+     * In APFv2, it is a noop.
+     * WARNING: clobbers both registers.
+     */
+    public final Type addIncrementCounter(ApfCounterTracker.Counter counter, int val)
             throws IllegalInstructionException {
-        requireApfVersion(APF_VERSION_4);
-        return append(new Instruction(Opcodes.STDW, src).addSigned(ofs));
+        if (mVersion <= 2) return self();
+        return addLoadCounter(R0, counter).addAdd(val).addStoreCounter(counter, R0);
     }
 
+    /**
+     * Add an instruction to the end of the program to increment counter value by one.
+     * In APFv2, it is a noop.
+     * WARNING: clobbers both registers.
+     */
+    public final Type addIncrementCounter(ApfCounterTracker.Counter counter)
+            throws IllegalInstructionException {
+        return addIncrementCounter(counter, 1);
+    }
 
     /**
      * The abstract method to generate count trampoline instructions.
