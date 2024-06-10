@@ -1361,7 +1361,7 @@ public class IpClient extends StateMachine {
         pw.println(mTag + " APF dump:");
         pw.increaseIndent();
         if (apfFilter != null) {
-            if (apfCapabilities != null && apfCapabilities.hasDataAccess()) {
+            if (apfCapabilities != null && apfFilter.hasDataAccess(apfCapabilities)) {
                 // Request a new snapshot, then wait for it.
                 mApfDataSnapshotComplete.close();
                 mCallback.startReadPacketFilter("dumpsys");
@@ -2523,11 +2523,19 @@ public class IpClient extends StateMachine {
     }
 
     @Nullable
-    private AndroidPacketFilter maybeCreateApfFilter(final ApfCapabilities apfCapabilities) {
+    private AndroidPacketFilter maybeCreateApfFilter(final ApfCapabilities apfCaps) {
         ApfFilter.ApfConfiguration apfConfig = new ApfFilter.ApfConfiguration();
-        apfConfig.apfCapabilities = apfCapabilities;
-        if (apfCapabilities != null && !SdkLevel.isAtLeastV()
-                && apfCapabilities.apfVersionSupported <= 4) {
+        apfConfig.apfCapabilities = apfCaps;
+        if (apfCaps != null && !SdkLevel.isAtLeastS()) {
+            // Due to potential OEM modifications in Android R, reconfigure
+            // apfVersionSupported using apfCapabilities.hasDataAccess() to ensure safe data
+            // region access within ApfFilter.
+            int apfVersionSupported = apfCaps.hasDataAccess() ? 3 : 2;
+            apfConfig.apfCapabilities = new ApfCapabilities(apfVersionSupported,
+                    apfCaps.maximumApfProgramSize, apfCaps.apfPacketFormat);
+        }
+        if (apfConfig.apfCapabilities != null && !SdkLevel.isAtLeastV()
+                && apfConfig.apfCapabilities.apfVersionSupported <= 4) {
             apfConfig.installableProgramSizeClamp = 1024;
         }
         apfConfig.multicastFilter = mMulticastFiltering;
