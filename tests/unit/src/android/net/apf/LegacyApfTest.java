@@ -1766,295 +1766,18 @@ public class LegacyApfTest {
         }
     }
 
-    // Test for go/apf-ra-filter Case 1a.
-    // Old lifetime is 0
-    @Test
-    public void testAcceptRaMinLftCase1a() throws Exception {
-        final MockIpClientCallback ipClientCallback = new MockIpClientCallback();
-        // configure accept_ra_min_lft
-        final ApfConfiguration config = getDefaultConfig();
-        config.acceptRaMinLft = 180;
-        final TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback,
-                mNetworkQuirkMetrics, mDependencies);
-
-        // Create an initial RA and build an APF program
-        byte[] ra = new RaPacketBuilder(1800 /* router lifetime */)
-                .addPioOption(1800 /*valid*/, 0 /*preferred*/, "2001:db8::/64")
-                .build();
-
-        apfFilter.pretendPacketReceived(ra);
-        byte[] program = ipClientCallback.assertProgramUpdateAndGet();
-
-        // repeated RA is dropped
-        assertDrop(program, ra);
-
-        // PIO preferred lifetime increases
-        ra = new RaPacketBuilder(1800 /* router lifetime */)
-                .addPioOption(1800 /*valid*/, 1 /*preferred*/, "2001:db8::/64")
-                .build();
-        assertPass(program, ra);
-    }
-
-    // Test for go/apf-ra-filter Case 2a.
-    // Old lifetime is > 0
-    @Test
-    public void testAcceptRaMinLftCase2a() throws Exception {
-        final MockIpClientCallback ipClientCallback = new MockIpClientCallback();
-        // configure accept_ra_min_lft
-        final ApfConfiguration config = getDefaultConfig();
-        config.acceptRaMinLft = 180;
-        final TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback,
-                mNetworkQuirkMetrics, mDependencies);
-
-        // Create an initial RA and build an APF program
-        byte[] ra = new RaPacketBuilder(1800 /* router lifetime */)
-                .addPioOption(1800 /*valid*/, 100 /*preferred*/, "2001:db8::/64")
-                .build();
-
-        apfFilter.pretendPacketReceived(ra);
-        byte[] program = ipClientCallback.assertProgramUpdateAndGet();
-
-        // repeated RA is dropped
-        assertDrop(program, ra);
-
-        // PIO preferred lifetime increases
-        ra = new RaPacketBuilder(1800 /* router lifetime */)
-                .addPioOption(1800 /*valid*/, 101 /*preferred*/, "2001:db8::/64")
-                .build();
-        assertPass(program, ra);
-
-        // PIO preferred lifetime decreases significantly
-        ra = new RaPacketBuilder(1800 /* router lifetime */)
-                .addPioOption(1800 /*valid*/, 33 /*preferred*/, "2001:db8::/64")
-                .build();
-        assertPass(program, ra);
-    }
-
-
-    // Test for go/apf-ra-filter Case 1b.
-    // Old lifetime is 0
-    @Test
-    public void testAcceptRaMinLftCase1b() throws Exception {
-        final MockIpClientCallback ipClientCallback = new MockIpClientCallback();
-        // configure accept_ra_min_lft
-        final ApfConfiguration config = getDefaultConfig();
-        config.acceptRaMinLft = 180;
-        final TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback,
-                mNetworkQuirkMetrics, mDependencies);
-
-        // Create an initial RA and build an APF program
-        byte[] ra = new RaPacketBuilder(0 /* router lifetime */).build();
-
-        apfFilter.pretendPacketReceived(ra);
-        byte[] program = ipClientCallback.assertProgramUpdateAndGet();
-
-        // repeated RA is dropped
-        assertDrop(program, ra);
-
-        // lifetime increases below accept_ra_min_lft
-        ra = new RaPacketBuilder(179 /* router lifetime */).build();
-        assertDrop(program, ra);
-
-        // lifetime increases to accept_ra_min_lft
-        ra = new RaPacketBuilder(180 /* router lifetime */).build();
-        assertPass(program, ra);
-    }
-
-
-    // Test for go/apf-ra-filter Case 2b.
-    // Old lifetime is < accept_ra_min_lft (but not 0).
-    @Test
-    public void testAcceptRaMinLftCase2b() throws Exception {
-        final MockIpClientCallback ipClientCallback = new MockIpClientCallback();
-        // configure accept_ra_min_lft
-        final ApfConfiguration config = getDefaultConfig();
-        config.acceptRaMinLft = 180;
-        final TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback,
-                mNetworkQuirkMetrics, mDependencies);
-
-        // Create an initial RA and build an APF program
-        byte[] ra = new RaPacketBuilder(100 /* router lifetime */).build();
-
-        apfFilter.pretendPacketReceived(ra);
-        byte[] program = ipClientCallback.assertProgramUpdateAndGet();
-
-        // repeated RA is dropped
-        assertDrop(program, ra);
-
-        // lifetime increases
-        ra = new RaPacketBuilder(101 /* router lifetime */).build();
-        assertDrop(program, ra);
-
-        // lifetime decreases significantly
-        ra = new RaPacketBuilder(1 /* router lifetime */).build();
-        assertDrop(program, ra);
-
-        // equals accept_ra_min_lft
-        ra = new RaPacketBuilder(180 /* router lifetime */).build();
-        assertPass(program, ra);
-
-        // lifetime is 0
-        ra = new RaPacketBuilder(0 /* router lifetime */).build();
-        assertPass(program, ra);
-    }
-
-    // Test for go/apf-ra-filter Case 3b.
-    // Old lifetime is >= accept_ra_min_lft and <= 3 * accept_ra_min_lft
-    @Test
-    public void testAcceptRaMinLftCase3b() throws Exception {
-        final MockIpClientCallback ipClientCallback = new MockIpClientCallback();
-        // configure accept_ra_min_lft
-        final ApfConfiguration config = getDefaultConfig();
-        config.acceptRaMinLft = 180;
-        final TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback,
-                mNetworkQuirkMetrics, mDependencies);
-
-        // Create an initial RA and build an APF program
-        byte[] ra = new RaPacketBuilder(200 /* router lifetime */).build();
-
-        apfFilter.pretendPacketReceived(ra);
-        byte[] program = ipClientCallback.assertProgramUpdateAndGet();
-
-        // repeated RA is dropped
-        assertDrop(program, ra);
-
-        // lifetime increases
-        ra = new RaPacketBuilder(201 /* router lifetime */).build();
-        assertPass(program, ra);
-
-        // lifetime is below accept_ra_min_lft (but not 0)
-        ra = new RaPacketBuilder(1 /* router lifetime */).build();
-        assertDrop(program, ra);
-
-        // lifetime is 0
-        ra = new RaPacketBuilder(0 /* router lifetime */).build();
-        assertPass(program, ra);
-    }
-
-    // Test for go/apf-ra-filter Case 4b.
-    // Old lifetime is > 3 * accept_ra_min_lft
-    @Test
-    public void testAcceptRaMinLftCase4b() throws Exception {
-        final MockIpClientCallback ipClientCallback = new MockIpClientCallback();
-        // configure accept_ra_min_lft
-        final ApfConfiguration config = getDefaultConfig();
-        config.acceptRaMinLft = 180;
-        final TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback,
-                mNetworkQuirkMetrics, mDependencies);
-
-        // Create an initial RA and build an APF program
-        byte[] ra = new RaPacketBuilder(1800 /* router lifetime */).build();
-
-        apfFilter.pretendPacketReceived(ra);
-        byte[] program = ipClientCallback.assertProgramUpdateAndGet();
-
-        // repeated RA is dropped
-        assertDrop(program, ra);
-
-        // lifetime increases
-        ra = new RaPacketBuilder(1801 /* router lifetime */).build();
-        assertPass(program, ra);
-
-        // lifetime is 1/3 of old lft
-        ra = new RaPacketBuilder(600 /* router lifetime */).build();
-        assertDrop(program, ra);
-
-        // lifetime is below 1/3 of old lft
-        ra = new RaPacketBuilder(599 /* router lifetime */).build();
-        assertPass(program, ra);
-
-        // lifetime is below accept_ra_min_lft (but not 0)
-        ra = new RaPacketBuilder(1 /* router lifetime */).build();
-        assertDrop(program, ra);
-
-        // lifetime is 0
-        ra = new RaPacketBuilder(0 /* router lifetime */).build();
-        assertPass(program, ra);
-    }
-
-    @Test
-    public void testRaFilterIsUpdated() throws Exception {
-        final MockIpClientCallback ipClientCallback = new MockIpClientCallback();
-        // configure accept_ra_min_lft
-        final ApfConfiguration config = getDefaultConfig();
-        config.acceptRaMinLft = 180;
-        final TestApfFilter apfFilter = new TestApfFilter(mContext, config, ipClientCallback,
-                mNetworkQuirkMetrics, mDependencies);
-
-        // Create an initial RA and build an APF program
-        byte[] ra = new RaPacketBuilder(1800 /* router lifetime */).build();
-        apfFilter.pretendPacketReceived(ra);
-        byte[] program = ipClientCallback.assertProgramUpdateAndGet();
-
-        // repeated RA is dropped.
-        assertDrop(program, ra);
-
-        // updated RA is passed, repeated RA is dropped after program update.
-        ra = new RaPacketBuilder(599 /* router lifetime */).build();
-        assertPass(program, ra);
-        apfFilter.pretendPacketReceived(ra);
-        program = ipClientCallback.assertProgramUpdateAndGet();
-        assertDrop(program, ra);
-
-        ra = new RaPacketBuilder(180 /* router lifetime */).build();
-        assertPass(program, ra);
-        apfFilter.pretendPacketReceived(ra);
-        program = ipClientCallback.assertProgramUpdateAndGet();
-        assertDrop(program, ra);
-
-        ra = new RaPacketBuilder(0 /* router lifetime */).build();
-        assertPass(program, ra);
-        apfFilter.pretendPacketReceived(ra);
-        program = ipClientCallback.assertProgramUpdateAndGet();
-        assertDrop(program, ra);
-
-        ra = new RaPacketBuilder(180 /* router lifetime */).build();
-        assertPass(program, ra);
-        apfFilter.pretendPacketReceived(ra);
-        program = ipClientCallback.assertProgramUpdateAndGet();
-        assertDrop(program, ra);
-
-        ra = new RaPacketBuilder(599 /* router lifetime */).build();
-        assertPass(program, ra);
-        apfFilter.pretendPacketReceived(ra);
-        program = ipClientCallback.assertProgramUpdateAndGet();
-        assertDrop(program, ra);
-
-        ra = new RaPacketBuilder(1800 /* router lifetime */).build();
-        assertPass(program, ra);
-        apfFilter.pretendPacketReceived(ra);
-        program = ipClientCallback.assertProgramUpdateAndGet();
-        assertDrop(program, ra);
-    }
-
     private TestAndroidPacketFilter makeTestApfFilter(ApfConfiguration config,
-            MockIpClientCallback ipClientCallback, boolean isLegacy) throws Exception {
-        final TestAndroidPacketFilter apfFilter;
-        if (isLegacy) {
-            apfFilter = new TestLegacyApfFilter(mContext, config, ipClientCallback,
-                    mIpConnectivityLog, mNetworkQuirkMetrics, mDependencies, mClock);
-        } else {
-            apfFilter = new TestApfFilter(mContext, config, ipClientCallback, mNetworkQuirkMetrics,
-                    mDependencies, mClock);
-        }
-        return apfFilter;
+            MockIpClientCallback ipClientCallback) throws Exception {
+        return new TestLegacyApfFilter(mContext, config, ipClientCallback, mIpConnectivityLog,
+                mNetworkQuirkMetrics, mDependencies, mClock);
     }
 
-    // LegacyApfFilter ignores zero lifetime RAs (doesn't update program) but ApfFilter won't.
-    private void verifyUpdateProgramForZeroLifetimeRa(MockIpClientCallback ipClientCallback,
-            boolean isLegacy) {
-        if (isLegacy) {
-            ipClientCallback.assertNoProgramUpdate();
-        } else {
-            ipClientCallback.assertProgramUpdateAndGet();
-        }
-    }
 
-    private void verifyInstallPacketFilterFailure(boolean isLegacy) throws Exception {
+    @Test
+    public void testInstallPacketFilterFailure_LegacyApfFilter() throws Exception {
         final MockIpClientCallback ipClientCallback = new MockIpClientCallback(false);
         final ApfConfiguration config = getDefaultConfig();
-        final TestAndroidPacketFilter apfFilter =
-                makeTestApfFilter(config, ipClientCallback, isLegacy);
+        final TestAndroidPacketFilter apfFilter = makeTestApfFilter(config, ipClientCallback);
         verify(mNetworkQuirkMetrics).setEvent(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
         verify(mNetworkQuirkMetrics).statsWrite();
         reset(mNetworkQuirkMetrics);
@@ -2066,22 +1789,12 @@ public class LegacyApfTest {
     }
 
     @Test
-    public void testInstallPacketFilterFailure() throws Exception {
-        verifyInstallPacketFilterFailure(false /* isLegacy */);
-    }
-
-    @Test
-    public void testInstallPacketFilterFailure_LegacyApfFilter() throws Exception {
-        verifyInstallPacketFilterFailure(true /* isLegacy */);
-    }
-
-    private void verifyApfProgramOverSize(boolean isLegacy) throws Exception {
+    public void testApfProgramOverSize_LegacyApfFilter() throws Exception {
         final MockIpClientCallback ipClientCallback = new MockIpClientCallback();
         final ApfConfiguration config = getDefaultConfig();
         final ApfCapabilities capabilities = new ApfCapabilities(2, 512, ARPHRD_ETHER);
         config.apfCapabilities = capabilities;
-        final TestAndroidPacketFilter apfFilter =
-                makeTestApfFilter(config, ipClientCallback, isLegacy);
+        final TestAndroidPacketFilter apfFilter = makeTestApfFilter(config, ipClientCallback);
         byte[] program = ipClientCallback.assertProgramUpdateAndGet();
         final byte[] ra = buildLargeRa();
         apfFilter.pretendPacketReceived(ra);
@@ -2092,27 +1805,13 @@ public class LegacyApfTest {
     }
 
     @Test
-    public void testApfProgramOverSize() throws Exception {
-        verifyApfProgramOverSize(false /* isLegacy */);
-    }
-
-    @Test
-    public void testApfProgramOverSize_LegacyApfFilter() throws Exception {
-        verifyApfProgramOverSize(true /* isLegacy */);
-    }
-
-    private void verifyGenerateApfProgramException(boolean isLegacy) throws Exception {
+    public void testGenerateApfProgramException_LegacyApfFilter() throws Exception {
         final MockIpClientCallback ipClientCallback = new MockIpClientCallback();
         final ApfConfiguration config = getDefaultConfig();
         final TestAndroidPacketFilter apfFilter;
-        if (isLegacy) {
-            apfFilter = new TestLegacyApfFilter(mContext, config, ipClientCallback,
-                    mIpConnectivityLog, mNetworkQuirkMetrics, mDependencies,
-                    true /* throwsExceptionWhenGeneratesProgram */);
-        } else {
-            apfFilter = new TestApfFilter(mContext, config, ipClientCallback, mNetworkQuirkMetrics,
-                    mDependencies, true /* throwsExceptionWhenGeneratesProgram */);
-        }
+        apfFilter = new TestLegacyApfFilter(mContext, config, ipClientCallback, mIpConnectivityLog,
+                mNetworkQuirkMetrics, mDependencies,
+                true /* throwsExceptionWhenGeneratesProgram */);
         synchronized (apfFilter) {
             apfFilter.installNewProgramLocked();
         }
@@ -2121,16 +1820,7 @@ public class LegacyApfTest {
     }
 
     @Test
-    public void testGenerateApfProgramException() throws Exception {
-        verifyGenerateApfProgramException(false /* isLegacy */);
-    }
-
-    @Test
-    public void testGenerateApfProgramException_LegacyApfFilter() throws Exception {
-        verifyGenerateApfProgramException(true /* isLegacy */);
-    }
-
-    private void verifyApfSessionInfoMetrics(boolean isLegacy) throws Exception {
+    public void testApfSessionInfoMetrics_LegacyApfFilter() throws Exception {
         final MockIpClientCallback ipClientCallback = new MockIpClientCallback();
         final ApfConfiguration config = getDefaultConfig();
         final ApfCapabilities capabilities = new ApfCapabilities(4, 4096, ARPHRD_ETHER);
@@ -2138,8 +1828,7 @@ public class LegacyApfTest {
         final long startTimeMs = 12345;
         final long durationTimeMs = config.minMetricsSessionDurationMs;
         doReturn(startTimeMs).when(mClock).elapsedRealtime();
-        final TestAndroidPacketFilter apfFilter =
-                makeTestApfFilter(config, ipClientCallback, isLegacy);
+        final TestAndroidPacketFilter apfFilter = makeTestApfFilter(config, ipClientCallback);
         int maxProgramSize = 0;
         int numProgramUpdated = 0;
         byte[] program = ipClientCallback.assertProgramUpdateAndGet();
@@ -2211,23 +1900,13 @@ public class LegacyApfTest {
     }
 
     @Test
-    public void testApfSessionInfoMetrics() throws Exception {
-        verifyApfSessionInfoMetrics(false /* isLegacy */);
-    }
-
-    @Test
-    public void testApfSessionInfoMetrics_LegacyApfFilter() throws Exception {
-        verifyApfSessionInfoMetrics(true /* isLegacy */);
-    }
-
-    private void verifyIpClientRaInfoMetrics(boolean isLegacy) throws Exception {
+    public void testIpClientRaInfoMetrics_LegacyApfFilter() throws Exception {
         final MockIpClientCallback ipClientCallback = new MockIpClientCallback();
         final ApfConfiguration config = getDefaultConfig();
         final long startTimeMs = 12345;
         final long durationTimeMs = config.minMetricsSessionDurationMs;
         doReturn(startTimeMs).when(mClock).elapsedRealtime();
-        final TestAndroidPacketFilter apfFilter =
-                makeTestApfFilter(config, ipClientCallback, isLegacy);
+        final TestAndroidPacketFilter apfFilter = makeTestApfFilter(config, ipClientCallback);
         byte[] program = ipClientCallback.assertProgramUpdateAndGet();
 
         final int routerLifetime = 1000;
@@ -2272,27 +1951,23 @@ public class LegacyApfTest {
         apfFilter.pretendPacketReceived(raInvalid.build());
         ipClientCallback.assertNoProgramUpdate();
         apfFilter.pretendPacketReceived(raZeroRouterLifetime.build());
-        verifyUpdateProgramForZeroLifetimeRa(ipClientCallback, isLegacy);
+        ipClientCallback.assertNoProgramUpdate();
         apfFilter.pretendPacketReceived(raZeroPioValidLifetime.build());
-        verifyUpdateProgramForZeroLifetimeRa(ipClientCallback, isLegacy);
+        ipClientCallback.assertNoProgramUpdate();
         apfFilter.pretendPacketReceived(raZeroRdnssLifetime.build());
-        verifyUpdateProgramForZeroLifetimeRa(ipClientCallback, isLegacy);
+        ipClientCallback.assertNoProgramUpdate();
         apfFilter.pretendPacketReceived(raZeroRioRouteLifetime.build());
-        verifyUpdateProgramForZeroLifetimeRa(ipClientCallback, isLegacy);
+        ipClientCallback.assertNoProgramUpdate();
 
         // Write metrics data to statsd pipeline when shutdown.
         doReturn(startTimeMs + durationTimeMs).when(mClock).elapsedRealtime();
         apfFilter.shutdown();
 
         // Verify each metric fields in IpClientRaInfoMetrics.
-        if (isLegacy) {
-            // LegacyApfFilter will purge expired RAs before adding new RA. Every time a new zero
-            // lifetime RA is received, zero lifetime RAs except the newly added one will be
-            // cleared, so the number of distinct RAs is 3 (ra1, ra2 and the newly added RA).
-            verify(mIpClientRaInfoMetrics).setMaxNumberOfDistinctRas(3);
-        } else {
-            verify(mIpClientRaInfoMetrics).setMaxNumberOfDistinctRas(6);
-        }
+        // LegacyApfFilter will purge expired RAs before adding new RA. Every time a new zero
+        // lifetime RA is received, zero lifetime RAs except the newly added one will be
+        // cleared, so the number of distinct RAs is 3 (ra1, ra2 and the newly added RA).
+        verify(mIpClientRaInfoMetrics).setMaxNumberOfDistinctRas(3);
         verify(mIpClientRaInfoMetrics).setNumberOfZeroLifetimeRas(4);
         verify(mIpClientRaInfoMetrics).setNumberOfParsingErrorRas(1);
         verify(mIpClientRaInfoMetrics).setLowestRouterLifetimeSeconds(routerLifetime);
@@ -2303,16 +1978,7 @@ public class LegacyApfTest {
     }
 
     @Test
-    public void testIpClientRaInfoMetrics() throws Exception {
-        verifyIpClientRaInfoMetrics(false /* isLegacy */);
-    }
-
-    @Test
-    public void testIpClientRaInfoMetrics_LegacyApfFilter() throws Exception {
-        verifyIpClientRaInfoMetrics(true /* isLegacy */);
-    }
-
-    private void verifyNoMetricsWrittenForShortDuration(boolean isLegacy) throws Exception {
+    public void testNoMetricsWrittenForShortDuration_LegacyApfFilter() throws Exception {
         final MockIpClientCallback ipClientCallback = new MockIpClientCallback();
         final ApfConfiguration config = getDefaultConfig();
         final long startTimeMs = 12345;
@@ -2320,8 +1986,7 @@ public class LegacyApfTest {
 
         // Verify no metrics data written to statsd for duration less than durationTimeMs.
         doReturn(startTimeMs).when(mClock).elapsedRealtime();
-        final TestAndroidPacketFilter apfFilter =
-                makeTestApfFilter(config, ipClientCallback, isLegacy);
+        final TestAndroidPacketFilter apfFilter = makeTestApfFilter(config, ipClientCallback);
         doReturn(startTimeMs + durationTimeMs - 1).when(mClock).elapsedRealtime();
         apfFilter.shutdown();
         verify(mApfSessionInfoMetrics, never()).statsWrite();
@@ -2337,15 +2002,5 @@ public class LegacyApfTest {
         apfFilter2.shutdown();
         verify(mApfSessionInfoMetrics).statsWrite();
         verify(mIpClientRaInfoMetrics).statsWrite();
-    }
-
-    @Test
-    public void testNoMetricsWrittenForShortDuration() throws Exception {
-        verifyNoMetricsWrittenForShortDuration(false /* isLegacy */);
-    }
-
-    @Test
-    public void testNoMetricsWrittenForShortDuration_LegacyApfFilter() throws Exception {
-        verifyNoMetricsWrittenForShortDuration(true /* isLegacy */);
     }
 }
