@@ -28,14 +28,15 @@ import android.net.apf.ApfCounterTracker.Counter.DROPPED_ETHERTYPE_NOT_ALLOWED
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_ETH_BROADCAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_NON_DHCP4
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_INVALID
-import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_NO_ADDRESS
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_OTHER_HOST
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ALLOCATE_FAILURE
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP
+import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_REQUEST
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV4
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV4_FROM_DHCPV4_SERVER
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_ICMP
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_MULTIPLE_OPTIONS
+import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_NO_ADDRESS
 import android.net.apf.ApfCounterTracker.Counter.PASSED_TRANSMIT_FAILURE
 import android.net.apf.ApfCounterTracker.Counter.TOTAL_PACKETS
 import android.net.apf.ApfFilter.Dependencies
@@ -375,6 +376,12 @@ class ApfNewTest {
             gen.addCountAndDropIfBytesAtR0NotEqual(byteArrayOf(1), PASSED_ARP)
         }
         assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndDropIfBytesAtR0Equal(byteArrayOf(1), PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            gen.addCountAndPassIfBytesAtR0Equal(byteArrayOf(1), DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
             gen.addCountAndDropIfR0AnyBitsSet(3, PASSED_ARP)
         }
         assertFailsWith<IllegalArgumentException> {
@@ -446,6 +453,12 @@ class ApfNewTest {
         }
         assertFailsWith<IllegalArgumentException> {
             v4gen.addCountAndPassIfR0NotEquals(3, DROPPED_ETH_BROADCAST)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndDropIfBytesAtR0Equal(byteArrayOf(1), PASSED_ARP)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            v4gen.addCountAndPassIfBytesAtR0Equal(byteArrayOf(1), DROPPED_ETH_BROADCAST)
         }
         assertFailsWith<IllegalArgumentException> {
             v4gen.addCountAndDropIfR0LessThan(3, PASSED_ARP)
@@ -1302,6 +1315,30 @@ class ApfNewTest {
                 .addCountTrampoline()
                 .generate()
         verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_ARP, incTotal = incTotal)
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 1)
+                .addCountAndDropIfBytesAtR0Equal(
+                        byteArrayOf(2, 3), DROPPED_ETH_BROADCAST)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        verifyProgramRun(
+                APF_VERSION_6,
+                program,
+                testPacket,
+                DROPPED_ETH_BROADCAST,
+                incTotal = incTotal
+        )
+
+        program = getGenerator()
+                .addLoadImmediate(R0, 1)
+                .addCountAndPassIfBytesAtR0Equal(
+                        byteArrayOf(2, 3), PASSED_ARP)
+                .addPass()
+                .addCountTrampoline()
+                .generate()
+        verifyProgramRun(APF_VERSION_6, program, testPacket, PASSED_ARP, incTotal = incTotal)
     }
 
     private fun doTestEtherTypeAllowListFilter(apfVersion: Int) {
@@ -1880,6 +1917,41 @@ class ApfNewTest {
     }
 
     @Test
+    fun testArpOffloadDisabled() {
+        val apfConfig = getDefaultConfig()
+        apfConfig.shouldHandleArpOffload = false
+        val apfFilter =
+            ApfFilter(
+                context,
+                apfConfig,
+                ifParams,
+                ipClientCallback,
+                metrics,
+                dependencies
+            )
+        verify(ipClientCallback, times(2)).installPacketFilter(any())
+        val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
+        val lp = LinkProperties()
+        lp.addLinkAddress(linkAddress)
+        apfFilter.setLinkProperties(lp)
+        val programCaptor = ArgumentCaptor.forClass(ByteArray::class.java)
+        verify(ipClientCallback, times(3)).installPacketFilter(programCaptor.capture())
+        val program = programCaptor.value
+        val receivedArpPacketBuf = ArpPacket.buildArpPacket(
+            arpBroadcastMacAddress,
+            senderMacAddress,
+            hostIpv4Address,
+            HexDump.hexStringToByteArray("000000000000"),
+            senderIpv4Address,
+            ARP_REQUEST.toShort()
+        )
+        val receivedArpPacket = ByteArray(ARP_ETHER_IPV4_LEN)
+        receivedArpPacketBuf.get(receivedArpPacket)
+        verifyProgramRun(APF_VERSION_6, program, receivedArpPacket, PASSED_ARP_REQUEST)
+        apfFilter.shutdown()
+    }
+
+    @Test
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     fun testNsFilterNoIPv6() {
         `when`(dependencies.getAnycast6Addresses(any())).thenReturn(listOf())
@@ -1905,12 +1977,12 @@ class ApfNewTest {
         val nsPkt = "01020304050600010203040586DD6000000000183AFF200100000000000" +
                     "00200001A1122334420010000000000000200001A334411228700452900" +
                     "00000020010000000000000200001A33441122"
-        // when there is no IPv6 addresses -> drop NS packet
+        // when there is no IPv6 addresses -> pass NS packet
         verifyProgramRun(
                 APF_VERSION_6,
                 program,
                 HexDump.hexStringToByteArray(nsPkt),
-                DROPPED_IPV6_NS_NO_ADDRESS
+                PASSED_IPV6_NS_NO_ADDRESS
         )
 
         apfFilter.shutdown()
@@ -2296,6 +2368,7 @@ class ApfNewTest {
         config.multicastFilter = false
         config.ieee802_3Filter = false
         config.ethTypeBlackList = IntArray(0)
+        config.shouldHandleArpOffload = true
         return config
     }
 }
