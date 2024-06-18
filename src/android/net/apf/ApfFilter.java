@@ -66,6 +66,8 @@ import static android.net.apf.ApfConstants.TCP_UDP_DESTINATION_PORT_OFFSET;
 import static android.net.apf.ApfConstants.TCP_UDP_SOURCE_PORT_OFFSET;
 import static android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_INVALID;
 import static android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_OTHER_HOST;
+import static android.net.apf.ApfCounterTracker.Counter.FILTER_AGE_16384THS;
+import static android.net.apf.ApfCounterTracker.Counter.FILTER_AGE_SECONDS;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_MULTIPLE_OPTIONS;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_NO_ADDRESS;
 import static android.net.apf.BaseApfGenerator.MemorySlot;
@@ -190,6 +192,7 @@ public class ApfFilter implements AndroidPacketFilter {
         public boolean shouldHandleLightDoze;
         public long minMetricsSessionDurationMs;
         public boolean hasClatInterface;
+        public boolean shouldHandleArpOffload;
     }
 
     /** A wrapper class of {@link SystemClock} to be mocked in unit tests. */
@@ -287,6 +290,7 @@ public class ApfFilter implements AndroidPacketFilter {
     // and PIO valid lifetimes.
     private final int mAcceptRaMinLft;
     private final boolean mShouldHandleLightDoze;
+    private final boolean mShouldHandleArpOffload;
 
     private final NetworkQuirkMetrics mNetworkQuirkMetrics;
     private final IpClientRaInfoMetrics mIpClientRaInfoMetrics;
@@ -390,6 +394,7 @@ public class ApfFilter implements AndroidPacketFilter {
         mMinRdnssLifetimeSec = config.minRdnssLifetimeSec;
         mAcceptRaMinLft = config.acceptRaMinLft;
         mShouldHandleLightDoze = config.shouldHandleLightDoze;
+        mShouldHandleArpOffload = config.shouldHandleArpOffload;
         mDependencies = dependencies;
         mNetworkQuirkMetrics = networkQuirkMetrics;
         mIpClientRaInfoMetrics = dependencies.getIpClientRaInfoMetrics();
@@ -520,11 +525,13 @@ public class ApfFilter implements AndroidPacketFilter {
         }
     }
 
-    public synchronized void setDataSnapshot(byte[] data) {
+    @Override
+    public synchronized String setDataSnapshot(byte[] data) {
         mDataSnapshot = data;
         if (mIsRunning) {
             mApfCounterTracker.updateCountersFromData(data);
         }
+        return mApfCounterTracker.getCounters().toString();
     }
 
     private void log(String s) {
@@ -1631,7 +1638,7 @@ public class ApfFilter implements AndroidPacketFilter {
                     Counter.DROPPED_ARP_OTHER_HOST);
 
             ApfV6Generator v6Gen = tryToConvertToApfV6Generator(gen);
-            if (v6Gen != null) {
+            if (v6Gen != null && mShouldHandleArpOffload) {
                 // Ethernet requires that all packets be at least 60 bytes long
                 v6Gen.addAllocate(60)
                         .addPacketCopy(ETHER_SRC_ADDR_OFFSET, ETHER_ADDR_LEN)
@@ -2805,10 +2812,17 @@ public class ApfFilter implements AndroidPacketFilter {
                         pw.println(c.toString() + ": " + value);
                     }
 
-                    // If the counter's value decreases, it may have been cleaned up or there may be
-                    // a bug.
-                    if (value < mApfCounterTracker.getCounters().getOrDefault(c, 0L)) {
-                        Log.e(TAG, "Error: Counter value unexpectedly decreased.");
+                    final Set<Counter> skipCheckCounters = Set.of(FILTER_AGE_SECONDS,
+                            FILTER_AGE_16384THS);
+                    if (!skipCheckCounters.contains(c)) {
+                        // If the counter's value decreases, it may have been cleaned up or there
+                        // may be a bug.
+                        long oldValue = mApfCounterTracker.getCounters().getOrDefault(c, 0L);
+                        if (value < oldValue) {
+                            Log.e(TAG, String.format(
+                                    "Apf Counter: %s unexpectedly decreased. oldValue: %d. "
+                                            + "newValue: %d", c.toString(), oldValue, value));
+                        }
                     }
                 }
             } catch (ArrayIndexOutOfBoundsException e) {
