@@ -247,13 +247,13 @@ public class ApfTestUtils {
         private boolean mInstallPacketFilterReturn = true;
 
         MockIpClientCallback() {
-            super(mock(IIpClientCallbacks.class), mock(SharedLog.class),
-                    NetworkInformationShimImpl.newInstance());
+            super(mock(IIpClientCallbacks.class), mock(SharedLog.class), mock(SharedLog.class),
+                    NetworkInformationShimImpl.newInstance(), false);
         }
 
         MockIpClientCallback(boolean installPacketFilterReturn) {
-            super(mock(IIpClientCallbacks.class), mock(SharedLog.class),
-                    NetworkInformationShimImpl.newInstance());
+            super(mock(IIpClientCallbacks.class), mock(SharedLog.class), mock(SharedLog.class),
+                    NetworkInformationShimImpl.newInstance(), false);
             mInstallPacketFilterReturn = installPacketFilterReturn;
         }
 
@@ -291,7 +291,7 @@ public class ApfTestUtils {
      * The test apf filter class.
      */
     public static class TestApfFilter extends ApfFilter implements TestAndroidPacketFilter {
-        public static final byte[] MOCK_MAC_ADDR = {1, 2, 3, 4, 5, 6};
+        public static final byte[] MOCK_MAC_ADDR = {2, 3, 4, 5, 6, 7};
         private static final byte[] MOCK_IPV4_ADDR = {10, 0, 0, 1};
 
         private FileDescriptor mWriteSocket;
