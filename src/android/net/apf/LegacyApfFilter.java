@@ -394,7 +394,7 @@ public class LegacyApfFilter implements AndroidPacketFilter {
             IpConnectivityLog log, NetworkQuirkMetrics networkQuirkMetrics,
             ApfFilter.Dependencies dependencies, ApfFilter.Clock clock) {
         mApfVersionSupported = config.apfVersionSupported;
-        mMaximumApfProgramSize = config.maximumApfProgramSize;
+        mMaximumApfProgramSize = config.apfRamSize;
         mIpClientCallback = ipClientCallback;
         mInterfaceParams = ifParams;
         mMulticastFilter = config.multicastFilter;
@@ -1729,7 +1729,8 @@ public class LegacyApfFilter implements AndroidPacketFilter {
     @GuardedBy("this")
     protected ApfV4Generator emitPrologueLocked() throws IllegalInstructionException {
         // This is guaranteed to succeed because of the check in maybeCreate.
-        ApfV4Generator gen = new ApfV4Generator(mApfVersionSupported);
+        ApfV4Generator gen = new ApfV4Generator(mApfVersionSupported, mMaximumApfProgramSize,
+                mMaximumApfProgramSize);
 
         if (hasDataAccess(mApfVersionSupported)) {
             // Increment TOTAL_PACKETS
@@ -2075,8 +2076,8 @@ public class LegacyApfFilter implements AndroidPacketFilter {
         if (!ApfV4Generator.supportsVersion(config.apfVersionSupported)) {
             return null;
         }
-        if (config.maximumApfProgramSize < 512) {
-            Log.e(TAG, "Unacceptably small APF limit: " + config.maximumApfProgramSize);
+        if (config.apfRamSize < 512) {
+            Log.e(TAG, "Unacceptably small APF limit: " + config.apfRamSize);
             return null;
         }
 
