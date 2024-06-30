@@ -36,10 +36,28 @@ import static android.net.apf.ApfConstants.ETH_MULTICAST_MDNS_V6_MAC_ADDRESS;
 import static android.net.apf.ApfConstants.ETH_TYPE_MAX;
 import static android.net.apf.ApfConstants.ETH_TYPE_MIN;
 import static android.net.apf.ApfConstants.FIXED_ARP_REPLY_HEADER;
+import static android.net.apf.ApfConstants.ICMP6_4_BYTE_LIFETIME_LEN;
+import static android.net.apf.ApfConstants.ICMP6_4_BYTE_LIFETIME_OFFSET;
+import static android.net.apf.ApfConstants.ICMP6_CAPTIVE_PORTAL_OPTION_TYPE;
 import static android.net.apf.ApfConstants.ICMP6_CHECKSUM_OFFSET;
 import static android.net.apf.ApfConstants.ICMP6_CODE_OFFSET;
+import static android.net.apf.ApfConstants.ICMP6_DNSSL_OPTION_TYPE;
+import static android.net.apf.ApfConstants.ICMP6_MTU_OPTION_TYPE;
 import static android.net.apf.ApfConstants.ICMP6_NS_OPTION_TYPE_OFFSET;
 import static android.net.apf.ApfConstants.ICMP6_NS_TARGET_IP_OFFSET;
+import static android.net.apf.ApfConstants.ICMP6_PREF64_OPTION_TYPE;
+import static android.net.apf.ApfConstants.ICMP6_PREFIX_OPTION_PREFERRED_LIFETIME_LEN;
+import static android.net.apf.ApfConstants.ICMP6_PREFIX_OPTION_TYPE;
+import static android.net.apf.ApfConstants.ICMP6_PREFIX_OPTION_VALID_LIFETIME_LEN;
+import static android.net.apf.ApfConstants.ICMP6_PREFIX_OPTION_VALID_LIFETIME_OFFSET;
+import static android.net.apf.ApfConstants.ICMP6_RA_CHECKSUM_LEN;
+import static android.net.apf.ApfConstants.ICMP6_RA_CHECKSUM_OFFSET;
+import static android.net.apf.ApfConstants.ICMP6_RA_OPTION_OFFSET;
+import static android.net.apf.ApfConstants.ICMP6_RA_ROUTER_LIFETIME_LEN;
+import static android.net.apf.ApfConstants.ICMP6_RA_ROUTER_LIFETIME_OFFSET;
+import static android.net.apf.ApfConstants.ICMP6_RDNSS_OPTION_TYPE;
+import static android.net.apf.ApfConstants.ICMP6_ROUTE_INFO_OPTION_TYPE;
+import static android.net.apf.ApfConstants.ICMP6_SOURCE_LL_ADDRESS_OPTION_TYPE;
 import static android.net.apf.ApfConstants.ICMP6_TYPE_OFFSET;
 import static android.net.apf.ApfConstants.IPPROTO_HOPOPTS;
 import static android.net.apf.ApfConstants.IPV4_ANY_HOST_ADDRESS;
@@ -60,6 +78,7 @@ import static android.net.apf.ApfConstants.IPV6_NEXT_HEADER_OFFSET;
 import static android.net.apf.ApfConstants.IPV6_PAYLOAD_LEN_OFFSET;
 import static android.net.apf.ApfConstants.IPV6_SOLICITED_NODES_PREFIX;
 import static android.net.apf.ApfConstants.IPV6_SRC_ADDR_OFFSET;
+import static android.net.apf.ApfConstants.IPV6_UNSPECIFIED_ADDRESS;
 import static android.net.apf.ApfConstants.MDNS_PORT;
 import static android.net.apf.ApfConstants.TCP_HEADER_SIZE_OFFSET;
 import static android.net.apf.ApfConstants.TCP_UDP_DESTINATION_PORT_OFFSET;
@@ -68,7 +87,9 @@ import static android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_INVALID;
 import static android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_OTHER_HOST;
 import static android.net.apf.ApfCounterTracker.Counter.FILTER_AGE_16384THS;
 import static android.net.apf.ApfCounterTracker.Counter.FILTER_AGE_SECONDS;
-import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_MULTIPLE_OPTIONS;
+import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_DAD;
+import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_NO_SLLA_OPTION;
+import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_TENTATIVE;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_NO_ADDRESS;
 import static android.net.apf.BaseApfGenerator.MemorySlot;
 import static android.net.apf.BaseApfGenerator.Register.R0;
@@ -93,6 +114,7 @@ import static com.android.net.module.util.NetworkStackConstants.ETHER_HEADER_LEN
 import static com.android.net.module.util.NetworkStackConstants.ETHER_SRC_ADDR_OFFSET;
 import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ECHO_REQUEST_TYPE;
 import static com.android.net.module.util.NetworkStackConstants.ICMPV6_NA_HEADER_LEN;
+import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ND_OPTION_SLLA;
 import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ND_OPTION_TLLA;
 import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ND_OPTION_TLLA_LEN;
 import static com.android.net.module.util.NetworkStackConstants.ICMPV6_NEIGHBOR_ADVERTISEMENT;
@@ -189,10 +211,10 @@ public class ApfFilter implements AndroidPacketFilter {
         public int[] ethTypeBlackList;
         public int minRdnssLifetimeSec;
         public int acceptRaMinLft;
-        public boolean shouldHandleLightDoze;
         public long minMetricsSessionDurationMs;
         public boolean hasClatInterface;
         public boolean shouldHandleArpOffload;
+        public boolean shouldHandleNdOffload;
     }
 
     /** A wrapper class of {@link SystemClock} to be mocked in unit tests. */
@@ -291,8 +313,8 @@ public class ApfFilter implements AndroidPacketFilter {
     // Tracks the value of /proc/sys/ipv6/conf/$iface/accept_ra_min_lft which affects router, RIO,
     // and PIO valid lifetimes.
     private final int mAcceptRaMinLft;
-    private final boolean mShouldHandleLightDoze;
     private final boolean mShouldHandleArpOffload;
+    private final boolean mShouldHandleNdOffload;
 
     private final NetworkQuirkMetrics mNetworkQuirkMetrics;
     private final IpClientRaInfoMetrics mIpClientRaInfoMetrics;
@@ -309,9 +331,6 @@ public class ApfFilter implements AndroidPacketFilter {
         if (!SdkLevel.isAtLeastT()) {
             return false;
         }
-        if (!mShouldHandleLightDoze) {
-            return false;
-        }
         return ACTION_DEVICE_LIGHT_IDLE_MODE_CHANGED.equals(intent.getAction());
     }
 
@@ -320,9 +339,6 @@ public class ApfFilter implements AndroidPacketFilter {
         // the check should return false. The explicit SDK check is needed to make linter happy
         // about accessing powerManager.isDeviceLightIdleMode() in this function.
         if (!SdkLevel.isAtLeastT()) {
-            return false;
-        }
-        if (!mShouldHandleLightDoze) {
             return false;
         }
 
@@ -406,8 +422,8 @@ public class ApfFilter implements AndroidPacketFilter {
         mDrop802_3Frames = config.ieee802_3Filter;
         mMinRdnssLifetimeSec = config.minRdnssLifetimeSec;
         mAcceptRaMinLft = config.acceptRaMinLft;
-        mShouldHandleLightDoze = config.shouldHandleLightDoze;
         mShouldHandleArpOffload = config.shouldHandleArpOffload;
+        mShouldHandleNdOffload = config.shouldHandleNdOffload;
         mDependencies = dependencies;
         mNetworkQuirkMetrics = networkQuirkMetrics;
         mIpClientRaInfoMetrics = dependencies.getIpClientRaInfoMetrics();
@@ -434,7 +450,7 @@ public class ApfFilter implements AndroidPacketFilter {
         startFilter();
 
         // Listen for doze-mode transition changes to enable/disable the IPv6 multicast filter.
-        mDependencies.addDeviceIdleReceiver(mDeviceIdleReceiver, mShouldHandleLightDoze);
+        mDependencies.addDeviceIdleReceiver(mDeviceIdleReceiver);
 
         mDependencies.onApfFilterCreated(this);
         // mReceiveThread is created in startFilter() and halted in shutdown().
@@ -452,10 +468,9 @@ public class ApfFilter implements AndroidPacketFilter {
         }
 
         /** Add receiver for detecting doze mode change */
-        public void addDeviceIdleReceiver(@NonNull final BroadcastReceiver receiver,
-                boolean shouldHandleLightDoze) {
+        public void addDeviceIdleReceiver(@NonNull final BroadcastReceiver receiver) {
             final IntentFilter intentFilter = new IntentFilter(ACTION_DEVICE_IDLE_MODE_CHANGED);
-            if (SdkLevel.isAtLeastT() && shouldHandleLightDoze) {
+            if (SdkLevel.isAtLeastT()) {
                 intentFilter.addAction(ACTION_DEVICE_LIGHT_IDLE_MODE_CHANGED);
             }
             mContext.registerReceiver(receiver, intentFilter);
@@ -684,41 +699,6 @@ public class ApfFilter implements AndroidPacketFilter {
     // A class to hold information about an RA.
     @VisibleForTesting
     public class Ra {
-        // From RFC4861:
-        private static final int ICMP6_RA_HEADER_LEN = 16;
-        private static final int ICMP6_RA_CHECKSUM_OFFSET =
-                ETH_HEADER_LEN + IPV6_HEADER_LEN + 2;
-        private static final int ICMP6_RA_CHECKSUM_LEN = 2;
-        private static final int ICMP6_RA_OPTION_OFFSET =
-                ETH_HEADER_LEN + IPV6_HEADER_LEN + ICMP6_RA_HEADER_LEN;
-        private static final int ICMP6_RA_ROUTER_LIFETIME_OFFSET =
-                ETH_HEADER_LEN + IPV6_HEADER_LEN + 6;
-        private static final int ICMP6_RA_ROUTER_LIFETIME_LEN = 2;
-        // Prefix information option.
-        private static final int ICMP6_PREFIX_OPTION_TYPE = 3;
-        private static final int ICMP6_PREFIX_OPTION_VALID_LIFETIME_OFFSET = 4;
-        private static final int ICMP6_PREFIX_OPTION_VALID_LIFETIME_LEN = 4;
-        private static final int ICMP6_PREFIX_OPTION_PREFERRED_LIFETIME_LEN = 4;
-
-        // From RFC4861: source link-layer address
-        private static final int ICMP6_SOURCE_LL_ADDRESS_OPTION_TYPE = 1;
-        // From RFC4861: mtu size option
-        private static final int ICMP6_MTU_OPTION_TYPE = 5;
-        // From RFC6106: Recursive DNS Server option
-        private static final int ICMP6_RDNSS_OPTION_TYPE = 25;
-        // From RFC6106: DNS Search List option
-        private static final int ICMP6_DNSSL_OPTION_TYPE = 31;
-        // From RFC8910: Captive-Portal option
-        private static final int ICMP6_CAPTIVE_PORTAL_OPTION_TYPE = 37;
-        // From RFC8781: PREF64 option
-        private static final int ICMP6_PREF64_OPTION_TYPE = 38;
-
-        // From RFC4191: Route Information option
-        private static final int ICMP6_ROUTE_INFO_OPTION_TYPE = 24;
-        // Above three options all have the same format:
-        private static final int ICMP6_4_BYTE_LIFETIME_OFFSET = 4;
-        private static final int ICMP6_4_BYTE_LIFETIME_LEN = 4;
-
         // Note: mPacket's position() cannot be assumed to be reset.
         private final ByteBuffer mPacket;
 
@@ -1949,22 +1929,63 @@ public class ApfFilter implements AndroidPacketFilter {
         v6Gen.addLoad8(R0, ICMP6_CODE_OFFSET)
                 .addCountAndDropIfR0NotEquals(0, DROPPED_IPV6_NS_INVALID);
 
-        // target address (ICMPv6 NS/NA payload) is not interface addresses -> drop
-        v6Gen.addLoadImmediate(R0, ICMP6_NS_TARGET_IP_OFFSET)
-                .addCountAndDropIfBytesAtR0EqualsNoneOf(allIPv6Addrs, DROPPED_IPV6_NS_OTHER_HOST);
+        // target address (ICMPv6 NS payload)
+        //   1) is one of tentative addresses -> pass
+        //   2) is none of {non-tentative, anycast} addresses -> drop
+        final List<byte[]> tentativeIPv6Addrs = getIpv6Addresses(
+                false, /* includeNonTentative */
+                true, /* includeTentative */
+                false /* includeAnycast */
+        );
+        v6Gen.addLoadImmediate(R0, ICMP6_NS_TARGET_IP_OFFSET);
+        if (!tentativeIPv6Addrs.isEmpty()) {
+            v6Gen.addCountAndPassIfBytesAtR0EqualsAnyOf(
+                    tentativeIPv6Addrs, PASSED_IPV6_NS_TENTATIVE);
+        }
 
-        // Only offload the following cases:
-        //   1) NS packet with no options.
-        //   2) NS packet with only one option: nonce.
-        //   3) NS packet with only one option: SLLA.
-        // For packets containing more than one option,
-        // pass the packet to the CPU for processing.
-        // payload length > 32
-        //   (8 bytes ICMP6 header + 16 bytes target address + 8 bytes option) -> pass
+        final List<byte[]> nonTentativeIpv6Addrs = getIpv6Addresses(
+                true, /* includeNonTentative */
+                false, /* includeTentative */
+                true /* includeAnycast */
+        );
+        if (nonTentativeIpv6Addrs.isEmpty()) {
+            v6Gen.addCountAndDrop(DROPPED_IPV6_NS_OTHER_HOST);
+            return;
+        }
+        v6Gen.addCountAndDropIfBytesAtR0EqualsNoneOf(
+                nonTentativeIpv6Addrs, DROPPED_IPV6_NS_OTHER_HOST);
+
+        // if source ip is unspecified (::), it's DAD request -> pass
+        v6Gen.addLoadImmediate(R0, IPV6_SRC_ADDR_OFFSET)
+                .addCountAndPassIfBytesAtR0Equal(IPV6_UNSPECIFIED_ADDRESS, PASSED_IPV6_NS_DAD);
+
+        // Only offload NUD/Address resolution packets that have SLLA as the their first option.
+        // For option-less NUD packets or NUD/Address resolution packets where
+        // the first option is not SLLA, pass them to the kernel for handling.
+        // if payload len < 32 -> pass
         v6Gen.addLoad16(R0, IPV6_PAYLOAD_LEN_OFFSET)
-                .addCountAndPassIfR0GreaterThan(32, PASSED_IPV6_NS_MULTIPLE_OPTIONS);
+                .addCountAndPassIfR0LessThan(32, PASSED_IPV6_NS_NO_SLLA_OPTION);
 
-        v6Gen.addCountAndPass(Counter.PASSED_IPV6_ICMP);
+        // if the first option is not SLLA -> pass
+        // 0                   1                   2                   3
+        // 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+        // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+        // |     Type      |    Length     |Link-Layer Addr  |
+        // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+        v6Gen.addLoad8(R0, ICMP6_NS_OPTION_TYPE_OFFSET)
+                .addCountAndPassIfR0NotEquals(ICMPV6_ND_OPTION_SLLA,
+                        PASSED_IPV6_NS_NO_SLLA_OPTION);
+
+        // Src IPv6 address check:
+        // if multicast address (FF::/8) or loopback address (00::/8) -> drop
+        v6Gen.addLoad8(R0, IPV6_SRC_ADDR_OFFSET)
+                .addCountAndDropIfR0IsOneOf(Set.of(0L, 0xffL), DROPPED_IPV6_NS_INVALID);
+
+        // if multicast MAC in SLLA option -> drop
+        v6Gen.addLoad8(R0, ICMP6_NS_OPTION_TYPE_OFFSET + 2)
+                .addCountAndDropIfR0AnyBitsSet(1, DROPPED_IPV6_NS_INVALID);
+        generateNonDadNaTransmitLocked(v6Gen);
+        v6Gen.addCountAndDrop(Counter.DROPPED_IPV6_NS_REPLIED_NON_DAD);
     }
 
     /**
@@ -2001,10 +2022,19 @@ public class ApfFilter implements AndroidPacketFilter {
         //     drop
         //   if ICMPv6 code is not 0:
         //     drop
-        //   if target IP is none of interface unicast IPv6 addresses (incl. anycast):
-        //     drop
-        //   if payload len > 32 (8 bytes ICMP6 header + 16 bytes target address + 8 bytes option):
+        //   if target IP is one of tentative IPv6 addresses:
         //     pass
+        //   if target IP is none of non-tentative IPv6 addresses (incl. anycast):
+        //     drop
+        //   if IPv6 src is unspecified (::):
+        //     pass
+        //   if payload len < 32 (8 bytes ICMP6 header + 16 bytes target address + 8 bytes option):
+        //     pass
+        //   if IPv6 src is multicast address (FF::/8) or loopback address (00::/8):
+        //     drop
+        //   if multicast MAC in SLLA option:
+        //     drop
+        //   transmit NA and drop
         // if it's ICMPv6 RS to any:
         //   drop
         // if it's ICMPv6 NA to anything in ff02::/120
@@ -2056,7 +2086,7 @@ public class ApfFilter implements AndroidPacketFilter {
         // Not ICMPv6 NS -> skip.
         gen.addLoad8(R0, ICMP6_TYPE_OFFSET); // warning: also used further below.
         final ApfV6Generator v6Gen = tryToConvertToApfV6Generator(gen);
-        if (v6Gen != null) {
+        if (v6Gen != null && mShouldHandleNdOffload) {
             final String skipNsPacketFilter = v6Gen.getUniqueLabel();
             v6Gen.addJumpIfR0NotEquals(ICMPV6_NEIGHBOR_SOLICITATION, skipNsPacketFilter);
             generateNsFilterLocked(v6Gen);
