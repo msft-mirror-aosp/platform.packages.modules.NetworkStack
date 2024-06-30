@@ -48,8 +48,8 @@ import static com.android.net.module.util.NetworkStackConstants.RFC7421_PREFIX_L
 import static com.android.net.module.util.NetworkStackConstants.VENDOR_SPECIFIC_IE_ID;
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_MANAGETEMPADDR;
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_NOPREFIXROUTE;
-import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ARP_OFFLOAD_FORCE_DISABLE;
-import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_LIGHT_DOZE_FORCE_DISABLE;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ARP_OFFLOAD;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ND_OFFLOAD;
 import static com.android.networkstack.util.NetworkStackUtils.APF_NEW_RA_FILTER_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.APF_POLLING_COUNTERS_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION;
@@ -733,10 +733,10 @@ public class IpClient extends StateMachine {
     private final boolean mDhcp6PrefixDelegationEnabled;
     private final boolean mUseNewApfFilter;
     private final boolean mEnableIpClientIgnoreLowRaLifetime;
-    private final boolean mApfShouldHandleLightDoze;
     private final boolean mEnableApfPollingCounters;
     private final boolean mPopulateLinkAddressLifetime;
     private final boolean mApfShouldHandleArpOffload;
+    private final boolean mApfShouldHandleNdOffload;
 
     private InterfaceParams mInterfaceParams;
 
@@ -983,11 +983,10 @@ public class IpClient extends StateMachine {
         mEnableIpClientIgnoreLowRaLifetime =
                 SdkLevel.isAtLeastV() || mDependencies.isFeatureEnabled(context,
                         IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION);
-        // Light doze mode status checking API is only available at T or later releases.
-        mApfShouldHandleLightDoze = SdkLevel.isAtLeastT() && mDependencies.isFeatureNotChickenedOut(
-                mContext, APF_HANDLE_LIGHT_DOZE_FORCE_DISABLE);
         mApfShouldHandleArpOffload = mDependencies.isFeatureNotChickenedOut(
-                mContext, APF_HANDLE_ARP_OFFLOAD_FORCE_DISABLE);
+                mContext, APF_HANDLE_ARP_OFFLOAD);
+        mApfShouldHandleNdOffload = mDependencies.isFeatureNotChickenedOut(
+                mContext, APF_HANDLE_ND_OFFLOAD);
         mPopulateLinkAddressLifetime = mDependencies.isFeatureEnabled(context,
                 IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION);
 
@@ -2606,8 +2605,8 @@ public class IpClient extends StateMachine {
         } else {
             apfConfig.acceptRaMinLft = 0;
         }
-        apfConfig.shouldHandleLightDoze = mApfShouldHandleLightDoze;
         apfConfig.shouldHandleArpOffload = mApfShouldHandleArpOffload;
+        apfConfig.shouldHandleNdOffload = mApfShouldHandleNdOffload;
         apfConfig.minMetricsSessionDurationMs = mApfCounterPollingIntervalMs;
         apfConfig.hasClatInterface = mHasSeenClatInterface;
         return mDependencies.maybeCreateApfFilter(mContext, apfConfig, mInterfaceParams,
