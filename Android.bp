@@ -69,6 +69,7 @@ java_defaults {
         "framework-connectivity",
         "framework-connectivity-t",
         "framework-statsd",
+        "framework-tethering",
         "framework-wifi",
     ],
 }
@@ -78,7 +79,7 @@ java_defaults {
 java_defaults {
     name: "NetworkStackReleaseTargetSdk",
     min_sdk_version: "30",
-    target_sdk_version: "34",
+    target_sdk_version: "35",
 }
 
 java_defaults {
@@ -90,6 +91,7 @@ java_defaults {
         "framework-connectivity.stubs.module_lib",
         "framework-connectivity-t",
         "framework-statsd",
+        "framework-tethering",
         "framework-wifi",
     ],
 }
