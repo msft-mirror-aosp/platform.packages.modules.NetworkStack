@@ -22,6 +22,7 @@ import static android.net.apf.BaseApfGenerator.Register.R0;
 
 import android.annotation.NonNull;
 
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.net.module.util.ByteUtils;
 import com.android.net.module.util.CollectionUtils;
 import com.android.net.module.util.HexDump;
@@ -39,9 +40,12 @@ import java.util.Objects;
  */
 public abstract class BaseApfGenerator {
 
-    public BaseApfGenerator(int mVersion, boolean mDisableCounterRangeCheck) {
-        this.mVersion = mVersion;
-        this.mDisableCounterRangeCheck = mDisableCounterRangeCheck;
+    public BaseApfGenerator(int version, int ramSize, int clampSize,
+            boolean disableCounterRangeCheck) {
+        mVersion = version;
+        mRamSize = ramSize;
+        mClampSize = clampSize;
+        mDisableCounterRangeCheck = disableCounterRangeCheck;
     }
 
     /**
@@ -851,7 +855,8 @@ public abstract class BaseApfGenerator {
     /**
      * Return a unique label string.
      */
-    protected String getUniqueLabel() {
+    @VisibleForTesting
+    public String getUniqueLabel() {
         return "LABEL_" + mLabelCount++;
     }
 
@@ -954,6 +959,8 @@ public abstract class BaseApfGenerator {
     private final Instruction mDropLabel = new Instruction(Opcodes.LABEL);
     private final Instruction mPassLabel = new Instruction(Opcodes.LABEL);
     public final int mVersion;
+    public final int mRamSize;
+    public final int mClampSize;
     public boolean mGenerated;
     private final boolean mDisableCounterRangeCheck;
 }
