@@ -274,13 +274,12 @@ public class NetworkStackUtils {
     public static final String IPCLIENT_DHCPV6_PD_PREFERRED_FLAG_VERSION =
             "ipclient_dhcpv6_pd_preferred_flag_version";
 
-    /**** BEGIN Feature Kill Switch Flags ****/
-
     /**
-     * Kill switch flag to disable the feature of handle light doze mode in Apf.
+     * Experiment flag to enable Discovery of Designated Resolvers (DDR).
      */
-    public static final String APF_HANDLE_LIGHT_DOZE_FORCE_DISABLE =
-            "apf_handle_light_doze_force_disable";
+    public static final String DNS_DDR_VERSION = "dns_ddr_version";
+
+    /**** BEGIN Feature Kill Switch Flags ****/
 
     /**
      * Kill switch flag to disable the feature of skipping Tcp socket info polling when light
@@ -299,6 +298,18 @@ public class NetworkStackUtils {
      */
     public static final String IGNORE_TCP_INFO_FOR_BLOCKED_UIDS =
             "ignore_tcp_info_for_blocked_uids";
+
+    /**
+     * Kill switch flag to disable the feature of handle arp offload in Apf.
+     * Warning: the following flag String is incorrect. The feature that is not chickened out is
+     * "ARP offload" not "ARP offload force disabled".
+     */
+    public static final String APF_HANDLE_ARP_OFFLOAD = "apf_handle_arp_offload_force_disable";
+
+    /**
+     * Kill switch flag to disable the feature of handle nd offload in Apf.
+     */
+    public static final String APF_HANDLE_ND_OFFLOAD = "apf_handle_nd_offload";
 
     static {
         System.loadLibrary("networkstackutilsjni");
