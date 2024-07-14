@@ -265,7 +265,6 @@ public class ApfFilter implements AndroidPacketFilter {
     private static final boolean DBG = true;
     private static final boolean VDBG = false;
 
-    private final int mApfVersionSupported;
     private final int mApfRamSize;
     private final int mMaximumApfProgramSize;
     private final int mInstallableProgramSizeClamp;
@@ -273,6 +272,8 @@ public class ApfFilter implements AndroidPacketFilter {
     private final InterfaceParams mInterfaceParams;
     private final TokenBucket mTokenBucket;
 
+    @VisibleForTesting
+    public final int mApfVersionSupported;
     @VisibleForTesting
     @NonNull
     public final byte[] mHardwareAddress;
@@ -611,7 +612,7 @@ public class ApfFilter implements AndroidPacketFilter {
             // in an SSID. This is limited to APFv3 devices because this large write triggers
             // a crash on some older devices (b/78905546).
             if (hasDataAccess(mApfVersionSupported)) {
-                byte[] zeroes = new byte[mMaximumApfProgramSize];
+                byte[] zeroes = new byte[mApfRamSize];
                 if (!mIpClientCallback.installPacketFilter(zeroes)) {
                     sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
                 }
