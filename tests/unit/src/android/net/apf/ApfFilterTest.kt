@@ -53,21 +53,19 @@ import com.android.net.module.util.NetworkStackConstants.ICMPV6_NS_HEADER_LEN
 import com.android.net.module.util.NetworkStackConstants.IPV6_HEADER_LEN
 import com.android.net.module.util.arp.ArpPacket
 import com.android.networkstack.metrics.NetworkQuirkMetrics
-import com.android.testutils.quitResources
-import kotlin.test.assertEquals
 import com.android.networkstack.packets.NeighborAdvertisement
 import com.android.networkstack.packets.NeighborSolicitation
 import com.android.networkstack.util.NetworkStackUtils
 import com.android.testutils.DevSdkIgnoreRule
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo
 import com.android.testutils.DevSdkIgnoreRunner
-import com.android.testutils.tryTest
+import com.android.testutils.quitResources
 import java.net.Inet6Address
 import java.net.InetAddress
 import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
 import org.junit.After
 import org.junit.Before
-import org.mockito.ArgumentMatchers.any
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -85,6 +83,7 @@ import org.mockito.invocation.InvocationOnMock
 /**
  * Test for APF filter.
  */
+@DevSdkIgnoreRunner.MonitorThreadLeak
 @RunWith(DevSdkIgnoreRunner::class)
 @SmallTest
 class ApfFilterTest {
@@ -227,17 +226,8 @@ class ApfFilterTest {
         )
     }
 
-    private fun doTestEtherTypeAllowListFilter(apfVersion: Int) {
+    private fun doTestEtherTypeAllowListFilter(apfFilter: ApfFilter) {
         val programCaptor = ArgumentCaptor.forClass(ByteArray::class.java)
-        val apfFilter =
-            ApfFilter(
-                context,
-                getDefaultConfig(apfVersion),
-                ifParams,
-                ipClientCallback,
-                metrics,
-                dependencies
-            )
         verify(ipClientCallback, times(2)).installPacketFilter(programCaptor.capture())
         val program = programCaptor.allValues.last()
 
@@ -249,7 +239,12 @@ class ApfFilterTest {
         //   p = eth/ip/udp/dns
         val mdnsPkt = "01005e0000fbe89f806660bb080045000035000100004011d812c0a80101e00000f" +
                 "b14e914e900214d970000010000010000000000000161056c6f63616c00000c0001"
-        verifyProgramRun(APF_VERSION_6, program, HexDump.hexStringToByteArray(mdnsPkt), PASSED_IPV4)
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(mdnsPkt),
+            PASSED_IPV4
+        )
 
         // Using scapy to generate RA packet:
         //  eth = Ether(src="E8:9F:80:66:60:BB", dst="33:33:00:00:00:01")
@@ -259,7 +254,7 @@ class ApfFilterTest {
         val raPkt = "333300000001e89f806660bb86dd6000000000103afffe800000000000000000000000" +
                 "000001ff0200000000000000000000000000018600600700080e100000000000000e10"
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(raPkt),
             PASSED_IPV6_ICMP
@@ -269,12 +264,11 @@ class ApfFilterTest {
         //  p = Ether(type=0x88A2)/Raw(load="01")
         val ethPkt = "ffffffffffff047bcb463fb588a23031"
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(ethPkt),
             DROPPED_ETHERTYPE_NOT_ALLOWED
         )
-        apfFilter.shutdown()
     }
 
     private fun generateNsPacket(
@@ -326,27 +320,20 @@ class ApfFilterTest {
     @Test
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     fun testV4EtherTypeAllowListFilter() {
-        doTestEtherTypeAllowListFilter(APF_VERSION_3)
+        val apfFilter = getApfFilter(getDefaultConfig(APF_VERSION_3))
+        doTestEtherTypeAllowListFilter(apfFilter)
     }
 
     @Test
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     fun testV6EtherTypeAllowListFilter() {
-        doTestEtherTypeAllowListFilter(APF_VERSION_6)
+        val apfFilter = getApfFilter(getDefaultConfig(APF_VERSION_6))
+        doTestEtherTypeAllowListFilter(apfFilter)
     }
 
     @Test
     fun testIPv4PacketFilterOnV6OnlyNetwork() {
-        val apfFilter =
-            ApfFilter(
-                context,
-                getDefaultConfig(),
-                ifParams,
-                ipClientCallback,
-                metrics,
-                dependencies
-            )
-
+        val apfFilter = getApfFilter()
         apfFilter.updateClatInterfaceState(true)
         val programCaptor = ArgumentCaptor.forClass(ByteArray::class.java)
         verify(ipClientCallback, times(3)).installPacketFilter(programCaptor.capture())
@@ -361,7 +348,7 @@ class ApfFilterTest {
         val mdnsPkt = "01005e0000fbe89f806660bb080045000035000100004011d812c0a80101e00000f" +
                 "b14e914e900214d970000010000010000000000000161056c6f63616c00000c0001"
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(mdnsPkt),
             DROPPED_IPV4_NON_DHCP4
@@ -395,7 +382,7 @@ class ApfFilterTest {
                     "0000000000000000000000000000000000000000000000000000638253633501023604c0" +
                     "a801010104ffffff000304c0a80101330400015180060408080808ff"
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(dhcp4Pkt),
             PASSED_IPV4_FROM_DHCPV4_SERVER
@@ -413,28 +400,18 @@ class ApfFilterTest {
             "01005e0000fbe89f806660bb08004500001d000100034011f75dc0a8010ac0a8" +
                     "01146f63616c00000c0001"
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(fragmentedUdpPkt),
             DROPPED_IPV4_NON_DHCP4
         )
-        apfFilter.shutdown()
     }
 
     // The APFv6 code path is only turned on in V+
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     @Test
     fun testArpTransmit() {
-        val apfFilter =
-            ApfFilter(
-                context,
-                getDefaultConfig(),
-                ifParams,
-                ipClientCallback,
-                metrics,
-                dependencies
-            )
-
+        val apfFilter = getApfFilter()
         verify(ipClientCallback, times(2)).installPacketFilter(any())
         val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
         val lp = LinkProperties()
@@ -453,7 +430,12 @@ class ApfFilterTest {
         )
         val receivedArpPacket = ByteArray(ARP_ETHER_IPV4_LEN)
         receivedArpPacketBuf.get(receivedArpPacket)
-        verifyProgramRun(APF_VERSION_6, program, receivedArpPacket, DROPPED_ARP_REQUEST_REPLIED)
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            receivedArpPacket,
+            DROPPED_ARP_REQUEST_REPLIED
+        )
 
         val transmittedPacket = ApfJniUtils.getTransmittedPacket()
         val expectedArpReplyBuf = ArpPacket.buildArpPacket(
@@ -467,26 +449,16 @@ class ApfFilterTest {
         val expectedArpReplyPacket = ByteArray(ARP_ETHER_IPV4_LEN)
         expectedArpReplyBuf.get(expectedArpReplyPacket)
         assertContentEquals(
-            expectedArpReplyPacket + ByteArray(18) {0},
+            expectedArpReplyPacket + ByteArray(18) { 0 },
             transmittedPacket
         )
-        apfFilter.shutdown()
     }
 
     @Test
     fun testArpOffloadDisabled() {
         val apfConfig = getDefaultConfig()
         apfConfig.shouldHandleArpOffload = false
-        val apfFilter =
-            ApfFilter(
-                context,
-                apfConfig,
-                ifParams,
-                ipClientCallback,
-                metrics,
-                dependencies
-            )
-
+        val apfFilter = getApfFilter(apfConfig)
         verify(ipClientCallback, times(2)).installPacketFilter(any())
         val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
         val lp = LinkProperties()
@@ -505,23 +477,19 @@ class ApfFilterTest {
         )
         val receivedArpPacket = ByteArray(ARP_ETHER_IPV4_LEN)
         receivedArpPacketBuf.get(receivedArpPacket)
-        verifyProgramRun(APF_VERSION_6, program, receivedArpPacket, PASSED_ARP_REQUEST)
-        apfFilter.shutdown()
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            receivedArpPacket,
+            PASSED_ARP_REQUEST
+        )
     }
 
     @Test
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     fun testNsFilterNoIPv6() {
         `when`(dependencies.getAnycast6Addresses(any())).thenReturn(listOf())
-        val apfFilter =
-            ApfFilter(
-                context,
-                getDefaultConfig(),
-                ifParams,
-                ipClientCallback,
-                metrics,
-                dependencies
-            )
+        val apfFilter = getApfFilter()
         // validate NS packet check when there is no IPv6 address
         val programCaptor = ArgumentCaptor.forClass(ByteArray::class.java)
         verify(ipClientCallback, times(2)).installPacketFilter(programCaptor.capture())
@@ -536,26 +504,17 @@ class ApfFilterTest {
                 "00000020010000000000000200001A33441122"
         // when there is no IPv6 addresses -> pass NS packet
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nsPkt),
             PASSED_IPV6_NS_NO_ADDRESS
         )
-        apfFilter.shutdown()
     }
 
     @Test
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     fun testNsFilter() {
-        val apfFilter =
-            ApfFilter(
-                context,
-                getDefaultConfig(),
-                ifParams,
-                ipClientCallback,
-                metrics,
-                dependencies
-            )
+        val apfFilter = getApfFilter()
         verify(ipClientCallback, times(2)).installPacketFilter(any())
 
         val lp = LinkProperties()
@@ -594,7 +553,7 @@ class ApfFilterTest {
                     "000020010000000000000200001A334411220201000102030405"
         // invalid unicast ether dst -> pass
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nonHostDstMacNsPkt),
             DROPPED_IPV6_NS_OTHER_HOST
@@ -611,7 +570,7 @@ class ApfFilterTest {
                 "0000000020010000000000000200001A334411220201000102030405"
         // mcast dst mac is not one of solicited mcast mac derived from one of device's ip -> pass
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nonMcastDstMacNsPkt),
             DROPPED_IPV6_NS_OTHER_HOST
@@ -630,7 +589,7 @@ class ApfFilterTest {
         // mcast dst mac is one of solicited mcast mac derived from one of device's ip
         // -> drop and replied
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(hostMcastDstMacNsPkt),
             DROPPED_IPV6_NS_REPLIED_NON_DAD
@@ -648,7 +607,7 @@ class ApfFilterTest {
                     "00000000000200001A334411220101000102030405"
         // mcast dst mac is broadcast address -> drop and replied
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(broadcastNsPkt),
             DROPPED_IPV6_NS_REPLIED_NON_DAD
@@ -668,7 +627,7 @@ class ApfFilterTest {
                     "00000020010000000000000200001A334411220101000102030405"
         // dst ip is one of device's ip -> drop and replied
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(validHostDstIpNsPkt),
             DROPPED_IPV6_NS_REPLIED_NON_DAD
@@ -687,7 +646,7 @@ class ApfFilterTest {
                     "0101000102030405"
         // dst ip is device's anycast address -> drop and replied
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(validHostAnycastDstIpNsPkt),
             DROPPED_IPV6_NS_REPLIED_NON_DAD
@@ -705,7 +664,7 @@ class ApfFilterTest {
                     "E30000000020010000000000000200001A334411220101000102030405"
         // unicast dst ip is not one of device's ip -> pass
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nonHostUcastDstIpNsPkt),
             DROPPED_IPV6_NS_OTHER_HOST
@@ -723,7 +682,7 @@ class ApfFilterTest {
                     "1C0000000020010000000000000200001A334411220101000102030405"
         // mcast dst ip is not one of solicited mcast ip derived from one of device's ip -> pass
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nonHostMcastDstIpNsPkt),
             DROPPED_IPV6_NS_OTHER_HOST
@@ -742,7 +701,7 @@ class ApfFilterTest {
         // mcast dst ip is one of solicited mcast ip derived from one of device's ip
         //   -> drop and replied
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(hostMcastDstIpNsPkt),
             DROPPED_IPV6_NS_REPLIED_NON_DAD
@@ -762,7 +721,7 @@ class ApfFilterTest {
                     "000200001A334411220101010203040506"
         // payload len < 24 -> drop
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(shortNsPkt),
             DROPPED_IPV6_NS_INVALID
@@ -780,7 +739,7 @@ class ApfFilterTest {
                     "00000000000200001A444455550101010203040506"
         // target ip is not one of device's ip -> drop
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(otherHostNsPkt),
             DROPPED_IPV6_NS_OTHER_HOST
@@ -798,7 +757,7 @@ class ApfFilterTest {
                     "00000020010000000000000200001A334411220101010203040506"
         // hoplimit is not 255 -> drop
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(invalidHoplimitNsPkt),
             DROPPED_IPV6_NS_INVALID
@@ -816,7 +775,7 @@ class ApfFilterTest {
                     "00000020010000000000000200001A334411220101010203040506"
         // icmp6 code is not 0 -> drop
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(invalidIcmpCodeNsPkt),
             DROPPED_IPV6_NS_INVALID
@@ -834,7 +793,7 @@ class ApfFilterTest {
                     "16CE0000000020010000000000000200001A123456780101010203040506"
         // target ip is one of tentative address -> pass
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(tentativeTargetIpNsPkt),
             PASSED_IPV6_NS_TENTATIVE
@@ -852,7 +811,7 @@ class ApfFilterTest {
                     "00000020010000000000000200001C225566660101010203040506"
         // target ip is none of {non-tentative, anycast} -> drop
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(invalidTargetIpNsPkt),
             DROPPED_IPV6_NS_OTHER_HOST
@@ -870,7 +829,7 @@ class ApfFilterTest {
                     "00001A334411220201020304050607"
         // DAD NS request -> pass
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(dadNsPkt),
             PASSED_IPV6_NS_DAD
@@ -887,7 +846,7 @@ class ApfFilterTest {
                     "000000000200001A33441122"
         // payload len < 32 -> pass
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(noOptionNsPkt),
             PASSED_IPV6_NS_NO_SLLA_OPTION
@@ -905,7 +864,7 @@ class ApfFilterTest {
                     "000020010000000000000200001A334411220101010203040506"
         // non-DAD src IPv6 is FF::/8 -> drop
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nonDadMcastSrcIpPkt),
             DROPPED_IPV6_NS_INVALID
@@ -923,7 +882,7 @@ class ApfFilterTest {
                     "140000000020010000000000000200001A334411220101010203040506"
         // non-DAD src IPv6 is 00::/8 -> drop
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nonDadLoopbackSrcIpPkt),
             DROPPED_IPV6_NS_INVALID
@@ -943,7 +902,7 @@ class ApfFilterTest {
                     "05060101010203040506"
         // non-DAD with multiple options, SLLA in 2nd option -> pass
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(sllaNotFirstOptionNsPkt),
             PASSED_IPV6_NS_NO_SLLA_OPTION
@@ -961,7 +920,7 @@ class ApfFilterTest {
                     "20010000000000000200001A334411220201010203040506"
         // non-DAD with one option but not SLLA -> pass
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(noSllaOptionNsPkt),
             PASSED_IPV6_NS_NO_SLLA_OPTION
@@ -980,27 +939,18 @@ class ApfFilterTest {
                     "0506"
         // non-DAD, SLLA is multicast MAC -> drop
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(mcastMacSllaOptionNsPkt),
             DROPPED_IPV6_NS_INVALID
         )
-        apfFilter.shutdown()
     }
 
     // The APFv6 code path is only turned on in V+
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     @Test
     fun testNaTransmit() {
-        val apfFilter =
-            ApfFilter(
-                context,
-                getDefaultConfig(),
-                ifParams,
-                ipClientCallback,
-                metrics,
-                dependencies
-            )
+        val apfFilter = getApfFilter()
         val lp = LinkProperties()
         for (addr in hostIpv6Addresses) {
             lp.addLinkAddress(LinkAddress(InetAddress.getByAddress(addr), 64))
@@ -1022,7 +972,7 @@ class ApfFilterTest {
             )
 
             verifyProgramRun(
-                APF_VERSION_6,
+                apfFilter.mApfVersionSupported,
                 program,
                 receivedUcastNsPacket,
                 DROPPED_IPV6_NS_REPLIED_NON_DAD
@@ -1059,7 +1009,7 @@ class ApfFilterTest {
             )
 
             verifyProgramRun(
-                APF_VERSION_6,
+                apfFilter.mApfVersionSupported,
                 program,
                 receivedMcastNsPacket,
                 DROPPED_IPV6_NS_REPLIED_NON_DAD
@@ -1080,7 +1030,6 @@ class ApfFilterTest {
                 transmittedMcastPacket
             )
         }
-        apfFilter.shutdown()
     }
 
     // The APFv6 code path is only turned on in V+
@@ -1089,15 +1038,7 @@ class ApfFilterTest {
     fun testNaTransmitWithTclass() {
         // mock nd traffic class from /proc/sys/net/ipv6/conf/{ifname}/ndisc_tclass to 20
         `when`(dependencies.getNdTrafficClass(any())).thenReturn(20)
-        val apfFilter =
-            ApfFilter(
-                context,
-                getDefaultConfig(),
-                ifParams,
-                ipClientCallback,
-                metrics,
-                dependencies
-            )
+        val apfFilter = getApfFilter()
         val lp = LinkProperties()
         for (addr in hostIpv6Addresses) {
             lp.addLinkAddress(LinkAddress(InetAddress.getByAddress(addr), 64))
@@ -1117,7 +1058,7 @@ class ApfFilterTest {
                     "0200001A11223344FF0200000000000000000001FF4411228700952D0000" +
                     "000020010000000000000200001A334411220101000102030405"
         verifyProgramRun(
-            APF_VERSION_6,
+            apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(hostMcastDstIpNsPkt),
             DROPPED_IPV6_NS_REPLIED_NON_DAD
@@ -1138,22 +1079,13 @@ class ApfFilterTest {
             HexDump.hexStringToByteArray(expectedNaPacket),
             transmitPkt
         )
-        apfFilter.shutdown()
     }
 
     @Test
     fun testNdOffloadDisabled() {
         val apfConfig = getDefaultConfig()
         apfConfig.shouldHandleNdOffload = false
-        val apfFilter =
-            ApfFilter(
-                context,
-                apfConfig,
-                ifParams,
-                ipClientCallback,
-                metrics,
-                dependencies
-            )
+        val apfFilter = getApfFilter(apfConfig)
         val lp = LinkProperties()
         for (addr in hostIpv6Addresses) {
             lp.addLinkAddress(LinkAddress(InetAddress.getByAddress(addr), 64))
@@ -1175,7 +1107,7 @@ class ApfFilterTest {
             )
 
             verifyProgramRun(
-                APF_VERSION_6,
+                apfFilter.mApfVersionSupported,
                 program,
                 receivedUcastNsPacket,
                 PASSED_IPV6_ICMP
@@ -1197,26 +1129,17 @@ class ApfFilterTest {
             )
 
             verifyProgramRun(
-                APF_VERSION_6,
+                apfFilter.mApfVersionSupported,
                 program,
                 receivedMcastNsPacket,
                 PASSED_IPV6_ICMP
             )
         }
-        apfFilter.shutdown()
     }
 
     @Test
     fun testApfProgramUpdate() {
-        val apfFilter =
-            ApfFilter(
-                context,
-                getDefaultConfig(),
-                ifParams,
-                ipClientCallback,
-                metrics,
-                dependencies
-            )
+        val apfFilter = getApfFilter()
         verify(ipClientCallback, times(2)).installPacketFilter(any())
         // add IPv4 address, expect to have apf program update
         val lp = LinkProperties()
@@ -1259,6 +1182,14 @@ class ApfFilterTest {
         // add the same IPv6 addresses, expect to have no apf program update
         apfFilter.setLinkProperties(lp)
         verify(ipClientCallback, times(5)).installPacketFilter(any())
-        apfFilter.shutdown()
+    }
+
+    @Test
+    fun testApfFilterInitializationCleanUpTheApfMemoryRegion() {
+        val apfFilter = getApfFilter()
+        val programCaptor = ArgumentCaptor.forClass(ByteArray::class.java)
+        verify(ipClientCallback, times(2)).installPacketFilter(programCaptor.capture())
+        val program = programCaptor.allValues.first()
+        assertContentEquals(ByteArray(4096) { 0 }, program)
     }
 }

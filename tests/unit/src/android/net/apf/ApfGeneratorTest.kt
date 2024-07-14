@@ -62,11 +62,11 @@ const val IPV4_HLEN = 20
 const val IPPROTO_UDP = 17
 
 /**
- * Tests for APF instructions.
+ * Tests for APF generator instructions.
  */
 @RunWith(DevSdkIgnoreRunner::class)
 @SmallTest
-class ApfNewTest {
+class ApfGeneratorTest {
 
     @get:Rule val ignoreRule = DevSdkIgnoreRule()
 
