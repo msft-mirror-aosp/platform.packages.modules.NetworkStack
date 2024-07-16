@@ -15,7 +15,6 @@
  */
 package android.net.apf;
 
-import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.net.LinkProperties;
 import android.net.NattKeepalivePacketDataParcelable;
@@ -44,9 +43,9 @@ public interface AndroidPacketFilter {
     void setMulticastFilter(boolean isEnabled);
 
     /**
-     * Set the APF data snapshot.
+     * Set the APF data snapshot and return the latest counter snapshot as a String.
      */
-    void setDataSnapshot(byte[] data);
+    String setDataSnapshot(byte[] data);
 
     /**
      * Add TCP keepalive ack packet filter.
@@ -104,7 +103,14 @@ public interface AndroidPacketFilter {
      * Determines whether the APF interpreter advertises support for the data buffer access
      * opcodes LDDW (LoaD Data Word) and STDW (STore Data Word).
      */
-    default boolean hasDataAccess(@NonNull ApfCapabilities capabilities) {
-        return capabilities.apfVersionSupported > 2;
+    default boolean hasDataAccess(int apfVersionSupported) {
+        return apfVersionSupported > 2;
+    }
+
+    /**
+     * Whether the ApfFilter supports generating ND offload code.
+     */
+    default boolean supportNdOffload() {
+        return false;
     }
 }
