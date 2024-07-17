@@ -26,18 +26,13 @@ import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 
 import android.content.Context;
-import android.net.LinkAddress;
-import android.net.LinkProperties;
-import android.net.MacAddress;
 import android.net.apf.BaseApfGenerator.IllegalInstructionException;
 import android.net.ip.IIpClientCallbacks;
 import android.net.ip.IpClient;
 import android.net.metrics.IpConnectivityLog;
 import android.os.ConditionVariable;
-import android.os.SystemClock;
 import android.system.ErrnoException;
 import android.system.Os;
-import android.text.format.DateUtils;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.util.HexDump;
@@ -50,7 +45,6 @@ import libcore.io.IoUtils;
 
 import java.io.FileDescriptor;
 import java.io.IOException;
-import java.net.InetAddress;
 import java.util.Arrays;
 
 /**
@@ -285,129 +279,6 @@ public class ApfTestUtils {
          */
         public void assertNoProgramUpdate() {
             assertFalse(mGotApfProgram.block(TIMEOUT_MS));
-        }
-    }
-
-    /**
-     * The test apf filter class.
-     */
-    public static class TestApfFilter extends ApfFilter implements TestAndroidPacketFilter {
-        public static final byte[] MOCK_MAC_ADDR = {2, 3, 4, 5, 6, 7};
-        private static final byte[] MOCK_IPV4_ADDR = {10, 0, 0, 1};
-
-        private static final InterfaceParams LOCAL_PARAMS = InterfaceParams.getByName("lo");
-
-        private FileDescriptor mWriteSocket;
-        private long mCurrentTimeMs = SystemClock.elapsedRealtime();
-        private final MockIpClientCallback mMockIpClientCb;
-        private final boolean mThrowsExceptionWhenGeneratesProgram;
-
-        public TestApfFilter(Context context, ApfConfiguration config,
-                MockIpClientCallback ipClientCallback, NetworkQuirkMetrics networkQuirkMetrics,
-                Dependencies dependencies) throws Exception {
-            this(context, config, ipClientCallback, networkQuirkMetrics, dependencies,
-                    false /* throwsExceptionWhenGeneratesProgram */, new ApfFilter.Clock());
-        }
-
-        public TestApfFilter(Context context, ApfConfiguration config,
-                MockIpClientCallback ipClientCallback, NetworkQuirkMetrics networkQuirkMetrics,
-                Dependencies dependencies, boolean throwsExceptionWhenGeneratesProgram)
-                throws Exception {
-            this(context, config, ipClientCallback, networkQuirkMetrics, dependencies,
-                    throwsExceptionWhenGeneratesProgram, new ApfFilter.Clock());
-        }
-
-        public TestApfFilter(Context context, ApfConfiguration config,
-                MockIpClientCallback ipClientCallback, NetworkQuirkMetrics networkQuirkMetrics,
-                Dependencies dependencies, ApfFilter.Clock clock) throws Exception {
-            this(context, config, ipClientCallback, networkQuirkMetrics, dependencies,
-                    false /* throwsExceptionWhenGeneratesProgram */, clock);
-        }
-
-        public TestApfFilter(Context context, ApfConfiguration config,
-                MockIpClientCallback ipClientCallback, NetworkQuirkMetrics networkQuirkMetrics,
-                Dependencies dependencies, boolean throwsExceptionWhenGeneratesProgram,
-                ApfFilter.Clock clock) throws Exception {
-            super(context, config, new InterfaceParams("lo", LOCAL_PARAMS.index,
-                            MacAddress.fromBytes(MOCK_MAC_ADDR)), ipClientCallback,
-                    networkQuirkMetrics, dependencies, clock);
-            mMockIpClientCb = ipClientCallback;
-            mThrowsExceptionWhenGeneratesProgram = throwsExceptionWhenGeneratesProgram;
-        }
-
-        /**
-         * Create a new test ApfFiler.
-         */
-        public static ApfFilter createTestApfFilter(Context context,
-                MockIpClientCallback ipClientCallback, ApfConfiguration config,
-                NetworkQuirkMetrics networkQuirkMetrics, ApfFilter.Dependencies dependencies)
-                throws Exception {
-            LinkAddress link = new LinkAddress(InetAddress.getByAddress(MOCK_IPV4_ADDR), 19);
-            LinkProperties lp = new LinkProperties();
-            lp.addLinkAddress(link);
-            TestApfFilter apfFilter = new TestApfFilter(context, config, ipClientCallback,
-                    networkQuirkMetrics, dependencies);
-            apfFilter.setLinkProperties(lp);
-            return apfFilter;
-        }
-
-        /**
-         * Pretend an RA packet has been received and show it to ApfFilter.
-         */
-        public void pretendPacketReceived(byte[] packet) throws IOException, ErrnoException {
-            mMockIpClientCb.resetApfProgramWait();
-            // ApfFilter's ReceiveThread will be waiting to read this.
-            Os.write(mWriteSocket, packet, 0, packet.length);
-        }
-
-        /**
-         * Simulate current time changes.
-         */
-        public void increaseCurrentTimeSeconds(int delta) {
-            mCurrentTimeMs += delta * DateUtils.SECOND_IN_MILLIS;
-        }
-
-        @Override
-        protected int secondsSinceBoot() {
-            return (int) (mCurrentTimeMs / DateUtils.SECOND_IN_MILLIS);
-        }
-
-        @Override
-        public synchronized void startFilter() {
-            installNewProgramLocked();
-
-            // Create two sockets, "readSocket" and "mWriteSocket" and connect them together.
-            FileDescriptor readSocket = new FileDescriptor();
-            mWriteSocket = new FileDescriptor();
-            try {
-                Os.socketpair(AF_UNIX, SOCK_STREAM, 0, mWriteSocket, readSocket);
-            } catch (ErrnoException e) {
-                fail();
-                return;
-            }
-            // Now pass readSocket to ReceiveThread as if it was setup to read raw RAs.
-            // This allows us to pretend RA packets have been received via pretendPacketReceived().
-            mReceiveThread = new ReceiveThread(readSocket);
-            mReceiveThread.start();
-        }
-
-        @Override
-        public synchronized void shutdown() {
-            super.shutdown();
-            if (mReceiveThread != null) {
-                mReceiveThread.halt();
-                mReceiveThread = null;
-            }
-            IoUtils.closeQuietly(mWriteSocket);
-        }
-
-        @Override
-        @GuardedBy("this")
-        protected ApfV4GeneratorBase<?> emitPrologueLocked() throws IllegalInstructionException {
-            if (mThrowsExceptionWhenGeneratesProgram) {
-                throw new IllegalStateException();
-            }
-            return super.emitPrologueLocked();
         }
     }
 
