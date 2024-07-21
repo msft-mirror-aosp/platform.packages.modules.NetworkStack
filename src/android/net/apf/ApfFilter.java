@@ -265,7 +265,6 @@ public class ApfFilter implements AndroidPacketFilter {
     private static final boolean DBG = true;
     private static final boolean VDBG = false;
 
-    private final int mApfVersionSupported;
     private final int mApfRamSize;
     private final int mMaximumApfProgramSize;
     private final int mInstallableProgramSizeClamp;
@@ -273,6 +272,8 @@ public class ApfFilter implements AndroidPacketFilter {
     private final InterfaceParams mInterfaceParams;
     private final TokenBucket mTokenBucket;
 
+    @VisibleForTesting
+    public final int mApfVersionSupported;
     @VisibleForTesting
     @NonNull
     public final byte[] mHardwareAddress;
@@ -287,7 +288,6 @@ public class ApfFilter implements AndroidPacketFilter {
     private final boolean mDrop802_3Frames;
     private final int[] mEthTypeBlackList;
 
-    private final Clock mClock;
     private final ApfCounterTracker mApfCounterTracker = new ApfCounterTracker();
     @GuardedBy("this")
     private final long mSessionStartMs;
@@ -388,21 +388,13 @@ public class ApfFilter implements AndroidPacketFilter {
     public ApfFilter(Context context, ApfConfiguration config, InterfaceParams ifParams,
             IpClientCallbacksWrapper ipClientCallback, NetworkQuirkMetrics networkQuirkMetrics) {
         this(context, config, ifParams, ipClientCallback, networkQuirkMetrics,
-                new Dependencies(context), new Clock());
+                new Dependencies(context));
     }
 
     @VisibleForTesting
     public ApfFilter(Context context, ApfConfiguration config, InterfaceParams ifParams,
             IpClientCallbacksWrapper ipClientCallback, NetworkQuirkMetrics networkQuirkMetrics,
             Dependencies dependencies) {
-        this(context, config, ifParams, ipClientCallback, networkQuirkMetrics, dependencies,
-                new Clock());
-    }
-
-    @VisibleForTesting
-    public ApfFilter(Context context, ApfConfiguration config, InterfaceParams ifParams,
-            IpClientCallbacksWrapper ipClientCallback, NetworkQuirkMetrics networkQuirkMetrics,
-            Dependencies dependencies, Clock clock) {
         mApfVersionSupported = config.apfVersionSupported;
         mApfRamSize = config.apfRamSize;
         mInstallableProgramSizeClamp = config.installableProgramSizeClamp;
@@ -428,8 +420,7 @@ public class ApfFilter implements AndroidPacketFilter {
         mNetworkQuirkMetrics = networkQuirkMetrics;
         mIpClientRaInfoMetrics = dependencies.getIpClientRaInfoMetrics();
         mApfSessionInfoMetrics = dependencies.getApfSessionInfoMetrics();
-        mClock = clock;
-        mSessionStartMs = mClock.elapsedRealtime();
+        mSessionStartMs = dependencies.elapsedRealtime();
         mMinMetricsSessionDurationMs = config.minMetricsSessionDurationMs;
         mHasClat = config.hasClatInterface;
 
@@ -454,7 +445,9 @@ public class ApfFilter implements AndroidPacketFilter {
 
         mDependencies.onApfFilterCreated(this);
         // mReceiveThread is created in startFilter() and halted in shutdown().
-        mDependencies.onThreadCreated(mReceiveThread);
+        if (mReceiveThread != null) {
+            mDependencies.onThreadCreated(mReceiveThread);
+        }
     }
 
     /**
@@ -465,6 +458,31 @@ public class ApfFilter implements AndroidPacketFilter {
         private final Context mContext;
         public Dependencies(final Context context) {
             mContext = context;
+        }
+
+        /**
+         * Create a socket to read RAs.
+         */
+        @Nullable
+        public FileDescriptor createRaReaderSocket(int ifIndex) {
+            FileDescriptor socket;
+            try {
+                socket = Os.socket(AF_PACKET, SOCK_RAW | SOCK_CLOEXEC, 0);
+                NetworkStackUtils.attachRaFilter(socket);
+                SocketAddress addr = makePacketSocketAddress(ETH_P_IPV6, ifIndex);
+                Os.bind(socket, addr);
+            } catch (SocketException | ErrnoException e) {
+                Log.wtf(TAG, "Error starting filter", e);
+                return null;
+            }
+            return socket;
+        }
+
+        /**
+         * Get elapsedRealtime.
+         */
+        public long elapsedRealtime() {
+            return SystemClock.elapsedRealtime();
         }
 
         /** Add receiver for detecting doze mode change */
@@ -611,7 +629,7 @@ public class ApfFilter implements AndroidPacketFilter {
             // in an SSID. This is limited to APFv3 devices because this large write triggers
             // a crash on some older devices (b/78905546).
             if (hasDataAccess(mApfVersionSupported)) {
-                byte[] zeroes = new byte[mMaximumApfProgramSize];
+                byte[] zeroes = new byte[mApfRamSize];
                 if (!mIpClientCallback.installPacketFilter(zeroes)) {
                     sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
                 }
@@ -620,24 +638,17 @@ public class ApfFilter implements AndroidPacketFilter {
             // Install basic filters
             installNewProgramLocked();
         }
-        FileDescriptor socket;
-        try {
-            socket = Os.socket(AF_PACKET, SOCK_RAW | SOCK_CLOEXEC, 0);
-            NetworkStackUtils.attachRaFilter(socket);
-            SocketAddress addr = makePacketSocketAddress(ETH_P_IPV6, mInterfaceParams.index);
-            Os.bind(socket, addr);
-        } catch(SocketException|ErrnoException e) {
-            Log.wtf(TAG, "Error starting filter", e);
-            return;
+        FileDescriptor socket = mDependencies.createRaReaderSocket(mInterfaceParams.index);
+        if (socket != null) {
+            mReceiveThread = new ReceiveThread(socket);
+            mReceiveThread.start();
         }
-        mReceiveThread = new ReceiveThread(socket);
-        mReceiveThread.start();
     }
 
     // Returns seconds since device boot.
     @VisibleForTesting
     protected int secondsSinceBoot() {
-        return (int) (mClock.elapsedRealtime() / DateUtils.SECOND_IN_MILLIS);
+        return (int) (mDependencies.elapsedRealtime() / DateUtils.SECOND_IN_MILLIS);
     }
 
     public static class InvalidRaException extends Exception {
@@ -2247,7 +2258,7 @@ public class ApfFilter implements AndroidPacketFilter {
      */
     @GuardedBy("this")
     @VisibleForTesting
-    protected ApfV4GeneratorBase<?> emitPrologueLocked() throws IllegalInstructionException {
+    public ApfV4GeneratorBase<?> emitPrologueLocked() throws IllegalInstructionException {
         // This is guaranteed to succeed because of the check in maybeCreate.
         ApfV4GeneratorBase<?> gen;
         if (shouldUseApfV6Generator()) {
@@ -2558,7 +2569,7 @@ public class ApfFilter implements AndroidPacketFilter {
 
     private synchronized void collectAndSendMetrics() {
         if (mIpClientRaInfoMetrics == null || mApfSessionInfoMetrics == null) return;
-        final long sessionDurationMs = mClock.elapsedRealtime() - mSessionStartMs;
+        final long sessionDurationMs = mDependencies.elapsedRealtime() - mSessionStartMs;
         if (sessionDurationMs < mMinMetricsSessionDurationMs) return;
 
         // Collect and send IpClientRaInfoMetrics.
