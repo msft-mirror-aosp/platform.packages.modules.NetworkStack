@@ -17,6 +17,8 @@ package android.net.apf;
 
 import com.android.internal.annotations.VisibleForTesting;
 
+import java.util.Objects;
+
 /**
  * APFv6 assembler/generator. A tool for generating an APFv6 program.
  *
@@ -24,12 +26,36 @@ import com.android.internal.annotations.VisibleForTesting;
  */
 public final class ApfV6Generator extends ApfV6GeneratorBase<ApfV6Generator> {
     /**
-     * Creates an ApfV6Generator instance which is able to emit instructions for the specified
-     * {@code version} of the APF interpreter. Throws {@code IllegalInstructionException} if
-     * the requested version is unsupported.
+     * Returns true if we support the specified {@code version}, otherwise false.
+     */
+    public static boolean supportsVersion(int version) {
+        return version >= APF_VERSION_6;
+    }
+
+    /**
+     * Creates an ApfV6Generator instance which emits instructions for APFv6.
+     */
+    public ApfV6Generator(int version, int ramSize, int clampSize)
+            throws IllegalInstructionException {
+        this(new byte[0], version, ramSize, clampSize);
+    }
+
+    @Override
+    void updateExceptionBufferSize(int programSize) throws IllegalInstructionException {
+        mInstructions.get(1).updateExceptionBufferSize(
+                mRamSize - ApfCounterTracker.Counter.totalSize() - programSize);
+    }
+
+    /**
+     * Creates an ApfV6Generator instance which emits instructions APFv6.
+     * Initializes the data region with {@code bytes}.
      */
     @VisibleForTesting(visibility = VisibleForTesting.Visibility.PACKAGE)
-    public ApfV6Generator() throws IllegalInstructionException {
-        super();
+    public ApfV6Generator(byte[] bytes, int version, int ramSize, int clampSize)
+            throws IllegalInstructionException {
+        super(version, ramSize, clampSize);
+        Objects.requireNonNull(bytes);
+        addData(bytes);
+        addExceptionBuffer(0);
     }
 }

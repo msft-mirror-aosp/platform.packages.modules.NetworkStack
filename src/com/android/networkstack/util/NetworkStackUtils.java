@@ -186,25 +186,11 @@ public class NetworkStackUtils {
     public static final String VALIDATION_METRICS_VERSION = "validation_metrics_version";
 
     /**
-     * Experiment flag to enable sending gratuitous multicast unsolicited Neighbor Advertisements
-     * to propagate new assigned IPv6 GUA as quickly as possible.
-     */
-    public static final String IPCLIENT_GRATUITOUS_NA_VERSION = "ipclient_gratuitous_na_version";
-
-    /**
      * Experiment flag to enable sending Gratuitous APR and Gratuitous Neighbor Advertisement for
      * all assigned IPv4 and IPv6 GUAs after completing L2 roaming.
      */
     public static final String IPCLIENT_GARP_NA_ROAMING_VERSION =
             "ipclient_garp_na_roaming_version";
-
-    /**
-     * Experiment flag to check if an on-link IPv6 link local DNS is acceptable. The default flag
-     * value is true, just add this flag for A/B testing to see if this fix works as expected via
-     * experiment rollout.
-     */
-    public static final String IPCLIENT_ACCEPT_IPV6_LINK_LOCAL_DNS_VERSION =
-            "ipclient_accept_ipv6_link_local_dns_version";
 
     /**
      * Experiment flag to enable "mcast_resolicit" neighbor parameter in IpReachabilityMonitor,
@@ -238,6 +224,13 @@ public class NetworkStackUtils {
      */
     public static final String IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION =
             "ip_reachability_ignore_organic_nud_failure_version";
+
+    /**
+     * Experiment flag to ignore all NUD failures from the neighbor that has never ever entered the
+     * reachable state.
+     */
+    public static final String IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION =
+            "ip_reachability_ignore_never_reachable_neighbor_version";
 
     /**
      * Experiment flag to enable DHCPv6 Prefix Delegation(RFC8415) in IpClient.
@@ -275,21 +268,18 @@ public class NetworkStackUtils {
     public static final String IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION =
             "ipclient_populate_link_address_lifetime_version";
 
+    /**
+     * Experiment flag to support parsing PIO P flag(DHCPv6-PD preferred).
+     */
+    public static final String IPCLIENT_DHCPV6_PD_PREFERRED_FLAG_VERSION =
+            "ipclient_dhcpv6_pd_preferred_flag_version";
+
+    /**
+     * Experiment flag to enable Discovery of Designated Resolvers (DDR).
+     */
+    public static final String DNS_DDR_VERSION = "dns_ddr_version";
 
     /**** BEGIN Feature Kill Switch Flags ****/
-
-    /**
-     * Kill switch flag to disable the feature of parsing netlink events from kernel directly
-     * instead from netd aidl interface by flag push.
-     */
-    public static final String IPCLIENT_PARSE_NETLINK_EVENTS_FORCE_DISABLE =
-            "ipclient_parse_netlink_events_force_disable";
-
-    /**
-     * Kill switch flag to disable the feature of handle light doze mode in Apf.
-     */
-    public static final String APF_HANDLE_LIGHT_DOZE_FORCE_DISABLE =
-            "apf_handle_light_doze_force_disable";
 
     /**
      * Kill switch flag to disable the feature of skipping Tcp socket info polling when light
@@ -308,6 +298,18 @@ public class NetworkStackUtils {
      */
     public static final String IGNORE_TCP_INFO_FOR_BLOCKED_UIDS =
             "ignore_tcp_info_for_blocked_uids";
+
+    /**
+     * Kill switch flag to disable the feature of handle arp offload in Apf.
+     * Warning: the following flag String is incorrect. The feature that is not chickened out is
+     * "ARP offload" not "ARP offload force disabled".
+     */
+    public static final String APF_HANDLE_ARP_OFFLOAD = "apf_handle_arp_offload_force_disable";
+
+    /**
+     * Kill switch flag to disable the feature of handle nd offload in Apf.
+     */
+    public static final String APF_HANDLE_ND_OFFLOAD = "apf_handle_nd_offload";
 
     static {
         System.loadLibrary("networkstackutilsjni");
