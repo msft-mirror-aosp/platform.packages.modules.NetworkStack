@@ -88,7 +88,6 @@ import android.annotation.SuppressLint;
 import android.app.admin.DevicePolicyManager;
 import android.content.ComponentName;
 import android.content.Context;
-import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Resources;
 import android.net.ConnectivityManager;
@@ -923,12 +922,13 @@ public class IpClient extends StateMachine {
          * APF programs.
          * @see ApfFilter#maybeCreate
          */
-        public AndroidPacketFilter maybeCreateApfFilter(Context context,
+        public AndroidPacketFilter maybeCreateApfFilter(Handler handler, Context context,
                 ApfFilter.ApfConfiguration config, InterfaceParams ifParams,
                 IpClientCallbacksWrapper cb, NetworkQuirkMetrics networkQuirkMetrics,
                 boolean useNewApfFilter) {
             if (useNewApfFilter) {
-                return ApfFilter.maybeCreate(context, config, ifParams, cb, networkQuirkMetrics);
+                return ApfFilter.maybeCreate(handler, context, config, ifParams, cb,
+                        networkQuirkMetrics);
             } else {
                 return LegacyApfFilter.maybeCreate(context, config, ifParams, cb,
                         networkQuirkMetrics);
@@ -964,32 +964,6 @@ public class IpClient extends StateMachine {
     public IpClient(Context context, String ifName, IIpClientCallbacks callback,
             NetworkStackServiceManager nssManager) {
         this(context, ifName, callback, nssManager, new Dependencies());
-    }
-
-    /**
-     * Check if the network stack module in the factory image is at least the specified version.
-     */
-    private boolean isFactoryNetworkStackVersionAtLeast(@NonNull Context context,
-            long targetVersion) {
-        final PackageManager pm = context.getPackageManager();
-        try {
-            final PackageInfo pktInfo = pm.getPackageInfo(context.getPackageName(),
-                    PackageManager.MATCH_FACTORY_ONLY);
-            if (pktInfo == null) {
-                Log.wtf(TAG, "Factory network stack package not found");
-                return false;
-            }
-            long versionCode = pktInfo.getLongVersionCode();
-            if (versionCode == 350090000) {
-                // AOSP use default version code 350090000.
-                // ref: build/soong/android/updatable_modules.go
-                return true;
-            }
-            return versionCode >= targetVersion;
-        } catch (PackageManager.NameNotFoundException e) {
-            Log.wtf(TAG, "Factory network stack package not found", e);
-            return false;
-        }
     }
 
     @VisibleForTesting
@@ -1045,18 +1019,8 @@ public class IpClient extends StateMachine {
                         IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION);
         mApfShouldHandleArpOffload = mDependencies.isFeatureNotChickenedOut(
                 mContext, APF_HANDLE_ARP_OFFLOAD);
-        mApfShouldHandleNdOffload =
-                mDependencies.isFeatureNotChickenedOut(mContext, APF_HANDLE_ND_OFFLOAD)
-                // The feature is enabled only if the factory network stack version is greater
-                // than or equal to M-2024-09 or the OEM explicitly opts in through overlay value
-                // override. If OEMs decide to opt in to this feature, they must ensure the APFv6
-                // ND offload logic is tested properly.
-                // This check ensures the APFv6 ND offload feature is tested before deployment to
-                // production.
-                && (isFactoryNetworkStackVersionAtLeast(context, 350911000)
-                        || context.getResources().getBoolean(
-                        R.bool.config_force_enable_apfv6_nd_offload)
-                );
+        mApfShouldHandleNdOffload = mDependencies.isFeatureNotChickenedOut(
+                mContext, APF_HANDLE_ND_OFFLOAD);
         mPopulateLinkAddressLifetime = mDependencies.isFeatureEnabled(context,
                 IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION);
 
@@ -2684,8 +2648,8 @@ public class IpClient extends StateMachine {
         apfConfig.shouldHandleNdOffload = mApfShouldHandleNdOffload;
         apfConfig.minMetricsSessionDurationMs = mApfCounterPollingIntervalMs;
         apfConfig.hasClatInterface = mHasSeenClatInterface;
-        return mDependencies.maybeCreateApfFilter(mContext, apfConfig, mInterfaceParams,
-                mCallback, mNetworkQuirkMetrics, mUseNewApfFilter);
+        return mDependencies.maybeCreateApfFilter(getHandler(), mContext, apfConfig,
+                mInterfaceParams, mCallback, mNetworkQuirkMetrics, mUseNewApfFilter);
     }
 
     private boolean handleUpdateApfCapabilities(@NonNull final ApfCapabilities apfCapabilities) {
