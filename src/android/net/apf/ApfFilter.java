@@ -217,16 +217,6 @@ public class ApfFilter implements AndroidPacketFilter {
         public boolean shouldHandleNdOffload;
     }
 
-    /** A wrapper class of {@link SystemClock} to be mocked in unit tests. */
-    public static class Clock {
-        /**
-         * @see SystemClock#elapsedRealtime
-         */
-        public long elapsedRealtime() {
-            return SystemClock.elapsedRealtime();
-        }
-    }
-
     // Thread to listen for RAs.
     @VisibleForTesting
     public class ReceiveThread extends Thread {
