@@ -29,9 +29,9 @@ import android.net.apf.ApfCounterTracker.Counter.DROPPED_ETHERTYPE_NOT_ALLOWED
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_GARP_REPLY
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_BROADCAST_ADDR
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_BROADCAST_NET
-import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_L2_BROADCAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_MULTICAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_NON_DHCP4
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_L2_BROADCAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_MULTICAST_NA
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NON_ICMP_MULTICAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_INVALID
@@ -53,20 +53,14 @@ import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_TENTATIVE
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_UNICAST_NON_ICMP
 import android.net.apf.ApfCounterTracker.Counter.PASSED_MLD
 import android.net.apf.ApfFilter.Dependencies
-import android.net.apf.ApfTestHelpers.Companion.TIMEOUT_MS
 import android.net.apf.ApfTestHelpers.Companion.consumeInstalledProgram
 import android.net.apf.ApfTestHelpers.Companion.verifyProgramRun
 import android.net.apf.BaseApfGenerator.APF_VERSION_3
 import android.net.apf.BaseApfGenerator.APF_VERSION_6
 import android.net.ip.IpClient.IpClientCallbacksWrapper
 import android.os.Build
-import android.os.Handler
-import android.os.HandlerThread
 import android.os.SystemClock
-import android.system.Os
-import android.system.OsConstants.AF_UNIX
 import android.system.OsConstants.IFA_F_TENTATIVE
-import android.system.OsConstants.SOCK_STREAM
 import androidx.test.filters.SmallTest
 import com.android.internal.annotations.GuardedBy
 import com.android.net.module.util.HexDump
@@ -87,13 +81,10 @@ import com.android.testutils.DevSdkIgnoreRule
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo
 import com.android.testutils.DevSdkIgnoreRunner
 import com.android.testutils.quitResources
-import com.android.testutils.waitForIdle
-import java.io.FileDescriptor
 import java.net.Inet6Address
 import java.net.InetAddress
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
-import libcore.io.IoUtils
 import org.junit.After
 import org.junit.Before
 import org.junit.Rule
@@ -101,7 +92,6 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.ArgumentCaptor
 import org.mockito.ArgumentMatchers.any
-import org.mockito.ArgumentMatchers.anyInt
 import org.mockito.Mock
 import org.mockito.Mockito
 import org.mockito.Mockito.doAnswer
@@ -121,7 +111,6 @@ import org.mockito.invocation.InvocationOnMock
 class ApfFilterTest {
     companion object {
         private const val THREAD_QUIT_MAX_RETRY_COUNT = 3
-        private const val TAG = "ApfFilterTest"
     }
 
     @get:Rule
@@ -188,10 +177,6 @@ class ApfFilterTest {
         intArrayOf(0x33, 0x33, 0xff, 0xbb, 0xcc, 0xdd).map { it.toByte() }.toByteArray(),
     )
 
-    private val handlerThread = HandlerThread("$TAG handler thread").apply { start() }
-    private val handler = Handler(handlerThread.looper)
-    private var writerSocket = FileDescriptor()
-
     @Before
     fun setUp() {
         MockitoAnnotations.initMocks(this)
@@ -209,9 +194,6 @@ class ApfFilterTest {
             }
         }.`when`(dependencies).onApfFilterCreated(any())
         doReturn(SystemClock.elapsedRealtime()).`when`(dependencies).elapsedRealtime()
-        val readSocket = FileDescriptor()
-        Os.socketpair(AF_UNIX, SOCK_STREAM, 0, writerSocket, readSocket)
-        doReturn(readSocket).`when`(dependencies).createPacketReaderSocket(anyInt())
     }
 
     private fun shutdownApfFilters() {
@@ -222,7 +204,7 @@ class ApfFilterTest {
                 return@quitResources ret
             }
         }, { apf: AndroidPacketFilter ->
-            handler.post { apf.shutdown() }
+            apf.shutdown()
         })
 
         synchronized(mApfFilterCreated) {
@@ -236,13 +218,9 @@ class ApfFilterTest {
 
     @After
     fun tearDown() {
-        IoUtils.closeQuietly(writerSocket)
         shutdownApfFilters()
-        handler.waitForIdle(TIMEOUT_MS)
         Mockito.framework().clearInlineMocks()
         ApfJniUtils.resetTransmittedPacketMemory()
-        handlerThread.quitSafely()
-        handlerThread.join()
     }
 
     private fun getDefaultConfig(apfVersion: Int = APF_VERSION_6): ApfFilter.ApfConfiguration {
@@ -259,22 +237,16 @@ class ApfFilterTest {
     }
 
     private fun getApfFilter(
-            apfCfg: ApfFilter.ApfConfiguration = getDefaultConfig(APF_VERSION_6)
+        apfCfg: ApfFilter.ApfConfiguration = getDefaultConfig(APF_VERSION_6)
     ): ApfFilter {
-        lateinit var apfFilter: ApfFilter
-        handler.post {
-            apfFilter = ApfFilter(
-                    handler,
-                    context,
-                    apfCfg,
-                    ifParams,
-                    ipClientCallback,
-                    metrics,
-                    dependencies
-            )
-        }
-        handlerThread.waitForIdle(TIMEOUT_MS)
-        return apfFilter
+        return ApfFilter(
+            context,
+            apfCfg,
+            ifParams,
+            ipClientCallback,
+            metrics,
+            dependencies
+        )
     }
 
     private fun doTestEtherTypeAllowListFilter(apfFilter: ApfFilter) {
