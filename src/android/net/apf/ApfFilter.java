@@ -217,16 +217,6 @@ public class ApfFilter implements AndroidPacketFilter {
         public boolean shouldHandleNdOffload;
     }
 
-    /** A wrapper class of {@link SystemClock} to be mocked in unit tests. */
-    public static class Clock {
-        /**
-         * @see SystemClock#elapsedRealtime
-         */
-        public long elapsedRealtime() {
-            return SystemClock.elapsedRealtime();
-        }
-    }
-
     // Thread to listen for RAs.
     @VisibleForTesting
     public class ReceiveThread extends Thread {
@@ -438,13 +428,30 @@ public class ApfFilter implements AndroidPacketFilter {
 
         mHardwareAddress = mInterfaceParams.macAddr.toByteArray();
         // TODO: ApfFilter should not generate programs until IpClient sends provisioning success.
-        startFilter();
+        synchronized (this) {
+            // Clear the APF memory to reset all counters upon connecting to the first AP
+            // in an SSID. This is limited to APFv3 devices because this large write triggers
+            // a crash on some older devices (b/78905546).
+            if (hasDataAccess(mApfVersionSupported)) {
+                byte[] zeroes = new byte[mApfRamSize];
+                if (!mIpClientCallback.installPacketFilter(zeroes)) {
+                    sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
+                }
+            }
+
+            // Install basic filters
+            installNewProgramLocked();
+        }
+        FileDescriptor socket = mDependencies.createRaReaderSocket(mInterfaceParams.index);
+        if (socket != null) {
+            mReceiveThread = new ReceiveThread(socket);
+            mReceiveThread.start();
+        }
 
         // Listen for doze-mode transition changes to enable/disable the IPv6 multicast filter.
         mDependencies.addDeviceIdleReceiver(mDeviceIdleReceiver);
 
         mDependencies.onApfFilterCreated(this);
-        // mReceiveThread is created in startFilter() and halted in shutdown().
         if (mReceiveThread != null) {
             mDependencies.onThreadCreated(mReceiveThread);
         }
@@ -616,33 +623,6 @@ public class ApfFilter implements AndroidPacketFilter {
         }
 
         return bl.stream().mapToInt(Integer::intValue).toArray();
-    }
-
-    /**
-     * Attempt to start listening for RAs and, if RAs are received, generating and installing
-     * filters to ignore useless RAs.
-     */
-    @VisibleForTesting
-    public void startFilter() {
-        synchronized (this) {
-            // Clear the APF memory to reset all counters upon connecting to the first AP
-            // in an SSID. This is limited to APFv3 devices because this large write triggers
-            // a crash on some older devices (b/78905546).
-            if (hasDataAccess(mApfVersionSupported)) {
-                byte[] zeroes = new byte[mApfRamSize];
-                if (!mIpClientCallback.installPacketFilter(zeroes)) {
-                    sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
-                }
-            }
-
-            // Install basic filters
-            installNewProgramLocked();
-        }
-        FileDescriptor socket = mDependencies.createRaReaderSocket(mInterfaceParams.index);
-        if (socket != null) {
-            mReceiveThread = new ReceiveThread(socket);
-            mReceiveThread.start();
-        }
     }
 
     // Returns seconds since device boot.
@@ -1699,8 +1679,15 @@ public class ApfFilter implements AndroidPacketFilter {
             // Check 1) it's not a fragment. 2) it's UDP.
             // Load 16 bit frag flags/offset field, 8 bit ttl, 8 bit protocol
             gen.addLoad32(R0, IPV4_FRAGMENT_OFFSET_OFFSET);
-            gen.addOr(0xFF00);
-            gen.addCountAndDropIfR0NotEquals(0xFF11, Counter.DROPPED_IPV4_NON_DHCP4);
+            // Mask out the reserved and don't fragment bits, plus the TTL field.
+            // Because:
+            //   IPV4_FRAGMENT_OFFSET_MASK = 0x1fff
+            //   IPV4_FRAGMENT_MORE_FRAGS_MASK = 0x2000
+            // hence this constant ends up being 0x3FFF00FF.
+            // We want the more flag bit and offset to be 0 (ie. not a fragment),
+            // so after this masking we end up with just the ip protocol (hopefully UDP).
+            gen.addAnd((IPV4_FRAGMENT_MORE_FRAGS_MASK | IPV4_FRAGMENT_OFFSET_MASK) << 16 | 0xFF);
+            gen.addCountAndDropIfR0NotEquals(IPPROTO_UDP, Counter.DROPPED_IPV4_NON_DHCP4);
             // Check it's addressed to DHCP client port.
             gen.addLoadFromMemory(R1, MemorySlot.IPV4_HEADER_SIZE);
             gen.addLoad32Indexed(R0, TCP_UDP_SOURCE_PORT_OFFSET);
@@ -1717,8 +1704,9 @@ public class ApfFilter implements AndroidPacketFilter {
             // Check 1) it's not a fragment. 2) it's UDP.
             // Load 16 bit frag flags/offset field, 8 bit ttl, 8 bit protocol
             gen.addLoad32(R0, IPV4_FRAGMENT_OFFSET_OFFSET);
-            gen.addOr(0xFF00);
-            gen.addJumpIfR0NotEquals(0xFF11, skipDhcpv4Filter);
+            // see above for explanation of this constant
+            gen.addAnd((IPV4_FRAGMENT_MORE_FRAGS_MASK | IPV4_FRAGMENT_OFFSET_MASK) << 16 | 0xFF);
+            gen.addJumpIfR0NotEquals(IPPROTO_UDP, skipDhcpv4Filter);
             // Check it's addressed to DHCP client port.
             gen.addLoadFromMemory(R1, MemorySlot.IPV4_HEADER_SIZE);
             gen.addLoad16Indexed(R0, TCP_UDP_DESTINATION_PORT_OFFSET);
