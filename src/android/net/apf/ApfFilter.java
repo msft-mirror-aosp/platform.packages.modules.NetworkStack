@@ -217,16 +217,6 @@ public class ApfFilter implements AndroidPacketFilter {
         public boolean shouldHandleNdOffload;
     }
 
-    /** A wrapper class of {@link SystemClock} to be mocked in unit tests. */
-    public static class Clock {
-        /**
-         * @see SystemClock#elapsedRealtime
-         */
-        public long elapsedRealtime() {
-            return SystemClock.elapsedRealtime();
-        }
-    }
-
     // Thread to listen for RAs.
     @VisibleForTesting
     public class ReceiveThread extends Thread {
@@ -1689,7 +1679,14 @@ public class ApfFilter implements AndroidPacketFilter {
             // Check 1) it's not a fragment. 2) it's UDP.
             // Load 16 bit frag flags/offset field, 8 bit ttl, 8 bit protocol
             gen.addLoad32(R0, IPV4_FRAGMENT_OFFSET_OFFSET);
-            gen.addAnd(0x3FFF00FF);
+            // Mask out the reserved and don't fragment bits, plus the TTL field.
+            // Because:
+            //   IPV4_FRAGMENT_OFFSET_MASK = 0x1fff
+            //   IPV4_FRAGMENT_MORE_FRAGS_MASK = 0x2000
+            // hence this constant ends up being 0x3FFF00FF.
+            // We want the more flag bit and offset to be 0 (ie. not a fragment),
+            // so after this masking we end up with just the ip protocol (hopefully UDP).
+            gen.addAnd((IPV4_FRAGMENT_MORE_FRAGS_MASK | IPV4_FRAGMENT_OFFSET_MASK) << 16 | 0xFF);
             gen.addCountAndDropIfR0NotEquals(IPPROTO_UDP, Counter.DROPPED_IPV4_NON_DHCP4);
             // Check it's addressed to DHCP client port.
             gen.addLoadFromMemory(R1, MemorySlot.IPV4_HEADER_SIZE);
@@ -1707,7 +1704,8 @@ public class ApfFilter implements AndroidPacketFilter {
             // Check 1) it's not a fragment. 2) it's UDP.
             // Load 16 bit frag flags/offset field, 8 bit ttl, 8 bit protocol
             gen.addLoad32(R0, IPV4_FRAGMENT_OFFSET_OFFSET);
-            gen.addAnd(0x3FFF00FF);
+            // see above for explanation of this constant
+            gen.addAnd((IPV4_FRAGMENT_MORE_FRAGS_MASK | IPV4_FRAGMENT_OFFSET_MASK) << 16 | 0xFF);
             gen.addJumpIfR0NotEquals(IPPROTO_UDP, skipDhcpv4Filter);
             // Check it's addressed to DHCP client port.
             gen.addLoadFromMemory(R1, MemorySlot.IPV4_HEADER_SIZE);
