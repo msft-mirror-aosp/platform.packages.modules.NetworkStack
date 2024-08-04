@@ -29,9 +29,9 @@ import android.net.apf.ApfCounterTracker.Counter.DROPPED_ETHERTYPE_NOT_ALLOWED
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_GARP_REPLY
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_BROADCAST_ADDR
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_BROADCAST_NET
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_L2_BROADCAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_MULTICAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_NON_DHCP4
-import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_L2_BROADCAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_MULTICAST_NA
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NON_ICMP_MULTICAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_INVALID
@@ -53,13 +53,20 @@ import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_TENTATIVE
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_UNICAST_NON_ICMP
 import android.net.apf.ApfCounterTracker.Counter.PASSED_MLD
 import android.net.apf.ApfFilter.Dependencies
+import android.net.apf.ApfTestHelpers.Companion.TIMEOUT_MS
+import android.net.apf.ApfTestHelpers.Companion.consumeInstalledProgram
 import android.net.apf.ApfTestHelpers.Companion.verifyProgramRun
 import android.net.apf.BaseApfGenerator.APF_VERSION_3
 import android.net.apf.BaseApfGenerator.APF_VERSION_6
 import android.net.ip.IpClient.IpClientCallbacksWrapper
 import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.SystemClock
+import android.system.Os
+import android.system.OsConstants.AF_UNIX
 import android.system.OsConstants.IFA_F_TENTATIVE
+import android.system.OsConstants.SOCK_STREAM
 import androidx.test.filters.SmallTest
 import com.android.internal.annotations.GuardedBy
 import com.android.net.module.util.HexDump
@@ -80,10 +87,13 @@ import com.android.testutils.DevSdkIgnoreRule
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo
 import com.android.testutils.DevSdkIgnoreRunner
 import com.android.testutils.quitResources
+import com.android.testutils.waitForIdle
+import java.io.FileDescriptor
 import java.net.Inet6Address
 import java.net.InetAddress
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import libcore.io.IoUtils
 import org.junit.After
 import org.junit.Before
 import org.junit.Rule
@@ -91,13 +101,14 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.ArgumentCaptor
 import org.mockito.ArgumentMatchers.any
+import org.mockito.ArgumentMatchers.anyInt
 import org.mockito.Mock
 import org.mockito.Mockito
 import org.mockito.Mockito.doAnswer
+import org.mockito.Mockito.doReturn
 import org.mockito.Mockito.never
 import org.mockito.Mockito.times
 import org.mockito.Mockito.verify
-import org.mockito.Mockito.`when`
 import org.mockito.MockitoAnnotations
 import org.mockito.invocation.InvocationOnMock
 
@@ -110,6 +121,7 @@ import org.mockito.invocation.InvocationOnMock
 class ApfFilterTest {
     companion object {
         private const val THREAD_QUIT_MAX_RETRY_COUNT = 3
+        private const val TAG = "ApfFilterTest"
     }
 
     @get:Rule
@@ -176,23 +188,32 @@ class ApfFilterTest {
         intArrayOf(0x33, 0x33, 0xff, 0xbb, 0xcc, 0xdd).map { it.toByte() }.toByteArray(),
     )
 
+    private val handlerThread by lazy {
+        HandlerThread("$TAG handler thread").apply { start() }
+    }
+    private val handler by lazy { Handler(handlerThread.looper) }
+    private var writerSocket = FileDescriptor()
+
     @Before
     fun setUp() {
         MockitoAnnotations.initMocks(this)
         // mock anycast6 address from /proc/net/anycast6
-        `when`(dependencies.getAnycast6Addresses(any())).thenReturn(hostAnycast6Addresses)
+        doReturn(hostAnycast6Addresses).`when`(dependencies).getAnycast6Addresses(any())
 
         // mock ether multicast mac address from /proc/net/dev_mcast
-        `when`(dependencies.getEtherMulticastAddresses(any())).thenReturn(hostMulticastMacAddresses)
+        doReturn(hostMulticastMacAddresses).`when`(dependencies).getEtherMulticastAddresses(any())
 
         // mock nd traffic class from /proc/sys/net/ipv6/conf/{ifname}/ndisc_tclass
-        `when`(dependencies.getNdTrafficClass(any())).thenReturn(0)
+        doReturn(0).`when`(dependencies).getNdTrafficClass(any())
         doAnswer { invocation: InvocationOnMock ->
             synchronized(mApfFilterCreated) {
                 mApfFilterCreated.add(invocation.getArgument(0))
             }
         }.`when`(dependencies).onApfFilterCreated(any())
-        `when`(dependencies.elapsedRealtime()).thenReturn(SystemClock.elapsedRealtime())
+        doReturn(SystemClock.elapsedRealtime()).`when`(dependencies).elapsedRealtime()
+        val readSocket = FileDescriptor()
+        Os.socketpair(AF_UNIX, SOCK_STREAM, 0, writerSocket, readSocket)
+        doReturn(readSocket).`when`(dependencies).createPacketReaderSocket(anyInt())
     }
 
     private fun shutdownApfFilters() {
@@ -203,7 +224,7 @@ class ApfFilterTest {
                 return@quitResources ret
             }
         }, { apf: AndroidPacketFilter ->
-            apf.shutdown()
+            handler.post { apf.shutdown() }
         })
 
         synchronized(mApfFilterCreated) {
@@ -217,9 +238,13 @@ class ApfFilterTest {
 
     @After
     fun tearDown() {
+        IoUtils.closeQuietly(writerSocket)
         shutdownApfFilters()
+        handler.waitForIdle(TIMEOUT_MS)
         Mockito.framework().clearInlineMocks()
         ApfJniUtils.resetTransmittedPacketMemory()
+        handlerThread.quitSafely()
+        handlerThread.join()
     }
 
     private fun getDefaultConfig(apfVersion: Int = APF_VERSION_6): ApfFilter.ApfConfiguration {
@@ -236,22 +261,26 @@ class ApfFilterTest {
     }
 
     private fun getApfFilter(
-        apfCfg: ApfFilter.ApfConfiguration = getDefaultConfig(APF_VERSION_6)
+            apfCfg: ApfFilter.ApfConfiguration = getDefaultConfig(APF_VERSION_6)
     ): ApfFilter {
-        return ApfFilter(
-            context,
-            apfCfg,
-            ifParams,
-            ipClientCallback,
-            metrics,
-            dependencies
-        )
+        lateinit var apfFilter: ApfFilter
+        handler.post {
+            apfFilter = ApfFilter(
+                    handler,
+                    context,
+                    apfCfg,
+                    ifParams,
+                    ipClientCallback,
+                    metrics,
+                    dependencies
+            )
+        }
+        handlerThread.waitForIdle(TIMEOUT_MS)
+        return apfFilter
     }
 
     private fun doTestEtherTypeAllowListFilter(apfFilter: ApfFilter) {
-        val programCaptor = ArgumentCaptor.forClass(ByteArray::class.java)
-        verify(ipClientCallback, times(2)).installPacketFilter(programCaptor.capture())
-        val program = programCaptor.allValues.last()
+        val program = consumeInstalledProgram(ipClientCallback, installCnt = 2)
 
         // Using scapy to generate IPv4 mDNS packet:
         //   eth = Ether(src="E8:9F:80:66:60:BB", dst="01:00:5E:00:00:FB")
@@ -361,7 +390,7 @@ class ApfFilterTest {
     fun testIPv4PacketFilterOnV6OnlyNetwork() {
         val apfFilter = getApfFilter()
         apfFilter.updateClatInterfaceState(true)
-        val program = ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 3)
+        val program = consumeInstalledProgram(ipClientCallback, installCnt = 3)
 
         // Using scapy to generate IPv4 mDNS packet:
         //   eth = Ether(src="E8:9F:80:66:60:BB", dst="01:00:5E:00:00:FB")
@@ -458,6 +487,25 @@ class ApfFilterTest {
             PASSED_IPV4_FROM_DHCPV4_SERVER
         )
 
+        // Duplicate of dhcp4Pkt with DF flag set.
+        val dhcp4PktDf = """
+            ffffffffffff00112233445508004500012e000140004011b815c0a80101ffffffff0043
+            0044011a5ffc02010600000000000000000000000000c0a80164c0a80101000000000011
+            223344550000000000000000000000000000000000000000000000000000000000000000
+            000000000000000000000000000000000000000000000000000000000000000000000000
+            000000000000000000000000000000000000000000000000000000000000000000000000
+            000000000000000000000000000000000000000000000000000000000000000000000000
+            000000000000000000000000000000000000000000000000000000000000000000000000
+            0000000000000000000000000000000000000000000000000000638253633501023604c0
+            a801010104ffffff000304c0a80101330400015180060408080808ff
+        """.replace("\\s+".toRegex(), "").trim()
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(dhcp4PktDf),
+            PASSED_IPV4_FROM_DHCPV4_SERVER
+        )
+
         // Using scapy to generate DHCP4 offer packet:
         //   eth = Ether(src="E8:9F:80:66:60:BB", dst="01:00:5E:00:00:FB")
         //   ip = IP(src="192.168.1.10", dst="192.168.1.20")  # IPv4
@@ -483,12 +531,12 @@ class ApfFilterTest {
         val apfConfig = getDefaultConfig()
         apfConfig.multicastFilter = true
         val apfFilter = getApfFilter(apfConfig)
-        ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        consumeInstalledProgram(ipClientCallback, installCnt = 2)
         val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
         val lp = LinkProperties()
         lp.addLinkAddress(linkAddress)
         apfFilter.setLinkProperties(lp)
-        val program = ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
 
         // Using scapy to generate DHCP4 offer packet:
         //   ether = Ether(src='00:11:22:33:44:55', dst='ff:ff:ff:ff:ff:ff')
@@ -599,9 +647,9 @@ class ApfFilterTest {
     @Test
     fun testArpFilterDropPktsOnV6OnlyNetwork() {
         val apfFilter = getApfFilter()
-        ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        consumeInstalledProgram(ipClientCallback, installCnt = 2)
         apfFilter.updateClatInterfaceState(true)
-        val program = ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
 
         // Drop ARP request packet when clat is enabled
         // Using scapy to generate ARP request packet:
@@ -624,13 +672,13 @@ class ApfFilterTest {
         val apfConfig = getDefaultConfig()
         apfConfig.multicastFilter = true
         val apfFilter = getApfFilter(apfConfig)
-        ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        consumeInstalledProgram(ipClientCallback, installCnt = 2)
         val lp = LinkProperties()
         for (addr in hostIpv6Addresses) {
             lp.addLinkAddress(LinkAddress(InetAddress.getByAddress(addr), 64))
         }
         apfFilter.setLinkProperties(lp)
-        val program = ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
 
         // Using scapy to generate non ICMPv6 sent to ff00::/8 (multicast prefix) packet:
         // eth = Ether(src="00:01:02:03:04:05", dst="01:02:03:04:05:06")
@@ -668,14 +716,14 @@ class ApfFilterTest {
         val apfConfig = getDefaultConfig()
         apfConfig.multicastFilter = true
         val apfFilter = getApfFilter(apfConfig)
-        ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        consumeInstalledProgram(ipClientCallback, installCnt = 2)
         val lp = LinkProperties()
         for (addr in hostIpv6Addresses) {
             lp.addLinkAddress(LinkAddress(InetAddress.getByAddress(addr), 64))
         }
         apfFilter.setLinkProperties(lp)
         apfFilter.setDozeMode(true)
-        val program = ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        val program = consumeInstalledProgram(ipClientCallback, installCnt = 2)
         // Using scapy to generate non ICMPv6 sent to ff00::/8 (multicast prefix) packet:
         // eth = Ether(src="00:01:02:03:04:05", dst="01:02:03:04:05:06")
         // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="ff00::1", nh=59)
@@ -711,13 +759,13 @@ class ApfFilterTest {
     @Test
     fun testIPv6PacketFilter() {
         val apfFilter = getApfFilter()
-        ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        consumeInstalledProgram(ipClientCallback, installCnt = 2)
         val lp = LinkProperties()
         for (addr in hostIpv6Addresses) {
             lp.addLinkAddress(LinkAddress(InetAddress.getByAddress(addr), 64))
         }
         apfFilter.setLinkProperties(lp)
-        val program = ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
         // Using scapy to generate non ICMPv6 packet:
         // eth = Ether(src="00:01:02:03:04:05", dst="01:02:03:04:05:06")
         // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="2001::200:1a:3344:1122", nh=59)
@@ -768,7 +816,7 @@ class ApfFilterTest {
     @Test
     fun testArpFilterDropPktsNoIPv4() {
         val apfFilter = getApfFilter()
-        val program = ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        val program = consumeInstalledProgram(ipClientCallback, installCnt = 2)
 
         // Drop ARP request packet with invalid hw type
         // Using scapy to generate ARP request packet with invalid hw type :
@@ -883,7 +931,7 @@ class ApfFilterTest {
     @Test
     fun testArpFilterPassPktsNoIPv4() {
         val apfFilter = getApfFilter()
-        val program = ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        val program = consumeInstalledProgram(ipClientCallback, installCnt = 2)
         // Pass non-broadcast ARP reply packet
         // Using scapy to generate unicast ARP reply packet:
         // eth = Ether(src="00:01:02:03:04:05", dst="01:02:03:04:05:06")
@@ -918,12 +966,12 @@ class ApfFilterTest {
     @Test
     fun testArpFilterDropPktsWithIPv4() {
         val apfFilter = getApfFilter()
-        ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        consumeInstalledProgram(ipClientCallback, installCnt = 2)
         val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
         val lp = LinkProperties()
         lp.addLinkAddress(linkAddress)
         apfFilter.setLinkProperties(lp)
-        val program = ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
         // Drop ARP reply packet is not for the device
         // Using scapy to generate ARP reply packet not for the device:
         // eth = Ether(src="00:01:02:03:04:05", dst="FF:FF:FF:FF:FF:FF")
@@ -958,12 +1006,12 @@ class ApfFilterTest {
     @Test
     fun testArpFilterPassPktsWithIPv4() {
         val apfFilter = getApfFilter()
-        ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        consumeInstalledProgram(ipClientCallback, installCnt = 2)
         val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
         val lp = LinkProperties()
         lp.addLinkAddress(linkAddress)
         apfFilter.setLinkProperties(lp)
-        val program = ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
 
         // Using scapy to generate ARP broadcast reply packet:
         // eth = Ether(src="00:01:02:03:04:05", dst="FF:FF:FF:FF:FF:FF")
@@ -985,12 +1033,12 @@ class ApfFilterTest {
     @Test
     fun testArpTransmit() {
         val apfFilter = getApfFilter()
-        ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        consumeInstalledProgram(ipClientCallback, installCnt = 2)
         val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
         val lp = LinkProperties()
         lp.addLinkAddress(linkAddress)
         apfFilter.setLinkProperties(lp)
-        val program = ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
         val receivedArpPacketBuf = ArpPacket.buildArpPacket(
             arpBroadcastMacAddress,
             senderMacAddress,
@@ -1030,14 +1078,12 @@ class ApfFilterTest {
         val apfConfig = getDefaultConfig()
         apfConfig.shouldHandleArpOffload = false
         val apfFilter = getApfFilter(apfConfig)
-        verify(ipClientCallback, times(2)).installPacketFilter(any())
+        consumeInstalledProgram(ipClientCallback, installCnt = 2)
         val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
         val lp = LinkProperties()
         lp.addLinkAddress(linkAddress)
         apfFilter.setLinkProperties(lp)
-        val programCaptor = ArgumentCaptor.forClass(ByteArray::class.java)
-        verify(ipClientCallback, times(3)).installPacketFilter(programCaptor.capture())
-        val program = programCaptor.value
+        val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
         val receivedArpPacketBuf = ArpPacket.buildArpPacket(
             arpBroadcastMacAddress,
             senderMacAddress,
@@ -1059,10 +1105,10 @@ class ApfFilterTest {
     @Test
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     fun testNsFilterNoIPv6() {
-        `when`(dependencies.getAnycast6Addresses(any())).thenReturn(listOf())
+        doReturn(listOf<ByteArray>()).`when`(dependencies).getAnycast6Addresses(any())
         val apfFilter = getApfFilter()
         // validate NS packet check when there is no IPv6 address
-        val program = ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        val program = consumeInstalledProgram(ipClientCallback, installCnt = 2)
         // Using scapy to generate IPv6 NS packet:
         // eth = Ether(src="00:01:02:03:04:05", dst="01:02:03:04:05:06")
         // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="2001::200:1a:3344:1122", hlim=255)
@@ -1086,7 +1132,7 @@ class ApfFilterTest {
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     fun testNsFilter() {
         val apfFilter = getApfFilter()
-        ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        consumeInstalledProgram(ipClientCallback, installCnt = 2)
         val lp = LinkProperties()
         for (addr in hostIpv6Addresses) {
             lp.addLinkAddress(LinkAddress(InetAddress.getByAddress(addr), 64))
@@ -1104,9 +1150,9 @@ class ApfFilterTest {
         }
 
         apfFilter.setLinkProperties(lp)
-        ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        consumeInstalledProgram(ipClientCallback, installCnt = 1)
         apfFilter.updateClatInterfaceState(true)
-        val program = ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
 
         // validate Ethernet dst address check
         // Using scapy to generate IPv6 NS packet:
@@ -1547,7 +1593,7 @@ class ApfFilterTest {
         }
 
         apfFilter.setLinkProperties(lp)
-        val program = ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 3)
+        val program = consumeInstalledProgram(ipClientCallback, installCnt = 3)
         val validIpv6Addresses = hostIpv6Addresses + hostAnycast6Addresses
         for (addr in validIpv6Addresses) {
             // unicast solicited NS request
@@ -1625,14 +1671,14 @@ class ApfFilterTest {
     @Test
     fun testNaTransmitWithTclass() {
         // mock nd traffic class from /proc/sys/net/ipv6/conf/{ifname}/ndisc_tclass to 20
-        `when`(dependencies.getNdTrafficClass(any())).thenReturn(20)
+        doReturn(20).`when`(dependencies).getNdTrafficClass(any())
         val apfFilter = getApfFilter()
         val lp = LinkProperties()
         for (addr in hostIpv6Addresses) {
             lp.addLinkAddress(LinkAddress(InetAddress.getByAddress(addr), 64))
         }
         apfFilter.setLinkProperties(lp)
-        val program = ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 3)
+        val program = consumeInstalledProgram(ipClientCallback, installCnt = 3)
         // Using scapy to generate IPv6 NS packet:
         // eth = Ether(src="00:01:02:03:04:05", dst="02:03:04:05:06:07")
         // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="ff02::1:ff44:1122", hlim=255, tc=20)
@@ -1680,7 +1726,7 @@ class ApfFilterTest {
         }
 
         apfFilter.setLinkProperties(lp)
-        val program = ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 3)
+        val program = consumeInstalledProgram(ipClientCallback, installCnt = 3)
         val validIpv6Addresses = hostIpv6Addresses + hostAnycast6Addresses
         for (addr in validIpv6Addresses) {
             // unicast solicited NS request
@@ -1726,13 +1772,13 @@ class ApfFilterTest {
     @Test
     fun testApfProgramUpdate() {
         val apfFilter = getApfFilter()
-        verify(ipClientCallback, times(2)).installPacketFilter(any())
+        consumeInstalledProgram(ipClientCallback, installCnt = 2)
         // add IPv4 address, expect to have apf program update
         val lp = LinkProperties()
         val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
         lp.addLinkAddress(linkAddress)
         apfFilter.setLinkProperties(lp)
-        ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 3)
+        consumeInstalledProgram(ipClientCallback, installCnt = 1)
 
         // add the same IPv4 address, expect to have no apf program update
         apfFilter.setLinkProperties(lp)
@@ -1744,7 +1790,7 @@ class ApfFilterTest {
         }
 
         apfFilter.setLinkProperties(lp)
-        ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        consumeInstalledProgram(ipClientCallback, installCnt = 1)
 
         // add the same IPv6 addresses, expect to have no apf program update
         apfFilter.setLinkProperties(lp)
@@ -1763,7 +1809,7 @@ class ApfFilterTest {
         }
 
         apfFilter.setLinkProperties(lp)
-        ApfTestHelpers.consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        consumeInstalledProgram(ipClientCallback, installCnt = 1)
 
         // add the same IPv6 addresses, expect to have no apf program update
         apfFilter.setLinkProperties(lp)
