@@ -24,13 +24,42 @@ import static android.net.ip.IIpClient.PROV_IPV6_DISABLED;
 import static android.net.ip.IIpClient.PROV_IPV6_LINKLOCAL;
 import static android.net.ip.IIpClient.PROV_IPV6_SLAAC;
 import static android.net.ip.IIpClientCallbacks.DTIM_MULTIPLIER_RESET;
+import static android.net.ip.IpClient.IpClientCommands.CMD_ADDRESSES_CLEARED;
+import static android.net.ip.IpClient.IpClientCommands.CMD_ADD_KEEPALIVE_PACKET_FILTER_TO_APF;
+import static android.net.ip.IpClient.IpClientCommands.CMD_COMPLETE_PRECONNECTION;
+import static android.net.ip.IpClient.IpClientCommands.CMD_CONFIRM;
+import static android.net.ip.IpClient.IpClientCommands.CMD_JUMP_RUNNING_TO_STOPPING;
+import static android.net.ip.IpClient.IpClientCommands.CMD_JUMP_STOPPING_TO_STOPPED;
+import static android.net.ip.IpClient.IpClientCommands.CMD_REMOVE_KEEPALIVE_PACKET_FILTER_FROM_APF;
+import static android.net.ip.IpClient.IpClientCommands.CMD_REMOVE_OFFLOAD_SERVICE;
+import static android.net.ip.IpClient.IpClientCommands.CMD_SET_DTIM_MULTIPLIER_AFTER_DELAY;
+import static android.net.ip.IpClient.IpClientCommands.CMD_SET_MULTICAST_FILTER;
+import static android.net.ip.IpClient.IpClientCommands.CMD_START;
+import static android.net.ip.IpClient.IpClientCommands.CMD_STOP;
+import static android.net.ip.IpClient.IpClientCommands.CMD_TERMINATE_AFTER_STOP;
+import static android.net.ip.IpClient.IpClientCommands.CMD_UPDATE_APF_CAPABILITIES;
+import static android.net.ip.IpClient.IpClientCommands.CMD_UPDATE_APF_DATA_SNAPSHOT;
+import static android.net.ip.IpClient.IpClientCommands.CMD_UPDATE_HTTP_PROXY;
+import static android.net.ip.IpClient.IpClientCommands.CMD_UPDATE_L2INFORMATION;
+import static android.net.ip.IpClient.IpClientCommands.CMD_UPDATE_L2KEY_CLUSTER;
+import static android.net.ip.IpClient.IpClientCommands.CMD_UPDATE_OFFLOAD_SERVICE;
+import static android.net.ip.IpClient.IpClientCommands.CMD_UPDATE_TCP_BUFFER_SIZES;
+import static android.net.ip.IpClient.IpClientCommands.EVENT_DHCPACTION_TIMEOUT;
+import static android.net.ip.IpClient.IpClientCommands.EVENT_IPV6_AUTOCONF_TIMEOUT;
+import static android.net.ip.IpClient.IpClientCommands.EVENT_NETLINK_LINKPROPERTIES_CHANGED;
+import static android.net.ip.IpClient.IpClientCommands.EVENT_PRE_DHCP_ACTION_COMPLETE;
+import static android.net.ip.IpClient.IpClientCommands.EVENT_PROVISIONING_TIMEOUT;
+import static android.net.ip.IpClient.IpClientCommands.EVENT_READ_PACKET_FILTER_COMPLETE;
 import static android.net.ip.IpClientLinkObserver.IpClientNetlinkMonitor;
 import static android.net.ip.IpClientLinkObserver.IpClientNetlinkMonitor.INetlinkMessageProcessor;
 import static android.net.ip.IpReachabilityMonitor.INVALID_REACHABILITY_LOSS_TYPE;
 import static android.net.ip.IpReachabilityMonitor.nudEventTypeToInt;
+import static android.net.nsd.OffloadEngine.OFFLOAD_CAPABILITY_BYPASS_MULTICAST_LOCK;
+import static android.net.nsd.OffloadEngine.OFFLOAD_TYPE_REPLY;
 import static android.net.util.SocketUtils.makePacketSocketAddress;
 import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
 import static android.stats.connectivity.NetworkQuirkEvent.QE_DHCP6_HEURISTIC_TRIGGERED;
+import static android.stats.connectivity.NetworkQuirkEvent.QE_DHCP6_PD_PROVISIONED;
 import static android.system.OsConstants.AF_PACKET;
 import static android.system.OsConstants.ARPHRD_ETHER;
 import static android.system.OsConstants.ETH_P_ARP;
@@ -64,7 +93,6 @@ import android.annotation.SuppressLint;
 import android.app.admin.DevicePolicyManager;
 import android.content.ComponentName;
 import android.content.Context;
-import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Resources;
 import android.net.ConnectivityManager;
@@ -86,7 +114,9 @@ import android.net.Uri;
 import android.net.apf.AndroidPacketFilter;
 import android.net.apf.ApfCapabilities;
 import android.net.apf.ApfFilter;
+import android.net.apf.ApfMdnsUtils;
 import android.net.apf.LegacyApfFilter;
+import android.net.apf.MdnsOffloadRule;
 import android.net.dhcp.DhcpClient;
 import android.net.dhcp.DhcpPacket;
 import android.net.dhcp6.Dhcp6Client;
@@ -95,6 +125,9 @@ import android.net.metrics.IpManagerEvent;
 import android.net.networkstack.aidl.dhcp.DhcpOption;
 import android.net.networkstack.aidl.ip.ReachabilityLossInfoParcelable;
 import android.net.networkstack.aidl.ip.ReachabilityLossReason;
+import android.net.nsd.NsdManager;
+import android.net.nsd.OffloadEngine;
+import android.net.nsd.OffloadServiceInfo;
 import android.net.shared.InitialConfiguration;
 import android.net.shared.Layer2Information;
 import android.net.shared.ProvisioningConfiguration;
@@ -123,6 +156,7 @@ import android.util.SparseArray;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.HexDump;
@@ -158,6 +192,7 @@ import com.android.server.NetworkStackService.NetworkStackServiceManager;
 
 import java.io.File;
 import java.io.FileDescriptor;
+import java.io.IOException;
 import java.io.PrintWriter;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
@@ -206,7 +241,7 @@ public class IpClient extends StateMachine {
     private final boolean mApfDebug;
 
     // For message logging.
-    private static final Class[] sMessageClasses = { IpClient.class, DhcpClient.class };
+    private static final Class[] sMessageClasses = { IpClientCommands.class, DhcpClient.class };
     private static final SparseArray<String> sWhatToString =
             MessageUtils.findMessageNames(sMessageClasses);
     // Static concurrent hashmaps of interface name to logging classes.
@@ -540,39 +575,50 @@ public class IpClient extends StateMachine {
     static final String ACCEPT_RA_MIN_LFT = "accept_ra_min_lft";
     private static final String DAD_TRANSMITS = "dad_transmits";
 
-    // Below constants are picked up by MessageUtils and exempt from ProGuard optimization.
-    private static final int CMD_TERMINATE_AFTER_STOP             = 1;
-    private static final int CMD_STOP                             = 2;
-    private static final int CMD_START                            = 3;
-    private static final int CMD_CONFIRM                          = 4;
-    private static final int EVENT_PRE_DHCP_ACTION_COMPLETE       = 5;
-    // Triggered by IpClientLinkObserver to communicate netlink events.
-    private static final int EVENT_NETLINK_LINKPROPERTIES_CHANGED = 6;
-    private static final int CMD_UPDATE_TCP_BUFFER_SIZES          = 7;
-    private static final int CMD_UPDATE_HTTP_PROXY                = 8;
-    private static final int CMD_SET_MULTICAST_FILTER             = 9;
-    private static final int EVENT_PROVISIONING_TIMEOUT           = 10;
-    private static final int EVENT_DHCPACTION_TIMEOUT             = 11;
-    private static final int EVENT_READ_PACKET_FILTER_COMPLETE    = 12;
-    private static final int CMD_ADD_KEEPALIVE_PACKET_FILTER_TO_APF = 13;
-    private static final int CMD_REMOVE_KEEPALIVE_PACKET_FILTER_FROM_APF = 14;
-    private static final int CMD_UPDATE_L2KEY_CLUSTER = 15;
-    private static final int CMD_COMPLETE_PRECONNECTION = 16;
-    private static final int CMD_UPDATE_L2INFORMATION = 17;
-    private static final int CMD_SET_DTIM_MULTIPLIER_AFTER_DELAY = 18;
-    private static final int CMD_UPDATE_APF_CAPABILITIES = 19;
-    private static final int EVENT_IPV6_AUTOCONF_TIMEOUT = 20;
-    private static final int CMD_UPDATE_APF_DATA_SNAPSHOT = 21;
+    /**
+     * The IpClientCommands constant values.
+     *
+     * @hide
+     */
+    public static class IpClientCommands {
+        private IpClientCommands() {
+        }
+
+        // Below constants are picked up by MessageUtils and exempt from ProGuard optimization.
+        static final int CMD_TERMINATE_AFTER_STOP = 1;
+        static final int CMD_STOP = 2;
+        static final int CMD_START = 3;
+        static final int CMD_CONFIRM = 4;
+        static final int EVENT_PRE_DHCP_ACTION_COMPLETE = 5;
+        // Triggered by IpClientLinkObserver to communicate netlink events.
+        static final int EVENT_NETLINK_LINKPROPERTIES_CHANGED = 6;
+        static final int CMD_UPDATE_TCP_BUFFER_SIZES = 7;
+        static final int CMD_UPDATE_HTTP_PROXY = 8;
+        static final int CMD_SET_MULTICAST_FILTER = 9;
+        static final int EVENT_PROVISIONING_TIMEOUT = 10;
+        static final int EVENT_DHCPACTION_TIMEOUT = 11;
+        static final int EVENT_READ_PACKET_FILTER_COMPLETE = 12;
+        static final int CMD_ADD_KEEPALIVE_PACKET_FILTER_TO_APF = 13;
+        static final int CMD_REMOVE_KEEPALIVE_PACKET_FILTER_FROM_APF = 14;
+        static final int CMD_UPDATE_L2KEY_CLUSTER = 15;
+        static final int CMD_COMPLETE_PRECONNECTION = 16;
+        static final int CMD_UPDATE_L2INFORMATION = 17;
+        static final int CMD_SET_DTIM_MULTIPLIER_AFTER_DELAY = 18;
+        static final int CMD_UPDATE_APF_CAPABILITIES = 19;
+        static final int EVENT_IPV6_AUTOCONF_TIMEOUT = 20;
+        static final int CMD_UPDATE_APF_DATA_SNAPSHOT = 21;
+        static final int CMD_UPDATE_OFFLOAD_SERVICE = 22;
+        static final int CMD_REMOVE_OFFLOAD_SERVICE = 23;
+        // Internal commands to use instead of trying to call transitionTo() inside
+        // a given State's enter() method. Calling transitionTo() from enter/exit
+        // encounters a Log.wtf() that can cause trouble on eng builds.
+        static final int CMD_ADDRESSES_CLEARED = 100;
+        static final int CMD_JUMP_RUNNING_TO_STOPPING = 101;
+        static final int CMD_JUMP_STOPPING_TO_STOPPED = 102;
+    }
 
     private static final int ARG_LINKPROP_CHANGED_LINKSTATE_DOWN = 0;
     private static final int ARG_LINKPROP_CHANGED_LINKSTATE_UP = 1;
-
-    // Internal commands to use instead of trying to call transitionTo() inside
-    // a given State's enter() method. Calling transitionTo() from enter/exit
-    // encounters a Log.wtf() that can cause trouble on eng builds.
-    private static final int CMD_ADDRESSES_CLEARED                = 100;
-    private static final int CMD_JUMP_RUNNING_TO_STOPPING         = 101;
-    private static final int CMD_JUMP_STOPPING_TO_STOPPED         = 102;
 
     // IpClient shares a handler with DhcpClient: commands must not overlap
     public static final int DHCPCLIENT_CMD_BASE = 1000;
@@ -738,6 +784,7 @@ public class IpClient extends StateMachine {
     private final boolean mPopulateLinkAddressLifetime;
     private final boolean mApfShouldHandleArpOffload;
     private final boolean mApfShouldHandleNdOffload;
+    private final boolean mApfShouldHandleMdnsOffload;
 
     private InterfaceParams mInterfaceParams;
 
@@ -753,6 +800,10 @@ public class IpClient extends StateMachine {
     private String mTcpBufferSizes;
     private ProxyInfo mHttpProxy;
     private AndroidPacketFilter mApfFilter;
+    private final NsdManager mNsdManager;
+    @Nullable
+    private OffloadEngine mOffloadEngine;
+    private final List<OffloadServiceInfo> mOffloadServiceInfos = new ArrayList<>();
     private String mL2Key; // The L2 key for this network, for writing into the memory store
     private String mCluster; // The cluster for this network, for writing into the memory store
     private int mCreatorUid; // Uid of app creating the wifi configuration
@@ -890,12 +941,13 @@ public class IpClient extends StateMachine {
          * APF programs.
          * @see ApfFilter#maybeCreate
          */
-        public AndroidPacketFilter maybeCreateApfFilter(Context context,
+        public AndroidPacketFilter maybeCreateApfFilter(Handler handler, Context context,
                 ApfFilter.ApfConfiguration config, InterfaceParams ifParams,
                 IpClientCallbacksWrapper cb, NetworkQuirkMetrics networkQuirkMetrics,
                 boolean useNewApfFilter) {
             if (useNewApfFilter) {
-                return ApfFilter.maybeCreate(context, config, ifParams, cb, networkQuirkMetrics);
+                return ApfFilter.maybeCreate(handler, context, config, ifParams, cb,
+                        networkQuirkMetrics);
             } else {
                 return LegacyApfFilter.maybeCreate(context, config, ifParams, cb,
                         networkQuirkMetrics);
@@ -933,32 +985,6 @@ public class IpClient extends StateMachine {
         this(context, ifName, callback, nssManager, new Dependencies());
     }
 
-    /**
-     * Check if the network stack module in the factory image is at least the specified version.
-     */
-    private boolean isFactoryNetworkStackVersionAtLeast(@NonNull Context context,
-            long targetVersion) {
-        final PackageManager pm = context.getPackageManager();
-        try {
-            final PackageInfo pktInfo = pm.getPackageInfo(context.getPackageName(),
-                    PackageManager.MATCH_FACTORY_ONLY);
-            if (pktInfo == null) {
-                Log.wtf(TAG, "Factory network stack package not found");
-                return false;
-            }
-            long versionCode = pktInfo.getLongVersionCode();
-            if (versionCode == 350090000) {
-                // AOSP use default version code 350090000.
-                // ref: build/soong/android/updatable_modules.go
-                return true;
-            }
-            return versionCode >= targetVersion;
-        } catch (PackageManager.NameNotFoundException e) {
-            Log.wtf(TAG, "Factory network stack package not found", e);
-            return false;
-        }
-    }
-
     @VisibleForTesting
     public IpClient(Context context, String ifName, IIpClientCallbacks callback,
             NetworkStackServiceManager nssManager, Dependencies deps) {
@@ -992,6 +1018,7 @@ public class IpClient extends StateMachine {
         // InterfaceController.Dependencies class.
         mNetd = deps.getNetd(mContext);
         mInterfaceCtrl = new InterfaceController(mInterfaceName, mNetd, mLog);
+        mNsdManager = context.getSystemService(NsdManager.class);
 
         mDhcp6PrefixDelegationEnabled = mDependencies.isFeatureEnabled(mContext,
                 IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION);
@@ -1012,18 +1039,10 @@ public class IpClient extends StateMachine {
                         IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION);
         mApfShouldHandleArpOffload = mDependencies.isFeatureNotChickenedOut(
                 mContext, APF_HANDLE_ARP_OFFLOAD);
-        mApfShouldHandleNdOffload =
-                mDependencies.isFeatureNotChickenedOut(mContext, APF_HANDLE_ND_OFFLOAD)
-                // The feature is enabled only if the factory network stack version is greater
-                // than or equal to M-2024-09 or the OEM explicitly opts in through overlay value
-                // override. If OEMs decide to opt in to this feature, they must ensure the APFv6
-                // ND offload logic is tested properly.
-                // This check ensures the APFv6 ND offload feature is tested before deployment to
-                // production.
-                && (isFactoryNetworkStackVersionAtLeast(context, 350911000)
-                        || context.getResources().getBoolean(
-                        R.bool.config_force_enable_apfv6_nd_offload)
-                );
+        mApfShouldHandleNdOffload = mDependencies.isFeatureNotChickenedOut(
+                mContext, APF_HANDLE_ND_OFFLOAD);
+        // TODO: turn on APF mDNS offload.
+        mApfShouldHandleMdnsOffload = false;
         mPopulateLinkAddressLifetime = mDependencies.isFeatureEnabled(context,
                 IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION);
 
@@ -2254,6 +2273,13 @@ public class IpClient extends StateMachine {
         // the gratuitous NA to update the first-hop router's neighbor cache entry.
         maybeSendMulticastNSes(newLp);
 
+        final boolean gainedV6 = !mLinkProperties.isIpv6Provisioned() && newLp.isIpv6Provisioned();
+        // mDelegatedPrefixes is updated as part of the call to assembleLinkProperties() above.
+        if (gainedV6 && !mDelegatedPrefixes.isEmpty()) {
+            mNetworkQuirkMetrics.setEvent(QE_DHCP6_PD_PROVISIONED);
+            mNetworkQuirkMetrics.statsWrite();
+        }
+
         // Either success IPv4 or IPv6 provisioning triggers new LinkProperties update,
         // wait for the provisioning completion and record the latency.
         mIpProvisioningMetrics.setIPv4ProvisionedLatencyOnFirstTime(newLp.isIpv4Provisioned());
@@ -2649,10 +2675,11 @@ public class IpClient extends StateMachine {
         }
         apfConfig.shouldHandleArpOffload = mApfShouldHandleArpOffload;
         apfConfig.shouldHandleNdOffload = mApfShouldHandleNdOffload;
+        apfConfig.shouldHandleMdnsOffload = mApfShouldHandleMdnsOffload;
         apfConfig.minMetricsSessionDurationMs = mApfCounterPollingIntervalMs;
         apfConfig.hasClatInterface = mHasSeenClatInterface;
-        return mDependencies.maybeCreateApfFilter(mContext, apfConfig, mInterfaceParams,
-                mCallback, mNetworkQuirkMetrics, mUseNewApfFilter);
+        return mDependencies.maybeCreateApfFilter(getHandler(), mContext, apfConfig,
+                mInterfaceParams, mCallback, mNetworkQuirkMetrics, mUseNewApfFilter);
     }
 
     private boolean handleUpdateApfCapabilities(@NonNull final ApfCapabilities apfCapabilities) {
@@ -2667,6 +2694,9 @@ public class IpClient extends StateMachine {
             return false;
         }
         if (mApfFilter != null) {
+            if (SdkLevel.isAtLeastV() && mOffloadEngine != null) {
+                unregisterOffloadEngine();
+            }
             mApfFilter.shutdown();
         }
         mCurrentApfCapabilities = apfCapabilities;
@@ -3132,6 +3162,37 @@ public class IpClient extends StateMachine {
         return mConfiguration.mIPv4ProvisioningMode != PROV_IPV4_DISABLED;
     }
 
+    @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
+    private OffloadEngine createMdnsOffloadEngine() {
+        return new OffloadEngine() {
+            @Override
+            public void onOffloadServiceUpdated(@NonNull OffloadServiceInfo info) {
+                sendMessage(CMD_UPDATE_OFFLOAD_SERVICE, info);
+            }
+
+            @Override
+            public void onOffloadServiceRemoved(@NonNull OffloadServiceInfo info) {
+                sendMessage(CMD_REMOVE_OFFLOAD_SERVICE, info);
+            }
+        };
+    }
+
+    @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
+    private void registerOffloadEngine() {
+        mOffloadEngine = createMdnsOffloadEngine();
+        mNsdManager.registerOffloadEngine(mInterfaceName,
+                OFFLOAD_TYPE_REPLY,
+                OFFLOAD_CAPABILITY_BYPASS_MULTICAST_LOCK,
+                Runnable::run, mOffloadEngine);
+    }
+
+    @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
+    private void unregisterOffloadEngine() {
+        mNsdManager.unregisterOffloadEngine(mOffloadEngine);
+        mOffloadServiceInfos.clear();
+        mOffloadEngine = null;
+    }
+
     class RunningState extends State {
         private ConnectivityPacketTracker mPacketTracker;
         private boolean mDhcpActionInFlight;
@@ -3146,9 +3207,14 @@ public class IpClient extends StateMachine {
             // at the beginning.
             mHasSeenClatInterface = false;
             mApfFilter = maybeCreateApfFilter(mCurrentApfCapabilities);
-            // If Apf supports ND offload, then turn off the vendor ND offload feature.
-            if (mApfFilter != null && mApfFilter.supportNdOffload()) {
-                mCallback.setNeighborDiscoveryOffload(false);
+            if (mApfFilter != null) {
+                // If Apf supports ND offload, then turn off the vendor ND offload feature.
+                if (mApfFilter.supportNdOffload()) {
+                    mCallback.setNeighborDiscoveryOffload(false);
+                }
+                if (mApfFilter.shouldUseMdnsOffload()) {
+                    registerOffloadEngine();
+                }
             }
             // TODO: investigate the effects of any multicast filtering racing/interfering with the
             // rest of this IP configuration startup.
@@ -3210,6 +3276,9 @@ public class IpClient extends StateMachine {
             }
 
             if (mApfFilter != null) {
+                if (SdkLevel.isAtLeastV() && mOffloadEngine != null) {
+                    unregisterOffloadEngine();
+                }
                 mApfFilter.shutdown();
                 mApfFilter = null;
             }
@@ -3357,6 +3426,18 @@ public class IpClient extends StateMachine {
             }
         }
 
+        private void updateApfMdnsOffloadReplyRules() {
+            if (SdkLevel.isAtLeastV() && mApfFilter != null) {
+                try {
+                    final List<MdnsOffloadRule> rules =
+                            ApfMdnsUtils.extractOffloadReplyRule(mOffloadServiceInfos);
+                    mApfFilter.updateMdnsOffloadReplyRules(rules);
+                } catch (IOException e) {
+                    Log.wtf(TAG, "Failed to extract MdnsOffloadRule", e);
+                }
+            }
+        }
+
         @Override
         public boolean processMessage(Message msg) {
             switch (msg.what) {
@@ -3456,7 +3537,19 @@ public class IpClient extends StateMachine {
                     }
                     break;
                 }
-
+                case CMD_UPDATE_OFFLOAD_SERVICE: {
+                    final OffloadServiceInfo info = (OffloadServiceInfo) msg.obj;
+                    mOffloadServiceInfos.removeIf(i -> i.getKey().equals(info.getKey()));
+                    mOffloadServiceInfos.add(info);
+                    updateApfMdnsOffloadReplyRules();
+                    break;
+                }
+                case CMD_REMOVE_OFFLOAD_SERVICE: {
+                    final OffloadServiceInfo info = (OffloadServiceInfo) msg.obj;
+                    mOffloadServiceInfos.removeIf(i -> i.getKey().equals(info.getKey()));
+                    updateApfMdnsOffloadReplyRules();
+                    break;
+                }
                 case EVENT_DHCPACTION_TIMEOUT:
                     stopDhcpAction();
                     break;
@@ -3607,9 +3700,15 @@ public class IpClient extends StateMachine {
                     final ApfCapabilities apfCapabilities = (ApfCapabilities) msg.obj;
                     if (handleUpdateApfCapabilities(apfCapabilities)) {
                         mApfFilter = maybeCreateApfFilter(apfCapabilities);
-                        // If Apf supports ND offload, then turn off the vendor ND offload feature.
-                        if (mApfFilter != null && mApfFilter.supportNdOffload()) {
-                            mCallback.setNeighborDiscoveryOffload(false);
+                        if (mApfFilter != null) {
+                            // If Apf supports ND offload, then turn off the vendor ND offload
+                            // feature.
+                            if (mApfFilter.supportNdOffload()) {
+                                mCallback.setNeighborDiscoveryOffload(false);
+                            }
+                            if (mApfFilter.shouldUseMdnsOffload()) {
+                                registerOffloadEngine();
+                            }
                         }
                     }
                     break;
