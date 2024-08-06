@@ -1086,7 +1086,7 @@ public class IpClientTest {
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     public void testRegisterOffloadEngineWhenApfEnabledAtStart() throws Exception {
         doReturn(mApfFilter).when(mDependencies).maybeCreateApfFilter(any(), any(), any(), any(),
-                any(), anyBoolean());
+                any(), any(), anyBoolean());
         when(mApfFilter.shouldUseMdnsOffload()).thenReturn(true);
         final IpClient ipc = makeIpClient(TEST_IFNAME);
         final ProvisioningConfiguration config1 = new ProvisioningConfiguration.Builder()
@@ -1118,7 +1118,7 @@ public class IpClientTest {
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     public void testRegisterOffloadEngineWhenApfCapabilitiesUpdated() throws Exception {
         doReturn(mApfFilter).when(mDependencies).maybeCreateApfFilter(any(), any(), any(), any(),
-                any(), anyBoolean());
+                any(), any(), anyBoolean());
         when(mApfFilter.shouldUseMdnsOffload()).thenReturn(true);
         final IpClient ipc = makeIpClient(TEST_IFNAME);
         final ProvisioningConfiguration config2 = new ProvisioningConfiguration.Builder()
