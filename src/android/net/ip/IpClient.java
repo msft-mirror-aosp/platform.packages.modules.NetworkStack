@@ -55,6 +55,7 @@ import static android.net.ip.IpReachabilityMonitor.nudEventTypeToInt;
 import static android.net.util.SocketUtils.makePacketSocketAddress;
 import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
 import static android.stats.connectivity.NetworkQuirkEvent.QE_DHCP6_HEURISTIC_TRIGGERED;
+import static android.stats.connectivity.NetworkQuirkEvent.QE_DHCP6_PD_PROVISIONED;
 import static android.system.OsConstants.AF_PACKET;
 import static android.system.OsConstants.ARPHRD_ETHER;
 import static android.system.OsConstants.ETH_P_ARP;
@@ -159,6 +160,7 @@ import com.android.modules.utils.build.SdkLevel;
 import com.android.net.module.util.CollectionUtils;
 import com.android.net.module.util.ConnectivityUtils;
 import com.android.net.module.util.DeviceConfigUtils;
+import com.android.net.module.util.HandlerUtils;
 import com.android.net.module.util.InterfaceParams;
 import com.android.net.module.util.LinkPropertiesUtils;
 import com.android.net.module.util.SharedLog;
@@ -922,12 +924,13 @@ public class IpClient extends StateMachine {
          * APF programs.
          * @see ApfFilter#maybeCreate
          */
-        public AndroidPacketFilter maybeCreateApfFilter(Context context,
+        public AndroidPacketFilter maybeCreateApfFilter(Handler handler, Context context,
                 ApfFilter.ApfConfiguration config, InterfaceParams ifParams,
                 IpClientCallbacksWrapper cb, NetworkQuirkMetrics networkQuirkMetrics,
                 boolean useNewApfFilter) {
             if (useNewApfFilter) {
-                return ApfFilter.maybeCreate(context, config, ifParams, cb, networkQuirkMetrics);
+                return ApfFilter.maybeCreate(handler, context, config, ifParams, cb,
+                        networkQuirkMetrics);
             } else {
                 return LegacyApfFilter.maybeCreate(context, config, ifParams, cb,
                         networkQuirkMetrics);
@@ -1438,7 +1441,16 @@ public class IpClient extends StateMachine {
                     pw.print("TIMEOUT: DUMPING STALE APF SNAPSHOT");
                 }
             }
-            apfFilter.dump(pw);
+            final Handler handler = getHandler();
+            if (handler == null) {
+                // This situation is unexpected. The getHandler() function should not return null
+                // unless the IpClient has stopped running. When the IpClient exits the RunningState
+                // , it should have already set apfFilter to null.
+                pw.println("ApfFilter is not null even if IpClient is not running.");
+            } else {
+                HandlerUtils.runWithScissorsForDump(handler, () -> apfFilter.dump(pw),
+                        10_000 /* ms */);
+            }
             pw.println("APF log:");
             pw.println("mApfDebug: " + mApfDebug);
             mApfLog.dump(fd, pw, args);
@@ -2250,6 +2262,13 @@ public class IpClient extends StateMachine {
         // the gratuitous NA to update the first-hop router's neighbor cache entry.
         maybeSendMulticastNSes(newLp);
 
+        final boolean gainedV6 = !mLinkProperties.isIpv6Provisioned() && newLp.isIpv6Provisioned();
+        // mDelegatedPrefixes is updated as part of the call to assembleLinkProperties() above.
+        if (gainedV6 && !mDelegatedPrefixes.isEmpty()) {
+            mNetworkQuirkMetrics.setEvent(QE_DHCP6_PD_PROVISIONED);
+            mNetworkQuirkMetrics.statsWrite();
+        }
+
         // Either success IPv4 or IPv6 provisioning triggers new LinkProperties update,
         // wait for the provisioning completion and record the latency.
         mIpProvisioningMetrics.setIPv4ProvisionedLatencyOnFirstTime(newLp.isIpv4Provisioned());
@@ -2647,8 +2666,8 @@ public class IpClient extends StateMachine {
         apfConfig.shouldHandleNdOffload = mApfShouldHandleNdOffload;
         apfConfig.minMetricsSessionDurationMs = mApfCounterPollingIntervalMs;
         apfConfig.hasClatInterface = mHasSeenClatInterface;
-        return mDependencies.maybeCreateApfFilter(mContext, apfConfig, mInterfaceParams,
-                mCallback, mNetworkQuirkMetrics, mUseNewApfFilter);
+        return mDependencies.maybeCreateApfFilter(getHandler(), mContext, apfConfig,
+                mInterfaceParams, mCallback, mNetworkQuirkMetrics, mUseNewApfFilter);
     }
 
     private boolean handleUpdateApfCapabilities(@NonNull final ApfCapabilities apfCapabilities) {
