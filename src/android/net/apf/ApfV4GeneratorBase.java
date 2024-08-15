@@ -52,9 +52,9 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
      * the requested version is unsupported.
      */
     @VisibleForTesting(visibility = VisibleForTesting.Visibility.PACKAGE)
-    public ApfV4GeneratorBase(int version, boolean disableCounterRangeCheck)
-            throws IllegalInstructionException {
-        super(version, disableCounterRangeCheck);
+    public ApfV4GeneratorBase(int version, int ramSize, int clampSize,
+            boolean disableCounterRangeCheck) throws IllegalInstructionException {
+        super(version, ramSize, clampSize, disableCounterRangeCheck);
         requireApfVersion(APF_VERSION_2);
     }
 
@@ -500,6 +500,29 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
             ApfCounterTracker.Counter cnt) throws IllegalInstructionException;
 
     /**
+     * Add instructions to the end of the program to increase counter and drop packet if the
+     * bytes of the packet at an offset specified by register0 match {@code bytes}.
+     * WARNING: may modify R1
+     */
+    public final Type addCountAndDropIfBytesAtR0Equal(byte[] bytes,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        final String tgt = getUniqueLabel();
+        return addJumpIfBytesAtR0NotEqual(bytes, tgt).addCountAndDrop(cnt).defineLabel(tgt);
+    }
+
+
+    /**
+     * Add instructions to the end of the program to increase counter and pass packet if the
+     * bytes of the packet at an offset specified by register0 match {@code bytes}.
+     * WARNING: may modify R1
+     */
+    public final Type addCountAndPassIfBytesAtR0Equal(byte[] bytes,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        final String tgt = getUniqueLabel();
+        return addJumpIfBytesAtR0NotEqual(bytes, tgt).addCountAndPass(cnt).defineLabel(tgt);
+    }
+
+    /**
      * Add instructions to the end of the program to increase counter and pass packet if the
      * value in register0 is one of {@code values}.
      * WARNING: may modify R1
@@ -621,7 +644,7 @@ public abstract class ApfV4GeneratorBase<Type extends ApfV4GeneratorBase<Type>> 
      */
     public final Type addIncrementCounter(ApfCounterTracker.Counter counter, int val)
             throws IllegalInstructionException {
-        if (mVersion < 4) return self();
+        if (mVersion <= 2) return self();
         return addLoadCounter(R0, counter).addAdd(val).addStoreCounter(counter, R0);
     }
 
