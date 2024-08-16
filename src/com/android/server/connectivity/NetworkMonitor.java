@@ -462,6 +462,9 @@ public class NetworkMonitor extends StateMachine {
     @VisibleForTesting
     static final int MAX_PROBE_THREAD_POOL_SIZE = 5;
     private String mPrivateDnsProviderHostname = "";
+    private final boolean mDdrEnabled;
+    @NonNull
+    private final DdrTracker mDdrTracker;
 
     private final Context mContext;
     private final INetworkMonitorCallbacks mCallback;
@@ -679,6 +682,7 @@ public class NetworkMonitor extends StateMachine {
                 context, NetworkStackUtils.REEVALUATE_WHEN_RESUME);
         mAsyncPrivdnsResolutionEnabled = deps.isFeatureEnabled(context,
                 NetworkStackUtils.NETWORKMONITOR_ASYNC_PRIVDNS_RESOLUTION);
+        mDdrEnabled = deps.isFeatureEnabled(context, NetworkStackUtils.DNS_DDR_VERSION);
         mUseHttps = getUseHttpsValidation();
         mCaptivePortalUserAgent = getCaptivePortalUserAgent();
         mCaptivePortalFallbackSpecs =
@@ -714,6 +718,8 @@ public class NetworkMonitor extends StateMachine {
         mLinkProperties = new LinkProperties();
         mNetworkCapabilities = new NetworkCapabilities(null);
         mNetworkAgentConfig = NetworkAgentConfigShimImpl.newInstance(null);
+
+        mDdrTracker = new DdrTracker();
     }
 
     /**
@@ -1084,6 +1090,9 @@ public class NetworkMonitor extends StateMachine {
                 case CMD_PRIVATE_DNS_SETTINGS_CHANGED: {
                     final PrivateDnsConfig cfg = (PrivateDnsConfig) message.obj;
                     final TcpSocketTracker tst = getTcpSocketTracker();
+                    if (mDdrEnabled) {
+                        mDdrTracker.notifyPrivateDnsSettingsChanged(cfg);
+                    }
                     if (!isPrivateDnsValidationRequired() || !cfg.inStrictMode()) {
                         // No DNS resolution required.
                         //
@@ -1157,6 +1166,9 @@ public class NetworkMonitor extends StateMachine {
                     final TcpSocketTracker tst = getTcpSocketTracker();
                     if (tst != null) {
                         tst.setLinkProperties(mLinkProperties);
+                    }
+                    if (mDdrEnabled) {
+                        mDdrTracker.notifyLinkPropertiesChanged(mLinkProperties);
                     }
                     break;
                 case EVENT_NETWORK_CAPABILITIES_CHANGED:
@@ -1647,6 +1659,9 @@ public class NetworkMonitor extends StateMachine {
         public void enter() {
             mPrivateDnsReevalDelayMs = INITIAL_REEVALUATE_DELAY_MS;
             mPrivateDnsConfig = null;
+            if (mDdrEnabled) {
+                mDdrTracker.resetStrictModeHostnameResolutionResult();
+            }
             sendMessage(CMD_EVALUATE_PRIVATE_DNS);
         }
 
@@ -1734,6 +1749,9 @@ public class NetworkMonitor extends StateMachine {
                         mCleartextDnsNetwork, mPrivateDnsProviderHostname, getDnsProbeTimeout(),
                         str -> validationLog("Strict mode hostname resolution " + str));
                 mPrivateDnsConfig = new PrivateDnsConfig(mPrivateDnsProviderHostname, ips);
+                if (mDdrEnabled) {
+                    mDdrTracker.setStrictModeHostnameResolutionResult(ips);
+                }
             } catch (UnknownHostException uhe) {
                 mPrivateDnsConfig = null;
             }
@@ -1962,6 +1980,9 @@ public class NetworkMonitor extends StateMachine {
                 final InetAddress[] ips = answer.toArray(new InetAddress[0]);
                 final PrivateDnsConfig config =
                         new PrivateDnsConfig(mPrivateDnsProviderHostname, ips);
+                if (mDdrEnabled) {
+                    mDdrTracker.setStrictModeHostnameResolutionResult(ips);
+                }
                 notifyPrivateDnsConfigResolved(config);
 
                 validationLog("Strict mode hostname resolution " + elapsedNanos + "ns OK "
