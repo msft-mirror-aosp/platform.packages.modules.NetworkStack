@@ -22,6 +22,8 @@ import static android.net.ConnectivitySettingsManager.PRIVATE_DNS_MODE_PROVIDER_
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import android.net.PrivateDnsConfigParcel;
 
@@ -55,6 +57,7 @@ public final class PrivateDnsConfigTest {
         assertEquals(a.mode, b.mode);
         assertEquals(a.hostname, b.hostname);
         assertArrayEquals(a.ips, b.ips);
+        assertEquals(a.ddrEnabled, b.ddrEnabled);
         assertEquals(a.dohName, b.dohName);
         assertArrayEquals(a.dohIps, b.dohIps);
         assertEquals(a.dohPath, b.dohPath);
@@ -65,6 +68,7 @@ public final class PrivateDnsConfigTest {
         assertEquals(parcel.privateDnsMode, cfg.mode);
         assertEquals(parcel.hostname, cfg.hostname);
         assertArrayEquals(parcel.ips, toStringArray(cfg.ips));
+        assertEquals(parcel.ddrEnabled, cfg.ddrEnabled);
         assertEquals(parcel.dohName, cfg.dohName);
         assertEquals(parcel.dohPath, cfg.dohPath);
         assertEquals(parcel.dohPort, cfg.dohPort);
@@ -102,19 +106,23 @@ public final class PrivateDnsConfigTest {
         //                  String dohName, InetAddress[] dohIps, String dohPath, int dohPort)
         for (int mode : new int[] { OFF_MODE, OPPORTUNISTIC_MODE, STRICT_MODE }) {
             testPrivateDnsConfigConversion(new PrivateDnsConfig(mode, null, null,
-                    null, null, null, -1));
+                    false, null, null, null, -1));
             testPrivateDnsConfigConversion(new PrivateDnsConfig(mode, "dns.com", null,
-                    null, null, null, -1));
+                    false, null, null, null, -1));
             testPrivateDnsConfigConversion(new PrivateDnsConfig(mode, "dns.com", TEST_ADDRS,
-                    null, null, null, -1));
+                    false, null, null, null, -1));
             testPrivateDnsConfigConversion(new PrivateDnsConfig(mode, "dns.com", TEST_ADDRS,
-                    "doh.com", null, null, -1));
+                    true, null, null, null, -1));
+            testPrivateDnsConfigConversion(new PrivateDnsConfig(mode, "dns.com", null,
+                    true, null, null, null, -1));
             testPrivateDnsConfigConversion(new PrivateDnsConfig(mode, "dns.com", TEST_ADDRS,
-                    "doh.com", TEST_ADDRS, null, -1));
+                    true, "doh.com", null, null, -1));
             testPrivateDnsConfigConversion(new PrivateDnsConfig(mode, "dns.com", TEST_ADDRS,
-                    "doh.com", TEST_ADDRS, "dohpath=/some-path{?dns}", -1));
+                    true, "doh.com", TEST_ADDRS, null, -1));
             testPrivateDnsConfigConversion(new PrivateDnsConfig(mode, "dns.com", TEST_ADDRS,
-                    "doh.com", TEST_ADDRS, "dohpath=/some-path{?dns}", 443));
+                    true, "doh.com", TEST_ADDRS, "dohpath=/some-path{?dns}", -1));
+            testPrivateDnsConfigConversion(new PrivateDnsConfig(mode, "dns.com", TEST_ADDRS,
+                    true, "doh.com", TEST_ADDRS, "dohpath=/some-path{?dns}", 443));
         }
     }
 
@@ -123,11 +131,30 @@ public final class PrivateDnsConfigTest {
         final InetAddress ip = InetAddress.parseNumericAddress("1.2.3.4");
         final InetAddress[] ipArray = new InetAddress[] { ip };
         final PrivateDnsConfig cfg = new PrivateDnsConfig(OPPORTUNISTIC_MODE, null /* hostname */,
-                ipArray /* ips */, null /* dohName */, ipArray /* dohIps */, null /* dohPath */,
-                -1 /* dohPort */);
+                ipArray /* ips */, false /* ddrEnabled */, null /* dohName */, ipArray /* dohIps */,
+                null /* dohPath */, -1 /* dohPort */);
 
         ipArray[0] = InetAddress.parseNumericAddress("2001:db8::2");
         assertArrayEquals(new InetAddress[] { ip }, cfg.ips);
         assertArrayEquals(new InetAddress[] { ip }, cfg.dohIps);
+    }
+
+    @Test
+    public void testSettingsComparison() {
+        final PrivateDnsConfig off = new PrivateDnsConfig(false);
+        final PrivateDnsConfig opportunistic = new PrivateDnsConfig(true);
+        final PrivateDnsConfig strict = new PrivateDnsConfig("dns.com", null);
+
+        assertFalse(opportunistic.areSettingsSameAs(off));
+        assertFalse(opportunistic.areSettingsSameAs(strict));
+        assertTrue(opportunistic.areSettingsSameAs(new PrivateDnsConfig(
+                OPPORTUNISTIC_MODE, null, TEST_ADDRS, false, null, null, null, -1)));
+
+        assertFalse(strict.areSettingsSameAs(off));
+        assertFalse(strict.areSettingsSameAs(opportunistic));
+        assertTrue(strict.areSettingsSameAs(new PrivateDnsConfig(
+                STRICT_MODE, "dns.com", TEST_ADDRS, false, null, null, null, -1)));
+        assertFalse(strict.areSettingsSameAs(new PrivateDnsConfig(
+                STRICT_MODE, "foo.com", TEST_ADDRS, false, null, null, null, -1)));
     }
 }
