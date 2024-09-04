@@ -52,6 +52,7 @@ import static android.net.apf.ApfConstants.ICMP6_PREFIX_OPTION_VALID_LIFETIME_LE
 import static android.net.apf.ApfConstants.ICMP6_PREFIX_OPTION_VALID_LIFETIME_OFFSET;
 import static android.net.apf.ApfConstants.ICMP6_RA_CHECKSUM_LEN;
 import static android.net.apf.ApfConstants.ICMP6_RA_CHECKSUM_OFFSET;
+import static android.net.apf.ApfConstants.ICMP6_RA_FLAGS_EXTENSION_OPTION_TYPE;
 import static android.net.apf.ApfConstants.ICMP6_RA_OPTION_OFFSET;
 import static android.net.apf.ApfConstants.ICMP6_RA_ROUTER_LIFETIME_LEN;
 import static android.net.apf.ApfConstants.ICMP6_RA_ROUTER_LIFETIME_OFFSET;
@@ -87,6 +88,7 @@ import static android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_INVALID;
 import static android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_OTHER_HOST;
 import static android.net.apf.ApfCounterTracker.Counter.FILTER_AGE_16384THS;
 import static android.net.apf.ApfCounterTracker.Counter.FILTER_AGE_SECONDS;
+import static android.net.apf.ApfCounterTracker.Counter.PASSED_ETHER_OUR_SRC_MAC;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_DAD;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_NO_SLLA_OPTION;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_TENTATIVE;
@@ -94,6 +96,8 @@ import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_NO_ADDRES
 import static android.net.apf.BaseApfGenerator.MemorySlot;
 import static android.net.apf.BaseApfGenerator.Register.R0;
 import static android.net.apf.BaseApfGenerator.Register.R1;
+import static android.net.nsd.OffloadEngine.OFFLOAD_CAPABILITY_BYPASS_MULTICAST_LOCK;
+import static android.net.nsd.OffloadEngine.OFFLOAD_TYPE_REPLY;
 import static android.net.util.SocketUtils.makePacketSocketAddress;
 import static android.os.PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED;
 import static android.os.PowerManager.ACTION_DEVICE_LIGHT_IDLE_MODE_CHANGED;
@@ -106,6 +110,7 @@ import static android.system.OsConstants.IPPROTO_ICMPV6;
 import static android.system.OsConstants.IPPROTO_TCP;
 import static android.system.OsConstants.IPPROTO_UDP;
 import static android.system.OsConstants.SOCK_CLOEXEC;
+import static android.system.OsConstants.SOCK_NONBLOCK;
 import static android.system.OsConstants.SOCK_RAW;
 
 import static com.android.net.module.util.NetworkStackConstants.ETHER_ADDR_LEN;
@@ -124,8 +129,10 @@ import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ROUTER_SO
 import static com.android.net.module.util.NetworkStackConstants.IPV4_ADDR_LEN;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_LEN;
 
+import android.annotation.ChecksSdkIntAtLeast;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.RequiresApi;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -138,6 +145,11 @@ import android.net.TcpKeepalivePacketDataParcelable;
 import android.net.apf.ApfCounterTracker.Counter;
 import android.net.apf.BaseApfGenerator.IllegalInstructionException;
 import android.net.ip.IpClient.IpClientCallbacksWrapper;
+import android.net.nsd.NsdManager;
+import android.net.nsd.OffloadEngine;
+import android.net.nsd.OffloadServiceInfo;
+import android.os.Build;
+import android.os.Handler;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.stats.connectivity.NetworkQuirkEvent;
@@ -158,14 +170,13 @@ import com.android.modules.utils.build.SdkLevel;
 import com.android.net.module.util.CollectionUtils;
 import com.android.net.module.util.ConnectivityUtils;
 import com.android.net.module.util.InterfaceParams;
-import com.android.net.module.util.SocketUtils;
+import com.android.net.module.util.PacketReader;
 import com.android.networkstack.metrics.ApfSessionInfoMetrics;
 import com.android.networkstack.metrics.IpClientRaInfoMetrics;
 import com.android.networkstack.metrics.NetworkQuirkMetrics;
 import com.android.networkstack.util.NetworkStackUtils;
 
 import java.io.FileDescriptor;
-import java.io.IOException;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
@@ -186,16 +197,8 @@ import java.util.Set;
  * listens for IPv6 ICMPv6 router advertisements (RAs) and generates APF programs to
  * filter out redundant duplicate ones.
  * <p>
- * Threading model:
- * A collection of RAs we've received is kept in mRas. Generating APF programs uses mRas to
- * know what RAs to filter for, thus generating APF programs is dependent on mRas.
- * mRas can be accessed by multiple threads:
- * - ReceiveThread, which listens for RAs and adds them to mRas, and generates APF programs.
- * - callers of:
- *    - setMulticastFilter(), which can cause an APF program to be generated.
- *    - dump(), which dumps mRas among other things.
- *    - shutdown(), which clears mRas.
- * So access to mRas is synchronized.
+ * Threading model: this class is not thread-safe and can only be accessed from IpClient's
+ * handler thread.
  *
  * @hide
  */
@@ -215,39 +218,27 @@ public class ApfFilter implements AndroidPacketFilter {
         public boolean hasClatInterface;
         public boolean shouldHandleArpOffload;
         public boolean shouldHandleNdOffload;
+        public boolean shouldHandleMdnsOffload;
     }
 
-    // Thread to listen for RAs.
-    @VisibleForTesting
-    public class ReceiveThread extends Thread {
-        private final byte[] mPacket = new byte[1514];
-        private final FileDescriptor mSocket;
 
-        private volatile boolean mStopped;
+    private class RaPacketReader extends PacketReader {
+        private static final int RECEIVE_BUFFER_SIZE = 1514;
+        private final int mIfIndex;
 
-        public ReceiveThread(FileDescriptor socket) {
-            mSocket = socket;
-        }
-
-        public void halt() {
-            mStopped = true;
-            // Interrupts the read() call the thread is blocked in.
-            SocketUtils.closeSocketQuietly(mSocket);
+        RaPacketReader(Handler handler, int ifIndex) {
+            super(handler, RECEIVE_BUFFER_SIZE);
+            mIfIndex = ifIndex;
         }
 
         @Override
-        public void run() {
-            log("begin monitoring");
-            while (!mStopped) {
-                try {
-                    int length = Os.read(mSocket, mPacket, 0, mPacket.length);
-                    processRa(mPacket, length);
-                } catch (IOException|ErrnoException e) {
-                    if (!mStopped) {
-                        Log.e(TAG, "Read error", e);
-                    }
-                }
-            }
+        protected FileDescriptor createFd() {
+            return mDependencies.createPacketReaderSocket(mIfIndex);
+        }
+
+        @Override
+        protected void handlePacket(byte[] recvbuf, int length) {
+            processRa(recvbuf, length);
         }
     }
 
@@ -267,8 +258,8 @@ public class ApfFilter implements AndroidPacketFilter {
     @VisibleForTesting
     @NonNull
     public final byte[] mHardwareAddress;
-    @VisibleForTesting
-    public ReceiveThread mReceiveThread;
+    private final RaPacketReader mRaPacketReader;
+    private final Handler mHandler;
     @GuardedBy("this")
     private long mUniqueCounter;
     @GuardedBy("this")
@@ -305,10 +296,15 @@ public class ApfFilter implements AndroidPacketFilter {
     private final int mAcceptRaMinLft;
     private final boolean mShouldHandleArpOffload;
     private final boolean mShouldHandleNdOffload;
+    private final boolean mShouldHandleMdnsOffload;
 
     private final NetworkQuirkMetrics mNetworkQuirkMetrics;
     private final IpClientRaInfoMetrics mIpClientRaInfoMetrics;
     private final ApfSessionInfoMetrics mApfSessionInfoMetrics;
+    private final NsdManager mNsdManager;
+    @VisibleForTesting
+    final List<OffloadServiceInfo> mOffloadServiceInfos = new ArrayList<>();
+    private OffloadEngine mOffloadEngine;
 
     private static boolean isDeviceIdleModeChangedAction(Intent intent) {
         return ACTION_DEVICE_IDLE_MODE_CHANGED.equals(intent.getAction());
@@ -339,15 +335,20 @@ public class ApfFilter implements AndroidPacketFilter {
     private final BroadcastReceiver mDeviceIdleReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            final PowerManager powerManager = context.getSystemService(PowerManager.class);
-            if (isDeviceIdleModeChangedAction(intent)
-                    || isDeviceLightIdleModeChangedAction(intent)) {
-                final boolean deviceIdle = powerManager.isDeviceIdleMode()
-                        || isDeviceLightIdleMode(powerManager);
-                setDozeMode(deviceIdle);
-            }
+            mHandler.post(() -> {
+                if (mIsApfShutdown) return;
+                final PowerManager powerManager = context.getSystemService(PowerManager.class);
+                if (isDeviceIdleModeChangedAction(intent)
+                        || isDeviceLightIdleModeChangedAction(intent)) {
+                    final boolean deviceIdle = powerManager.isDeviceIdleMode()
+                            || isDeviceLightIdleMode(powerManager);
+                    setDozeMode(deviceIdle);
+                }
+            });
         }
     };
+
+    private boolean mIsApfShutdown;
 
     // Our IPv4 address, if we have just one, otherwise null.
     @GuardedBy("this")
@@ -375,16 +376,64 @@ public class ApfFilter implements AndroidPacketFilter {
 
     private final Dependencies mDependencies;
 
-    public ApfFilter(Context context, ApfConfiguration config, InterfaceParams ifParams,
-            IpClientCallbacksWrapper ipClientCallback, NetworkQuirkMetrics networkQuirkMetrics) {
-        this(context, config, ifParams, ipClientCallback, networkQuirkMetrics,
+    @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
+    private void registerOffloadEngine() {
+        if (mOffloadEngine != null) {
+            Log.wtf(TAG,
+                    "registerOffloadEngine called twice without calling unregisterOffloadEngine");
+            return;
+        }
+        mOffloadEngine = new OffloadEngine() {
+            @Override
+            public void onOffloadServiceUpdated(@NonNull OffloadServiceInfo info) {
+                mOffloadServiceInfos.removeIf(i -> i.getKey().equals(info.getKey()));
+                mOffloadServiceInfos.add(info);
+            }
+
+            @Override
+            public void onOffloadServiceRemoved(@NonNull OffloadServiceInfo info) {
+                mOffloadServiceInfos.removeIf(i -> i.getKey().equals(info.getKey()));
+            }
+        };
+        mNsdManager.registerOffloadEngine(mInterfaceParams.name,
+                OFFLOAD_TYPE_REPLY,
+                OFFLOAD_CAPABILITY_BYPASS_MULTICAST_LOCK,
+                mHandler::post, mOffloadEngine);
+    }
+
+    @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
+    private void unregisterOffloadEngine() {
+        if (mOffloadEngine != null) {
+            mNsdManager.unregisterOffloadEngine(mOffloadEngine);
+            mOffloadServiceInfos.clear();
+            mOffloadEngine = null;
+        }
+    }
+
+    public ApfFilter(Handler handler, Context context, ApfConfiguration config,
+            InterfaceParams ifParams, IpClientCallbacksWrapper ipClientCallback,
+            NetworkQuirkMetrics networkQuirkMetrics) {
+        this(handler, context, config, ifParams, ipClientCallback, networkQuirkMetrics,
                 new Dependencies(context));
     }
 
+    private synchronized void maybeCleanUpApfRam() {
+        // Clear the APF memory to reset all counters upon connecting to the first AP
+        // in an SSID. This is limited to APFv3 devices because this large write triggers
+        // a crash on some older devices (b/78905546).
+        if (hasDataAccess(mApfVersionSupported)) {
+            byte[] zeroes = new byte[mApfRamSize];
+            if (!mIpClientCallback.installPacketFilter(zeroes)) {
+                sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
+            }
+        }
+    }
+
     @VisibleForTesting
-    public ApfFilter(Context context, ApfConfiguration config, InterfaceParams ifParams,
-            IpClientCallbacksWrapper ipClientCallback, NetworkQuirkMetrics networkQuirkMetrics,
-            Dependencies dependencies) {
+    public ApfFilter(Handler handler, Context context, ApfConfiguration config,
+            InterfaceParams ifParams, IpClientCallbacksWrapper ipClientCallback,
+            NetworkQuirkMetrics networkQuirkMetrics, Dependencies dependencies) {
+        mHandler = handler;
         mApfVersionSupported = config.apfVersionSupported;
         mApfRamSize = config.apfRamSize;
         mInstallableProgramSizeClamp = config.installableProgramSizeClamp;
@@ -406,6 +455,7 @@ public class ApfFilter implements AndroidPacketFilter {
         mAcceptRaMinLft = config.acceptRaMinLft;
         mShouldHandleArpOffload = config.shouldHandleArpOffload;
         mShouldHandleNdOffload = config.shouldHandleNdOffload;
+        mShouldHandleMdnsOffload = config.shouldHandleMdnsOffload;
         mDependencies = dependencies;
         mNetworkQuirkMetrics = networkQuirkMetrics;
         mIpClientRaInfoMetrics = dependencies.getIpClientRaInfoMetrics();
@@ -413,6 +463,8 @@ public class ApfFilter implements AndroidPacketFilter {
         mSessionStartMs = dependencies.elapsedRealtime();
         mMinMetricsSessionDurationMs = config.minMetricsSessionDurationMs;
         mHasClat = config.hasClatInterface;
+
+        mIsApfShutdown = false;
 
         // Now fill the black list from the passed array
         mEthTypeBlackList = filterEthTypeBlackList(config.ethTypeBlackList);
@@ -429,31 +481,23 @@ public class ApfFilter implements AndroidPacketFilter {
         mHardwareAddress = mInterfaceParams.macAddr.toByteArray();
         // TODO: ApfFilter should not generate programs until IpClient sends provisioning success.
         synchronized (this) {
-            // Clear the APF memory to reset all counters upon connecting to the first AP
-            // in an SSID. This is limited to APFv3 devices because this large write triggers
-            // a crash on some older devices (b/78905546).
-            if (hasDataAccess(mApfVersionSupported)) {
-                byte[] zeroes = new byte[mApfRamSize];
-                if (!mIpClientCallback.installPacketFilter(zeroes)) {
-                    sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
-                }
-            }
-
+            maybeCleanUpApfRam();
             // Install basic filters
             installNewProgramLocked();
         }
-        FileDescriptor socket = mDependencies.createRaReaderSocket(mInterfaceParams.index);
-        if (socket != null) {
-            mReceiveThread = new ReceiveThread(socket);
-            mReceiveThread.start();
+
+        mRaPacketReader = new RaPacketReader(mHandler, mInterfaceParams.index);
+        // The class constructor must be called from the IpClient's handler thread
+        if (!mRaPacketReader.start()) {
+            Log.wtf(TAG, "Failed to start RaPacketReader");
         }
 
         // Listen for doze-mode transition changes to enable/disable the IPv6 multicast filter.
         mDependencies.addDeviceIdleReceiver(mDeviceIdleReceiver);
 
-        mDependencies.onApfFilterCreated(this);
-        if (mReceiveThread != null) {
-            mDependencies.onThreadCreated(mReceiveThread);
+        mNsdManager = context.getSystemService(NsdManager.class);
+        if (shouldEnableMdnsOffload()) {
+            registerOffloadEngine();
         }
     }
 
@@ -471,10 +515,10 @@ public class ApfFilter implements AndroidPacketFilter {
          * Create a socket to read RAs.
          */
         @Nullable
-        public FileDescriptor createRaReaderSocket(int ifIndex) {
+        public FileDescriptor createPacketReaderSocket(int ifIndex) {
             FileDescriptor socket;
             try {
-                socket = Os.socket(AF_PACKET, SOCK_RAW | SOCK_CLOEXEC, 0);
+                socket = Os.socket(AF_PACKET, SOCK_RAW | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
                 NetworkStackUtils.attachRaFilter(socket);
                 SocketAddress addr = makePacketSocketAddress(ETH_P_IPV6, ifIndex);
                 Os.bind(socket, addr);
@@ -1011,6 +1055,7 @@ public class ApfFilter implements AndroidPacketFilter {
                     case ICMP6_SOURCE_LL_ADDRESS_OPTION_TYPE:
                     case ICMP6_MTU_OPTION_TYPE:
                     case ICMP6_PREF64_OPTION_TYPE:
+                    case ICMP6_RA_FLAGS_EXTENSION_OPTION_TYPE:
                         addMatchSection(optionLength);
                         break;
                     case ICMP6_CAPTIVE_PORTAL_OPTION_TYPE: // unlikely to ever change.
@@ -2001,7 +2046,7 @@ public class ApfFilter implements AndroidPacketFilter {
         // if there is a hop-by-hop option present (e.g. MLD query)
         //   pass
         // if we're dropping multicast
-        //   if it's not IPCMv6 or it's ICMPv6 but we're in doze mode:
+        //   if it's not ICMPv6 or it's ICMPv6 but we're in doze mode:
         //     if it's multicast:
         //       drop
         //     pass
@@ -2283,6 +2328,8 @@ public class ApfFilter implements AndroidPacketFilter {
 
         // Here's a basic summary of what the initial program does:
         //
+        // if it is a loopback (src mac is nic's primary mac) packet
+        //    pass
         // if it's a 802.3 Frame (ethtype < 0x0600):
         //    drop or pass based on configurations
         // if it has a ether-type that belongs to the black list
@@ -2296,6 +2343,9 @@ public class ApfFilter implements AndroidPacketFilter {
         //     drop
         //   pass
         // insert IPv6 filter to drop, pass, or fall off the end for ICMPv6 packets
+
+        gen.addLoadImmediate(R0, ETHER_SRC_ADDR_OFFSET);
+        gen.addCountAndPassIfBytesAtR0Equal(mHardwareAddress, PASSED_ETHER_OUR_SRC_MAC);
 
         gen.addLoad16(R0, ETH_ETHERTYPE_OFFSET);
         if (SdkLevel.isAtLeastV()) {
@@ -2379,9 +2429,10 @@ public class ApfFilter implements AndroidPacketFilter {
         final byte[] program;
         int programMinLft = Integer.MAX_VALUE;
 
-        // Ensure the entire APF program uses the same time base.
-        int timeSeconds = secondsSinceBoot();
         try {
+            // Ensure the entire APF program uses the same time base.
+            final int timeSeconds = secondsSinceBoot();
+            mLastTimeInstalledProgram = timeSeconds;
             // Step 1: Determine how many RA filters we can fit in the program.
             ApfV4GeneratorBase<?> gen = emitPrologueLocked();
 
@@ -2430,7 +2481,6 @@ public class ApfFilter implements AndroidPacketFilter {
                 sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
             }
         }
-        mLastTimeInstalledProgram = timeSeconds;
         mLastInstalledProgramMinLifetime = programMinLft;
         mLastInstalledProgram = program;
         mNumProgramUpdates++;
@@ -2540,7 +2590,7 @@ public class ApfFilter implements AndroidPacketFilter {
      * Create an {@link ApfFilter} if {@code apfCapabilities} indicates support for packet
      * filtering using APF programs.
      */
-    public static ApfFilter maybeCreate(Context context, ApfConfiguration config,
+    public static ApfFilter maybeCreate(Handler handler, Context context, ApfConfiguration config,
             InterfaceParams ifParams, IpClientCallbacksWrapper ipClientCallback,
             NetworkQuirkMetrics networkQuirkMetrics) {
         if (context == null || config == null || ifParams == null) return null;
@@ -2552,7 +2602,8 @@ public class ApfFilter implements AndroidPacketFilter {
             return null;
         }
 
-        return new ApfFilter(context, config, ifParams, ipClientCallback, networkQuirkMetrics);
+        return new ApfFilter(handler, context, config, ifParams, ipClientCallback,
+                networkQuirkMetrics);
     }
 
     private synchronized void collectAndSendMetrics() {
@@ -2587,13 +2638,14 @@ public class ApfFilter implements AndroidPacketFilter {
 
     public synchronized void shutdown() {
         collectAndSendMetrics();
-        if (mReceiveThread != null) {
-            log("shutting down");
-            mReceiveThread.halt();  // Also closes socket.
-            mReceiveThread = null;
-        }
+        // The shutdown() must be called from the IpClient's handler thread
+        mRaPacketReader.stop();
         mRas.clear();
         mDependencies.removeBroadcastReceiver(mDeviceIdleReceiver);
+        mIsApfShutdown = true;
+        if (shouldEnableMdnsOffload()) {
+            unregisterOffloadEngine();
+        }
     }
 
     public synchronized void setMulticastFilter(boolean isEnabled) {
@@ -2691,6 +2743,13 @@ public class ApfFilter implements AndroidPacketFilter {
         return shouldUseApfV6Generator() && mShouldHandleNdOffload;
     }
 
+    @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */, codename =
+            "VanillaIceCream")
+    @Override
+    public boolean shouldEnableMdnsOffload() {
+        return shouldUseApfV6Generator() && mShouldHandleMdnsOffload;
+    }
+
     private boolean shouldUseApfV6Generator() {
         return SdkLevel.isAtLeastV() && ApfV6Generator.supportsVersion(mApfVersionSupported);
     }
@@ -2750,12 +2809,12 @@ public class ApfFilter implements AndroidPacketFilter {
     }
 
     public synchronized void dump(IndentingPrintWriter pw) {
+        // TODO: use HandlerUtils.runWithScissors() to dump APF on the handler thread.
         pw.println(String.format(
                 "Capabilities: { apfVersionSupported: %d, maximumApfProgramSize: %d }",
                 mApfVersionSupported, mApfRamSize));
         pw.println("InstallableProgramSizeClamp: " + mInstallableProgramSizeClamp);
         pw.println("Filter update status: " + (mIsRunning ? "RUNNING" : "PAUSED"));
-        pw.println("Receive thread: " + (mReceiveThread != null ? "RUNNING" : "STOPPED"));
         pw.println("Multicast: " + (mMulticastFilter ? "DROP" : "ALLOW"));
         pw.println("Minimum RDNSS lifetime: " + mMinRdnssLifetimeSec);
         pw.println("Interface MAC address: " + MacAddress.fromBytes(mHardwareAddress));
@@ -2914,6 +2973,11 @@ public class ApfFilter implements AndroidPacketFilter {
 
     /** Resume ApfFilter updates for testing purposes. */
     public void resume() {
+        maybeCleanUpApfRam();
+        // Since the resume() function and cleanup process invalidate previous counter
+        // snapshots, the ApfCounterTracker needs to be reset to maintain reliable, incremental
+        // counter tracking.
+        mApfCounterTracker.clearCounters();
         mIsRunning = true;
     }
 
