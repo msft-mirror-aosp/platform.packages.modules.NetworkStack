@@ -52,6 +52,7 @@ import static android.net.apf.ApfConstants.ICMP6_PREFIX_OPTION_VALID_LIFETIME_LE
 import static android.net.apf.ApfConstants.ICMP6_PREFIX_OPTION_VALID_LIFETIME_OFFSET;
 import static android.net.apf.ApfConstants.ICMP6_RA_CHECKSUM_LEN;
 import static android.net.apf.ApfConstants.ICMP6_RA_CHECKSUM_OFFSET;
+import static android.net.apf.ApfConstants.ICMP6_RA_FLAGS_EXTENSION_OPTION_TYPE;
 import static android.net.apf.ApfConstants.ICMP6_RA_OPTION_OFFSET;
 import static android.net.apf.ApfConstants.ICMP6_RA_ROUTER_LIFETIME_LEN;
 import static android.net.apf.ApfConstants.ICMP6_RA_ROUTER_LIFETIME_OFFSET;
@@ -87,6 +88,7 @@ import static android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_INVALID;
 import static android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_OTHER_HOST;
 import static android.net.apf.ApfCounterTracker.Counter.FILTER_AGE_16384THS;
 import static android.net.apf.ApfCounterTracker.Counter.FILTER_AGE_SECONDS;
+import static android.net.apf.ApfCounterTracker.Counter.PASSED_ETHER_OUR_SRC_MAC;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_DAD;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_NO_SLLA_OPTION;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_TENTATIVE;
@@ -94,6 +96,8 @@ import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_NO_ADDRES
 import static android.net.apf.BaseApfGenerator.MemorySlot;
 import static android.net.apf.BaseApfGenerator.Register.R0;
 import static android.net.apf.BaseApfGenerator.Register.R1;
+import static android.net.nsd.OffloadEngine.OFFLOAD_CAPABILITY_BYPASS_MULTICAST_LOCK;
+import static android.net.nsd.OffloadEngine.OFFLOAD_TYPE_REPLY;
 import static android.net.util.SocketUtils.makePacketSocketAddress;
 import static android.os.PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED;
 import static android.os.PowerManager.ACTION_DEVICE_LIGHT_IDLE_MODE_CHANGED;
@@ -125,8 +129,10 @@ import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ROUTER_SO
 import static com.android.net.module.util.NetworkStackConstants.IPV4_ADDR_LEN;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_LEN;
 
+import android.annotation.ChecksSdkIntAtLeast;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.RequiresApi;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -139,6 +145,10 @@ import android.net.TcpKeepalivePacketDataParcelable;
 import android.net.apf.ApfCounterTracker.Counter;
 import android.net.apf.BaseApfGenerator.IllegalInstructionException;
 import android.net.ip.IpClient.IpClientCallbacksWrapper;
+import android.net.nsd.NsdManager;
+import android.net.nsd.OffloadEngine;
+import android.net.nsd.OffloadServiceInfo;
+import android.os.Build;
 import android.os.Handler;
 import android.os.PowerManager;
 import android.os.SystemClock;
@@ -208,6 +218,7 @@ public class ApfFilter implements AndroidPacketFilter {
         public boolean hasClatInterface;
         public boolean shouldHandleArpOffload;
         public boolean shouldHandleNdOffload;
+        public boolean shouldHandleMdnsOffload;
     }
 
 
@@ -285,10 +296,15 @@ public class ApfFilter implements AndroidPacketFilter {
     private final int mAcceptRaMinLft;
     private final boolean mShouldHandleArpOffload;
     private final boolean mShouldHandleNdOffload;
+    private final boolean mShouldHandleMdnsOffload;
 
     private final NetworkQuirkMetrics mNetworkQuirkMetrics;
     private final IpClientRaInfoMetrics mIpClientRaInfoMetrics;
     private final ApfSessionInfoMetrics mApfSessionInfoMetrics;
+    private final NsdManager mNsdManager;
+    @VisibleForTesting
+    final List<OffloadServiceInfo> mOffloadServiceInfos = new ArrayList<>();
+    private OffloadEngine mOffloadEngine;
 
     private static boolean isDeviceIdleModeChangedAction(Intent intent) {
         return ACTION_DEVICE_IDLE_MODE_CHANGED.equals(intent.getAction());
@@ -360,6 +376,40 @@ public class ApfFilter implements AndroidPacketFilter {
 
     private final Dependencies mDependencies;
 
+    @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
+    private void registerOffloadEngine() {
+        if (mOffloadEngine != null) {
+            Log.wtf(TAG,
+                    "registerOffloadEngine called twice without calling unregisterOffloadEngine");
+            return;
+        }
+        mOffloadEngine = new OffloadEngine() {
+            @Override
+            public void onOffloadServiceUpdated(@NonNull OffloadServiceInfo info) {
+                mOffloadServiceInfos.removeIf(i -> i.getKey().equals(info.getKey()));
+                mOffloadServiceInfos.add(info);
+            }
+
+            @Override
+            public void onOffloadServiceRemoved(@NonNull OffloadServiceInfo info) {
+                mOffloadServiceInfos.removeIf(i -> i.getKey().equals(info.getKey()));
+            }
+        };
+        mNsdManager.registerOffloadEngine(mInterfaceParams.name,
+                OFFLOAD_TYPE_REPLY,
+                OFFLOAD_CAPABILITY_BYPASS_MULTICAST_LOCK,
+                mHandler::post, mOffloadEngine);
+    }
+
+    @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
+    private void unregisterOffloadEngine() {
+        if (mOffloadEngine != null) {
+            mNsdManager.unregisterOffloadEngine(mOffloadEngine);
+            mOffloadServiceInfos.clear();
+            mOffloadEngine = null;
+        }
+    }
+
     public ApfFilter(Handler handler, Context context, ApfConfiguration config,
             InterfaceParams ifParams, IpClientCallbacksWrapper ipClientCallback,
             NetworkQuirkMetrics networkQuirkMetrics) {
@@ -405,6 +455,7 @@ public class ApfFilter implements AndroidPacketFilter {
         mAcceptRaMinLft = config.acceptRaMinLft;
         mShouldHandleArpOffload = config.shouldHandleArpOffload;
         mShouldHandleNdOffload = config.shouldHandleNdOffload;
+        mShouldHandleMdnsOffload = config.shouldHandleMdnsOffload;
         mDependencies = dependencies;
         mNetworkQuirkMetrics = networkQuirkMetrics;
         mIpClientRaInfoMetrics = dependencies.getIpClientRaInfoMetrics();
@@ -443,6 +494,11 @@ public class ApfFilter implements AndroidPacketFilter {
 
         // Listen for doze-mode transition changes to enable/disable the IPv6 multicast filter.
         mDependencies.addDeviceIdleReceiver(mDeviceIdleReceiver);
+
+        mNsdManager = context.getSystemService(NsdManager.class);
+        if (shouldEnableMdnsOffload()) {
+            registerOffloadEngine();
+        }
     }
 
     /**
@@ -999,6 +1055,7 @@ public class ApfFilter implements AndroidPacketFilter {
                     case ICMP6_SOURCE_LL_ADDRESS_OPTION_TYPE:
                     case ICMP6_MTU_OPTION_TYPE:
                     case ICMP6_PREF64_OPTION_TYPE:
+                    case ICMP6_RA_FLAGS_EXTENSION_OPTION_TYPE:
                         addMatchSection(optionLength);
                         break;
                     case ICMP6_CAPTIVE_PORTAL_OPTION_TYPE: // unlikely to ever change.
@@ -1989,7 +2046,7 @@ public class ApfFilter implements AndroidPacketFilter {
         // if there is a hop-by-hop option present (e.g. MLD query)
         //   pass
         // if we're dropping multicast
-        //   if it's not IPCMv6 or it's ICMPv6 but we're in doze mode:
+        //   if it's not ICMPv6 or it's ICMPv6 but we're in doze mode:
         //     if it's multicast:
         //       drop
         //     pass
@@ -2271,6 +2328,8 @@ public class ApfFilter implements AndroidPacketFilter {
 
         // Here's a basic summary of what the initial program does:
         //
+        // if it is a loopback (src mac is nic's primary mac) packet
+        //    pass
         // if it's a 802.3 Frame (ethtype < 0x0600):
         //    drop or pass based on configurations
         // if it has a ether-type that belongs to the black list
@@ -2284,6 +2343,9 @@ public class ApfFilter implements AndroidPacketFilter {
         //     drop
         //   pass
         // insert IPv6 filter to drop, pass, or fall off the end for ICMPv6 packets
+
+        gen.addLoadImmediate(R0, ETHER_SRC_ADDR_OFFSET);
+        gen.addCountAndPassIfBytesAtR0Equal(mHardwareAddress, PASSED_ETHER_OUR_SRC_MAC);
 
         gen.addLoad16(R0, ETH_ETHERTYPE_OFFSET);
         if (SdkLevel.isAtLeastV()) {
@@ -2367,9 +2429,10 @@ public class ApfFilter implements AndroidPacketFilter {
         final byte[] program;
         int programMinLft = Integer.MAX_VALUE;
 
-        // Ensure the entire APF program uses the same time base.
-        int timeSeconds = secondsSinceBoot();
         try {
+            // Ensure the entire APF program uses the same time base.
+            final int timeSeconds = secondsSinceBoot();
+            mLastTimeInstalledProgram = timeSeconds;
             // Step 1: Determine how many RA filters we can fit in the program.
             ApfV4GeneratorBase<?> gen = emitPrologueLocked();
 
@@ -2418,7 +2481,6 @@ public class ApfFilter implements AndroidPacketFilter {
                 sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
             }
         }
-        mLastTimeInstalledProgram = timeSeconds;
         mLastInstalledProgramMinLifetime = programMinLft;
         mLastInstalledProgram = program;
         mNumProgramUpdates++;
@@ -2581,6 +2643,9 @@ public class ApfFilter implements AndroidPacketFilter {
         mRas.clear();
         mDependencies.removeBroadcastReceiver(mDeviceIdleReceiver);
         mIsApfShutdown = true;
+        if (shouldEnableMdnsOffload()) {
+            unregisterOffloadEngine();
+        }
     }
 
     public synchronized void setMulticastFilter(boolean isEnabled) {
@@ -2676,6 +2741,13 @@ public class ApfFilter implements AndroidPacketFilter {
     @Override
     public boolean supportNdOffload() {
         return shouldUseApfV6Generator() && mShouldHandleNdOffload;
+    }
+
+    @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */, codename =
+            "VanillaIceCream")
+    @Override
+    public boolean shouldEnableMdnsOffload() {
+        return shouldUseApfV6Generator() && mShouldHandleMdnsOffload;
     }
 
     private boolean shouldUseApfV6Generator() {
