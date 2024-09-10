@@ -14,32 +14,6 @@
 // limitations under the License.
 //
 
-// The network stack can be compiled using system_current (non-finalized) SDK, or finalized system_X
-// SDK. There is also a variant that uses system_current SDK and runs in the system process
-// (InProcessNetworkStack). The following structure is used to create the build rules:
-//
-//                          NetworkStackAndroidLibraryDefaults <-- common defaults for android libs
-//                                            /    \
-//           +NetworkStackApiStableShims --> /      \ <-- +NetworkStackApiCurrentShims
-//           +NetworkStackReleaseApiLevel   /        \    +NetworkStackDevApiLevel
-//           +jarjar apishim.api[latest].* /          \
-//            to apishim.*                /            \
-//                                       /              \
-//                                      /                \
-//                                     /                  \               android libs w/ all code
-//                                    / <- +module src/ -> \              (also used in unit tests)
-//                                   /                      \                        |
-//               NetworkStackApiStableLib               NetworkStackApiCurrentLib <--*
-//                          |                                     |
-//                          | <--   +NetworkStackAppDefaults  --> |
-//                          |          (APK build params)         |
-//                          |                                     |
-//                          | <-- +NetworkStackReleaseApiLevel    | <-- +NetworkStackDevApiLevel
-//                          |                                     |
-//                          |                                     |
-//                NetworkStackApiStable          NetworkStack, InProcessNetworkStack, <-- APKs
-//                                                         TestNetworkStack
-
 // Common defaults to define SDK level
 package {
     default_team: "trendy_team_fwk_core_networking",
@@ -56,24 +30,6 @@ java_defaults {
     enabled: true,
 }
 
-// This is a placeholder comment to avoid merge conflicts
-// as the above target may have different "enabled" values
-// depending on the branch
-
-java_defaults {
-    name: "NetworkStackDevApiLevel",
-    min_sdk_version: "30",
-    sdk_version: "module_current",
-    libs: [
-        "framework-configinfrastructure",
-        "framework-connectivity",
-        "framework-connectivity-t",
-        "framework-statsd",
-        "framework-tethering",
-        "framework-wifi",
-    ],
-}
-
 // Common defaults for NetworkStack integration tests, root tests and coverage tests
 // to keep tests always running against the same target sdk version with NetworkStack.
 java_defaults {
@@ -87,12 +43,12 @@ java_defaults {
     defaults: ["NetworkStackReleaseTargetSdk"],
     sdk_version: "module_current",
     libs: [
-        "framework-configinfrastructure",
+        "framework-configinfrastructure.stubs.module_lib",
         "framework-connectivity.stubs.module_lib",
-        "framework-connectivity-t",
-        "framework-statsd",
-        "framework-tethering",
-        "framework-wifi",
+        "framework-connectivity-t.stubs.module_lib",
+        "framework-statsd.stubs.module_lib",
+        "framework-tethering.stubs.module_lib",
+        "framework-wifi.stubs.module_lib",
     ],
 }
 
@@ -173,8 +129,8 @@ java_library {
         "NetworkStackShimsCommon",
         "NetworkStackApi29Shims",
         "NetworkStackApi30Shims",
-        "framework-connectivity",
-        "framework-wifi",
+        "framework-connectivity.impl",
+        "sdk_module-lib_31_framework-wifi",
     ],
     sdk_version: "module_31",
     visibility: ["//visibility:private"],
@@ -191,11 +147,11 @@ java_library {
         "NetworkStackApi29Shims",
         "NetworkStackApi30Shims",
         "NetworkStackApi31Shims",
-        "framework-bluetooth",
-        "framework-connectivity",
+        "sdk_module-lib_33_framework-bluetooth",
+        "framework-connectivity.impl",
         "framework-connectivity-t.stubs.module_lib",
-        "framework-tethering",
-        "framework-wifi",
+        "framework-tethering.impl",
+        "sdk_module-lib_33_framework-wifi",
     ],
     sdk_version: "module_33",
     visibility: ["//visibility:private"],
@@ -213,11 +169,11 @@ java_library {
         "NetworkStackApi30Shims",
         "NetworkStackApi31Shims",
         "NetworkStackApi33Shims",
-        "framework-bluetooth",
-        "framework-connectivity",
+        "sdk_module-lib_34_framework-bluetooth",
+        "framework-connectivity.impl",
         "framework-connectivity-t.stubs.module_lib",
-        "framework-tethering",
-        "framework-wifi",
+        "framework-tethering.impl",
+        "sdk_module-lib_34_framework-wifi",
     ],
     sdk_version: "module_34",
     visibility: ["//visibility:private"],
@@ -246,11 +202,11 @@ java_library {
         "NetworkStackApi31Shims",
         "NetworkStackApi33Shims",
         "NetworkStackApi34Shims",
-        "framework-bluetooth",
-        "framework-connectivity",
+        "framework-bluetooth.stubs.module_lib",
+        "framework-connectivity.impl",
         "framework-connectivity-t.stubs.module_lib",
-        "framework-tethering",
-        "framework-wifi",
+        "framework-tethering.impl",
+        "framework-wifi.stubs.module_lib",
         "android.net.ipsec.ike.stubs.module_lib",
     ],
     sdk_version: "module_current",
@@ -264,7 +220,7 @@ java_library {
     name: "NetworkStackApiCurrentShims",
     defaults: [
         "NetworkStackShimsDefaults",
-        "NetworkStackDevApiLevel",
+        "NetworkStackReleaseApiLevel",
         "ConnectivityNextEnableDefaults",
     ],
     static_libs: [
@@ -345,7 +301,7 @@ java_defaults {
 android_library {
     name: "NetworkStackApiCurrentLib",
     defaults: [
-        "NetworkStackDevApiLevel",
+        "NetworkStackReleaseApiLevel",
         "NetworkStackAndroidLibraryDefaults",
         "ConnectivityNextEnableDefaults",
     ],
@@ -486,7 +442,7 @@ android_app {
     name: "InProcessNetworkStack",
     defaults: [
         "NetworkStackAppDefaults",
-        "NetworkStackDevApiLevel",
+        "NetworkStackReleaseApiLevel",
         "ConnectivityNextEnableDefaults",
     ],
     static_libs: ["NetworkStackApiCurrentLib"],
@@ -509,7 +465,7 @@ android_library {
     name: "NetworkStackNextManifestBase",
     defaults: [
         "NetworkStackAppDefaults",
-        "NetworkStackDevApiLevel",
+        "NetworkStackReleaseApiLevel",
         "ConnectivityNextEnableDefaults",
     ],
     static_libs: ["NetworkStackApiCurrentLib"],
@@ -521,7 +477,7 @@ android_app {
     name: "NetworkStackNext",
     defaults: [
         "NetworkStackAppDefaults",
-        "NetworkStackDevApiLevel",
+        "NetworkStackReleaseApiLevel",
         "ConnectivityNextEnableDefaults",
     ],
     static_libs: ["NetworkStackNextManifestBase"],
