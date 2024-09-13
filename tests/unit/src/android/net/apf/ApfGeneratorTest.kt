@@ -23,14 +23,14 @@ import android.net.apf.ApfCounterTracker.Counter.PASSED_ALLOCATE_FAILURE
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP
 import android.net.apf.ApfCounterTracker.Counter.PASSED_TRANSMIT_FAILURE
 import android.net.apf.ApfCounterTracker.Counter.TOTAL_PACKETS
+import android.net.apf.ApfTestHelpers.Companion.DROP
+import android.net.apf.ApfTestHelpers.Companion.MIN_PKT_SIZE
+import android.net.apf.ApfTestHelpers.Companion.PASS
+import android.net.apf.ApfTestHelpers.Companion.assertDrop
+import android.net.apf.ApfTestHelpers.Companion.assertPass
+import android.net.apf.ApfTestHelpers.Companion.assertVerdict
 import android.net.apf.ApfTestHelpers.Companion.decodeCountersIntoMap
 import android.net.apf.ApfTestHelpers.Companion.verifyProgramRun
-import android.net.apf.ApfTestUtils.DROP
-import android.net.apf.ApfTestUtils.MIN_PKT_SIZE
-import android.net.apf.ApfTestUtils.PASS
-import android.net.apf.ApfTestUtils.assertDrop
-import android.net.apf.ApfTestUtils.assertPass
-import android.net.apf.ApfTestUtils.assertVerdict
 import android.net.apf.BaseApfGenerator.APF_VERSION_2
 import android.net.apf.BaseApfGenerator.APF_VERSION_3
 import android.net.apf.BaseApfGenerator.APF_VERSION_6
@@ -512,7 +512,7 @@ class ApfGeneratorTest {
                 program
         )
         assertContentEquals(
-                listOf("0: drop        counter=46"),
+                listOf("0: drop        counter=47"),
                 ApfJniUtils.disassembleApf(program).map { it.trim() }
         )
 
@@ -561,14 +561,14 @@ class ApfGeneratorTest {
                 byteArrayOf(
                         encodeInstruction(opcode = 14, immLength = 2, register = 1), 1, 0
                 ) + largeByteArray + byteArrayOf(
-                        encodeInstruction(opcode = 21, immLength = 1, register = 0), 48, 6, 13
+                        encodeInstruction(opcode = 21, immLength = 1, register = 0), 48, 6, 9
                 ),
                 program
         )
         assertContentEquals(
                 listOf(
                         "0: data        256, " + "01".repeat(256),
-                        "259: debugbuf    size=1549"
+                        "259: debugbuf    size=1545"
                 ),
                 ApfJniUtils.disassembleApf(program).map { it.trim() }
         )
@@ -854,7 +854,7 @@ class ApfGeneratorTest {
                 .generate()
         assertContentEquals(listOf(
                 "0: data        9, 112233445566778899",
-                "12: debugbuf    size=1776",
+                "12: debugbuf    size=1772",
                 "16: allocate    18",
                 "20: datacopy    src=3, len=6",
                 "23: datacopy    src=4, len=3",
