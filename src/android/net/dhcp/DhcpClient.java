@@ -81,10 +81,12 @@ import android.os.Handler;
 import android.os.Message;
 import android.os.PowerManager;
 import android.os.SystemClock;
+import android.os.SystemProperties;
 import android.provider.Settings;
 import android.stats.connectivity.DhcpFeature;
 import android.system.ErrnoException;
 import android.system.Os;
+import android.text.TextUtils;
 import android.util.EventLog;
 import android.util.Log;
 import android.util.SparseArray;
@@ -425,6 +427,24 @@ public class DhcpClient extends StateMachine {
         }
 
         /**
+         * Get the customized hostname from RRO to fill hostname option.
+         */
+        public String getCustomHostname(final Context context) {
+            final String[] prefHostnameProps = context.getResources().getStringArray(
+                    R.array.config_dhcp_client_hostname_preferred_props);
+            if (prefHostnameProps == null || prefHostnameProps.length == 0) {
+                return getDeviceName(context);
+            }
+            for (final String prop : prefHostnameProps) {
+                String prefHostname = SystemProperties.get(prop, "");
+                if (!TextUtils.isEmpty(prefHostname)) {
+                    return prefHostname;
+                }
+            }
+            return getDeviceName(context);
+        }
+
+        /**
          * Get the device name from system settings.
          */
         public String getDeviceName(final Context context) {
@@ -537,7 +557,7 @@ public class DhcpClient extends StateMachine {
         mRebindAlarm = makeWakeupMessage("REBIND", CMD_REBIND_DHCP);
         mExpiryAlarm = makeWakeupMessage("EXPIRY", CMD_EXPIRE_DHCP);
 
-        mHostname = new HostnameTransliterator().transliterate(deps.getDeviceName(mContext));
+        mHostname = new HostnameTransliterator().transliterate(deps.getCustomHostname(mContext));
         mMetrics.setHostnameTransinfo(deps.getSendHostnameOverlaySetting(context),
                 mHostname != null);
     }
