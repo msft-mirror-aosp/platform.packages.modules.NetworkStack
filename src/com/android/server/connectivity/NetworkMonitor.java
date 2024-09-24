@@ -610,13 +610,6 @@ public class NetworkMonitor extends StateMachine {
         } catch (RemoteException e) {
             version = 0;
         }
-        // The AIDL was freezed from Q beta 5 but it's unfreezing from R before releasing. In order
-        // to distinguish the behavior between R and Q beta 5 and before Q beta 5, add SDK and
-        // CODENAME check here. Basically, it's only expected to return 0 for Q beta 4 and below
-        // because the test result has changed.
-        if (Build.VERSION.SDK_INT == Build.VERSION_CODES.Q
-                && Build.VERSION.CODENAME.equals("REL")
-                && version == Build.VERSION_CODES.CUR_DEVELOPMENT) version = 0;
         return version;
     }
 
