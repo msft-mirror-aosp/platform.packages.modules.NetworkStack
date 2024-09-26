@@ -280,6 +280,7 @@ java_defaults {
     static_libs: [
         "androidx.annotation_annotation",
         "modules-utils-build_system",
+        "modules-utils-expresslog",
         "modules-utils-preconditions",
         "modules-utils-shell-command-handler",
         "modules-utils-statemachine",
