@@ -2461,6 +2461,10 @@ public class ApfFilter implements AndroidPacketFilter {
                 rasToFilter.add(ra);
             }
 
+            // Increase the counter before we generate the program.
+            // This keeps the APF_PROGRAM_ID counter in sync with the program.
+            mNumProgramUpdates++;
+
             // Step 2: Actually generate the program
             gen = emitPrologueLocked();
             for (Ra ra : rasToFilter) {
@@ -2483,7 +2487,6 @@ public class ApfFilter implements AndroidPacketFilter {
         }
         mLastInstalledProgramMinLifetime = programMinLft;
         mLastInstalledProgram = program;
-        mNumProgramUpdates++;
         mMaxProgramSize = Math.max(mMaxProgramSize, program.length);
 
         if (VDBG) {
