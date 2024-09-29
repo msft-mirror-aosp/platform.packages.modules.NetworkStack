@@ -2870,10 +2870,14 @@ public class ApfFilter implements AndroidPacketFilter {
                 "Last program length %d, installed %ds ago, lifetime %ds",
                 mLastInstalledProgram.length, filterAgeSeconds,
                 mLastInstalledProgramMinLifetime));
-
-        pw.print("Denylisted Ethertypes:");
-        for (int p : mEthTypeBlackList) {
-            pw.print(String.format(" %04x", p));
+        if (SdkLevel.isAtLeastV()) {
+            pw.print("Hardcoded Allowlisted Ethertypes:");
+            pw.println(" 0800(IPv4) 0806(ARP) 86DD(IPv6) 888E(EAPOL) 88B4(WAPI)");
+        } else {
+            pw.print("Denylisted Ethertypes:");
+            for (int p : mEthTypeBlackList) {
+                pw.print(String.format(" %04x", p));
+            }
         }
         pw.println();
         pw.println("RA filters:");
