@@ -275,6 +275,7 @@ java_defaults {
     ],
     libs: [
         "error_prone_annotations",
+        "framework-annotations-lib",
         "unsupportedappusage",
     ],
     static_libs: [
