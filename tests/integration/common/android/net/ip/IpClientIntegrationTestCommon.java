@@ -194,7 +194,6 @@ import android.os.ParcelFileDescriptor;
 import android.os.PowerManager;
 import android.os.RemoteException;
 import android.os.SystemClock;
-import android.os.SystemProperties;
 import android.provider.Settings;
 import android.stats.connectivity.NudEventType;
 import android.system.ErrnoException;
@@ -229,8 +228,6 @@ import com.android.net.module.util.structs.PrefixInformationOption;
 import com.android.net.module.util.structs.RdnssOption;
 import com.android.networkstack.R;
 import com.android.networkstack.apishim.CaptivePortalDataShimImpl;
-import com.android.networkstack.apishim.ConstantsShim;
-import com.android.networkstack.apishim.common.ShimUtils;
 import com.android.networkstack.ipmemorystore.IpMemoryStoreService;
 import com.android.networkstack.metrics.IpProvisioningMetrics;
 import com.android.networkstack.metrics.IpReachabilityMonitorMetrics;
@@ -1301,20 +1298,10 @@ public abstract class IpClientIntegrationTestCommon {
             final List<DhcpPacket> packetList) throws Exception {
         for (DhcpPacket packet : packetList) {
             if (!expectSendHostname || hostname == null) {
-                assertNoHostname(packet.getHostname());
+                assertNull(packet.getHostname());
             } else {
                 assertEquals(hostnameAfterTransliteration, packet.getHostname());
             }
-        }
-    }
-
-    private void assertNoHostname(String hostname) {
-        if (ShimUtils.isAtLeastR()) {
-            assertNull(hostname);
-        } else {
-            // Until Q, if no hostname is set, the device falls back to the hostname set via
-            // system property, to avoid breaking Q devices already launched with that setup.
-            assertEquals(SystemProperties.get("net.hostname"), hostname);
         }
     }
 
@@ -1768,7 +1755,7 @@ public abstract class IpClientIntegrationTestCommon {
         assertIpMemoryStoreNetworkAttributes(TEST_LEASE_DURATION_S, currentTime, TEST_DEFAULT_MTU);
     }
 
-    @Test @IgnoreUpTo(Build.VERSION_CODES.Q)
+    @Test
     public void testRollbackFromRapidCommitOption() throws Exception {
         startIpClientProvisioning(true /* isDhcpRapidCommitEnabled */,
                 false /* isPreConnectionEnabled */,
@@ -1854,10 +1841,8 @@ public abstract class IpClientIntegrationTestCommon {
         assertTrue(packet instanceof DhcpDiscoverPacket);
     }
 
-    @Test @IgnoreUpTo(Build.VERSION_CODES.Q)
+    @Test
     public void testDhcpServerInLinkProperties() throws Exception {
-        assumeTrue(ConstantsShim.VERSION > Build.VERSION_CODES.Q);
-
         performDhcpHandshake();
         ArgumentCaptor<LinkProperties> captor = ArgumentCaptor.forClass(LinkProperties.class);
         verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningSuccess(captor.capture());
@@ -2336,11 +2321,9 @@ public abstract class IpClientIntegrationTestCommon {
 
     }
 
-    @Test @IgnoreUpTo(Build.VERSION_CODES.Q)
+    @Test
     @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
     public void testPref64Option() throws Exception {
-        assumeTrue(ConstantsShim.VERSION > Build.VERSION_CODES.Q);
-
         ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
                 .withoutIpReachabilityMonitor()
                 .withoutIPv4()
@@ -2813,8 +2796,6 @@ public abstract class IpClientIntegrationTestCommon {
                 argThat(lp -> lp.getMtu() == testMtu));
 
         // Ensure that the URL was set as expected in the callbacks.
-        // Can't verify the URL up to Q as there is no such attribute in LinkProperties.
-        if (!ShimUtils.isAtLeastR()) return null;
         verify(mCb, atLeastOnce()).onLinkPropertiesChange(captor.capture());
         final LinkProperties expectedLp = captor.getAllValues().stream().findFirst().get();
         assertNotNull(expectedLp);
