@@ -44,7 +44,6 @@ import static android.net.ip.IpClient.IpClientCommands.CMD_UPDATE_APF_CAPABILITI
 import static android.net.ip.IpClient.IpClientCommands.CMD_UPDATE_APF_DATA_SNAPSHOT;
 import static android.net.ip.IpClient.IpClientCommands.CMD_UPDATE_HTTP_PROXY;
 import static android.net.ip.IpClient.IpClientCommands.CMD_UPDATE_L2INFORMATION;
-import static android.net.ip.IpClient.IpClientCommands.CMD_UPDATE_L2KEY_CLUSTER;
 import static android.net.ip.IpClient.IpClientCommands.CMD_UPDATE_TCP_BUFFER_SIZES;
 import static android.net.ip.IpClient.IpClientCommands.EVENT_DHCPACTION_TIMEOUT;
 import static android.net.ip.IpClient.IpClientCommands.EVENT_IPV6_AUTOCONF_TIMEOUT;
@@ -151,7 +150,6 @@ import android.text.TextUtils;
 import android.text.format.DateUtils;
 import android.util.LocalLog;
 import android.util.Log;
-import android.util.Pair;
 import android.util.SparseArray;
 
 import androidx.annotation.NonNull;
@@ -600,16 +598,15 @@ public class IpClient extends StateMachine {
         static final int EVENT_READ_PACKET_FILTER_COMPLETE = 12;
         static final int CMD_ADD_KEEPALIVE_PACKET_FILTER_TO_APF = 13;
         static final int CMD_REMOVE_KEEPALIVE_PACKET_FILTER_FROM_APF = 14;
-        static final int CMD_UPDATE_L2KEY_CLUSTER = 15;
-        static final int CMD_COMPLETE_PRECONNECTION = 16;
-        static final int CMD_UPDATE_L2INFORMATION = 17;
-        static final int CMD_SET_DTIM_MULTIPLIER_AFTER_DELAY = 18;
-        static final int CMD_UPDATE_APF_CAPABILITIES = 19;
-        static final int EVENT_IPV6_AUTOCONF_TIMEOUT = 20;
-        static final int CMD_UPDATE_APF_DATA_SNAPSHOT = 21;
-        static final int EVENT_NUD_FAILURE_QUERY_TIMEOUT = 22;
-        static final int EVENT_NUD_FAILURE_QUERY_SUCCESS = 23;
-        static final int EVENT_NUD_FAILURE_QUERY_FAILURE = 24;
+        static final int CMD_COMPLETE_PRECONNECTION = 15;
+        static final int CMD_UPDATE_L2INFORMATION = 16;
+        static final int CMD_SET_DTIM_MULTIPLIER_AFTER_DELAY = 17;
+        static final int CMD_UPDATE_APF_CAPABILITIES = 18;
+        static final int EVENT_IPV6_AUTOCONF_TIMEOUT = 19;
+        static final int CMD_UPDATE_APF_DATA_SNAPSHOT = 20;
+        static final int EVENT_NUD_FAILURE_QUERY_TIMEOUT = 21;
+        static final int EVENT_NUD_FAILURE_QUERY_SUCCESS = 22;
+        static final int EVENT_NUD_FAILURE_QUERY_FAILURE = 23;
         // Internal commands to use instead of trying to call transitionTo() inside
         // a given State's enter() method. Calling transitionTo() from enter/exit
         // encounters a Log.wtf() that can cause trouble on eng builds.
@@ -2835,13 +2832,6 @@ public class IpClient extends StateMachine {
                     handleLinkPropertiesUpdate(NO_CALLBACKS);
                     break;
 
-                case CMD_UPDATE_L2KEY_CLUSTER: {
-                    final Pair<String, String> args = (Pair<String, String>) msg.obj;
-                    mL2Key = args.first;
-                    mCluster = args.second;
-                    break;
-                }
-
                 case CMD_SET_MULTICAST_FILTER:
                     mMulticastFiltering = (boolean) msg.obj;
                     break;
@@ -3198,20 +3188,6 @@ public class IpClient extends StateMachine {
                 case CMD_STOP:
                     transitionToStoppingState(DisconnectCode.forNumber(msg.arg1));
                     break;
-
-                case CMD_UPDATE_L2KEY_CLUSTER: {
-                    final Pair<String, String> args = (Pair<String, String>) msg.obj;
-                    mL2Key = args.first;
-                    mCluster = args.second;
-                    // TODO : attributes should be saved to the memory store with
-                    // these new values if they differ from the previous ones.
-                    // If the state machine is in pure StartedState, then the values to input
-                    // are not known yet and should be updated when the LinkProperties are updated.
-                    // If the state machine is in RunningState (which is a child of StartedState)
-                    // then the next NUD check should be used to store the new values to avoid
-                    // inputting current values for what may be a different L3 network.
-                    break;
-                }
 
                 case CMD_UPDATE_L2INFORMATION:
                     handleUpdateL2Information((Layer2InformationParcelable) msg.obj);
