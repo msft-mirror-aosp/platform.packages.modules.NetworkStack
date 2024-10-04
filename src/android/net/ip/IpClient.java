@@ -134,7 +134,6 @@ import android.net.shared.Layer2Information;
 import android.net.shared.ProvisioningConfiguration;
 import android.net.shared.ProvisioningConfiguration.ScanResultInfo;
 import android.net.shared.ProvisioningConfiguration.ScanResultInfo.InformationElement;
-import android.os.Build;
 import android.os.ConditionVariable;
 import android.os.Handler;
 import android.os.IBinder;
@@ -636,8 +635,7 @@ public class IpClient extends StateMachine {
 
     @VisibleForTesting
     static final String CONFIG_MIN_RDNSS_LIFETIME = "ipclient_min_rdnss_lifetime";
-    private static final int DEFAULT_MIN_RDNSS_LIFETIME =
-            ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.Q) ? 120 : 0;
+    private static final int DEFAULT_MIN_RDNSS_LIFETIME = 120;
 
     @VisibleForTesting
     static final String CONFIG_ACCEPT_RA_MIN_LFT = "ipclient_accept_ra_min_lft";
@@ -1205,7 +1203,8 @@ public class IpClient extends StateMachine {
         @Override
         public void setL2KeyAndGroupHint(String l2Key, String cluster) {
             enforceNetworkStackCallingPermission();
-            IpClient.this.setL2KeyAndCluster(l2Key, cluster);
+            // This method is not supported anymore. The caller should call
+            // #updateLayer2Information() instead.
         }
         @Override
         public void setTcpBufferSizes(String tcpBufferSizes) {
@@ -1396,18 +1395,6 @@ public class IpClient extends StateMachine {
      */
     public void setTcpBufferSizes(String tcpBufferSizes) {
         sendMessage(CMD_UPDATE_TCP_BUFFER_SIZES, tcpBufferSizes);
-    }
-
-    /**
-     * Set the L2 key and cluster for storing info into the memory store.
-     *
-     * This method is only supported on Q devices. For R or above releases,
-     * caller should call #updateLayer2Information() instead.
-     */
-    public void setL2KeyAndCluster(String l2Key, String cluster) {
-        if (!ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.Q)) {
-            sendMessage(CMD_UPDATE_L2KEY_CLUSTER, new Pair<>(l2Key, cluster));
-        }
     }
 
     /**
@@ -2748,7 +2735,7 @@ public class IpClient extends StateMachine {
         apfConfig.multicastFilter = mMulticastFiltering;
         // Get the Configuration for ApfFilter from Context
         // Resource settings were moved from ApfCapabilities APIs to NetworkStack resources in S
-        if (ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.R)) {
+        if (ShimUtils.isAtLeastS()) {
             final Resources res = mContext.getResources();
             apfConfig.ieee802_3Filter = res.getBoolean(R.bool.config_apfDrop802_3Frames);
             apfConfig.ethTypeBlackList = res.getIntArray(R.array.config_apfEthTypeDenyList);
