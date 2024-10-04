@@ -125,7 +125,6 @@ import android.net.util.DataStallUtils.EvaluationType;
 import android.net.util.Stopwatch;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.CancellationSignal;
 import android.os.Message;
@@ -1439,7 +1438,7 @@ public class NetworkMonitor extends StateMachine {
                     final CaptivePortalProbeResult probeRes = mLastPortalProbeResult;
                     // Use redirect URL from AP if exists.
                     final String portalUrl =
-                            (useRedirectUrlForPortal() && makeURL(probeRes.redirectUrl) != null)
+                            (makeURL(probeRes.redirectUrl) != null)
                             ? probeRes.redirectUrl : probeRes.detectUrl;
                     appExtras.putString(EXTRA_CAPTIVE_PORTAL_URL, portalUrl);
                     if (probeRes.probeSpec != null) {
@@ -1456,12 +1455,6 @@ public class NetworkMonitor extends StateMachine {
                 default:
                     return NOT_HANDLED;
             }
-        }
-
-        private boolean useRedirectUrlForPortal() {
-            // It must match the conditions in CaptivePortalLogin in which the redirect URL is not
-            // used to validate that the portal is gone.
-            return ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.Q);
         }
 
         @Override
