@@ -475,7 +475,6 @@ public class NetworkMonitor extends StateMachine {
     private final TelephonyManager mTelephonyManager;
     private final WifiManager mWifiManager;
     private final ConnectivityManager mCm;
-    @Nullable
     private final NetworkStackNotifier mNotifier;
     private final IpConnectivityLog mMetricsLog;
     private final Dependencies mDependencies;
@@ -1447,9 +1446,7 @@ public class NetworkMonitor extends StateMachine {
                     }
                     appExtras.putString(ConnectivityManager.EXTRA_CAPTIVE_PORTAL_USER_AGENT,
                             mCaptivePortalUserAgent);
-                    if (mNotifier != null) {
-                        mNotifier.notifyCaptivePortalValidationPending(network);
-                    }
+                    mNotifier.notifyCaptivePortalValidationPending(network);
                     mCm.startCaptivePortalApp(network, appExtras);
                     return HANDLED;
                 default:

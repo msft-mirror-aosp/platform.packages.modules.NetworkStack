@@ -206,7 +206,6 @@ public class NetworkStackService extends Service {
         @GuardedBy("mIpClients")
         private final ArrayList<WeakReference<IpClient>> mIpClients = new ArrayList<>();
         private final IpMemoryStoreService mIpMemoryStoreService;
-        @Nullable
         private final NetworkStackNotifier mNotifier;
 
         private static final int MAX_VALIDATION_LOGS = 10;
