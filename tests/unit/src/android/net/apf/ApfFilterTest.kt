@@ -42,6 +42,7 @@ import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NON_ICMP_MULTICAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_INVALID
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_OTHER_HOST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_REPLIED_NON_DAD
+import android.net.apf.ApfCounterTracker.Counter.PASSED_ETHER_OUR_SRC_MAC
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_BROADCAST_REPLY
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_REQUEST
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_UNICAST_REPLY
@@ -63,6 +64,9 @@ import android.net.apf.ApfTestHelpers.Companion.verifyProgramRun
 import android.net.apf.BaseApfGenerator.APF_VERSION_3
 import android.net.apf.BaseApfGenerator.APF_VERSION_6
 import android.net.ip.IpClient.IpClientCallbacksWrapper
+import android.net.nsd.NsdManager
+import android.net.nsd.OffloadEngine
+import android.net.nsd.OffloadServiceInfo
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
@@ -106,6 +110,8 @@ import org.junit.runner.RunWith
 import org.mockito.ArgumentCaptor
 import org.mockito.ArgumentMatchers.any
 import org.mockito.ArgumentMatchers.anyInt
+import org.mockito.ArgumentMatchers.anyLong
+import org.mockito.ArgumentMatchers.eq
 import org.mockito.Mock
 import org.mockito.Mockito
 import org.mockito.Mockito.doAnswer
@@ -139,6 +145,7 @@ class ApfFilterTest {
     @Mock private lateinit var dependencies: Dependencies
 
     @Mock private lateinit var ipClientCallback: IpClientCallbacksWrapper
+    @Mock private lateinit var nsdManager: NsdManager
 
     @GuardedBy("mApfFilterCreated")
     private val mApfFilterCreated = ArrayList<AndroidPacketFilter>()
@@ -218,6 +225,7 @@ class ApfFilterTest {
         val readSocket = FileDescriptor()
         Os.socketpair(AF_UNIX, SOCK_STREAM, 0, writerSocket, readSocket)
         doReturn(readSocket).`when`(dependencies).createPacketReaderSocket(anyInt())
+        doReturn(nsdManager).`when`(context).getSystemService(NsdManager::class.java)
     }
 
     private fun shutdownApfFilters() {
@@ -527,6 +535,26 @@ class ApfFilterTest {
             program,
             HexDump.hexStringToByteArray(fragmentedUdpPkt),
             DROPPED_IPV4_NON_DHCP4
+        )
+    }
+
+    @Test
+    fun testLoopbackFilter() {
+        val apfConfig = getDefaultConfig()
+        val apfFilter = getApfFilter(apfConfig)
+        val program = consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        // Using scapy to generate echo-ed broadcast packet:
+        //   ether = Ether(src=${ifParams.macAddr}, dst='ff:ff:ff:ff:ff:ff')
+        //   ip = IP(src='192.168.1.1', dst='255.255.255.255', proto=21)
+        //   pkt = ether/ip
+        val nonDhcpBcastPkt = """
+            ffffffffffff020304050607080045000014000100004015b92bc0a80101ffffffff
+        """.replace("\\s+".toRegex(), "").trim()
+        verifyProgramRun(
+                apfFilter.mApfVersionSupported,
+                program,
+                HexDump.hexStringToByteArray(nonDhcpBcastPkt),
+                PASSED_ETHER_OUR_SRC_MAC
         )
     }
 
@@ -1992,6 +2020,63 @@ class ApfFilterTest {
                 PASSED_IPV6_ICMP
             )
         }
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testRegisterOffloadEngine() {
+        val apfConfig = getDefaultConfig()
+        apfConfig.shouldHandleMdnsOffload = true
+        val apfFilter = getApfFilter(apfConfig)
+        val captor = ArgumentCaptor.forClass(OffloadEngine::class.java)
+        verify(nsdManager).registerOffloadEngine(
+                eq(ifParams.name),
+                anyLong(),
+                anyLong(),
+                any(),
+                captor.capture()
+        )
+        val offloadEngine = captor.value
+        val info1 = OffloadServiceInfo(
+                OffloadServiceInfo.Key("TestServiceName", "_advertisertest._tcp"),
+                listOf(),
+                "Android_test.local",
+                byteArrayOf(0x01, 0x02, 0x03, 0x04),
+                0,
+                OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
+        )
+        val info2 = OffloadServiceInfo(
+                OffloadServiceInfo.Key("TestServiceName2", "_advertisertest._tcp"),
+                listOf(),
+                "Android_test.local",
+                byteArrayOf(0x01, 0x02, 0x03, 0x04),
+                0,
+                OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
+        )
+        val updatedInfo1 = OffloadServiceInfo(
+                OffloadServiceInfo.Key("TestServiceName", "_advertisertest._tcp"),
+                listOf(),
+                "Android_test.local",
+                byteArrayOf(),
+                0,
+                OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
+        )
+        handler.post { offloadEngine.onOffloadServiceUpdated(info1) }
+        handlerThread.waitForIdle(TIMEOUT_MS)
+        assertContentEquals(listOf(info1), apfFilter.mOffloadServiceInfos)
+        handler.post { offloadEngine.onOffloadServiceUpdated(info2) }
+        handlerThread.waitForIdle(TIMEOUT_MS)
+        assertContentEquals(listOf(info1, info2), apfFilter.mOffloadServiceInfos)
+        handler.post { offloadEngine.onOffloadServiceUpdated(updatedInfo1) }
+        handlerThread.waitForIdle(TIMEOUT_MS)
+        assertContentEquals(listOf(info2, updatedInfo1), apfFilter.mOffloadServiceInfos)
+        handler.post { offloadEngine.onOffloadServiceRemoved(updatedInfo1) }
+        handlerThread.waitForIdle(TIMEOUT_MS)
+        assertContentEquals(listOf(info2), apfFilter.mOffloadServiceInfos)
+
+        handler.post { apfFilter.shutdown() }
+        handlerThread.waitForIdle(TIMEOUT_MS)
+        verify(nsdManager).unregisterOffloadEngine(any())
     }
 
     @Test

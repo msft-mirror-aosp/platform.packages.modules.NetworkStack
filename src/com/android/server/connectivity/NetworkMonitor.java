@@ -65,6 +65,8 @@ import static com.android.modules.utils.build.SdkLevel.isAtLeastU;
 import static com.android.net.module.util.CollectionUtils.isEmpty;
 import static com.android.net.module.util.ConnectivityUtils.isIPv6ULA;
 import static com.android.net.module.util.DeviceConfigUtils.getResBooleanConfig;
+import static com.android.net.module.util.FeatureVersions.FEATURE_DDR_IN_CONNECTIVITY;
+import static com.android.net.module.util.FeatureVersions.FEATURE_DDR_IN_DNSRESOLVER;
 import static com.android.net.module.util.NetworkStackConstants.TEST_CAPTIVE_PORTAL_HTTPS_URL;
 import static com.android.net.module.util.NetworkStackConstants.TEST_CAPTIVE_PORTAL_HTTP_URL;
 import static com.android.net.module.util.NetworkStackConstants.TEST_URL_EXPIRATION_TIME;
@@ -123,7 +125,6 @@ import android.net.util.DataStallUtils.EvaluationType;
 import android.net.util.Stopwatch;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.CancellationSignal;
 import android.os.Message;
@@ -175,7 +176,6 @@ import com.android.networkstack.apishim.common.CaptivePortalDataShim;
 import com.android.networkstack.apishim.common.NetworkAgentConfigShim;
 import com.android.networkstack.apishim.common.NetworkInformationShim;
 import com.android.networkstack.apishim.common.ShimUtils;
-import com.android.networkstack.apishim.common.UnsupportedApiLevelException;
 import com.android.networkstack.metrics.DataStallDetectionStats;
 import com.android.networkstack.metrics.DataStallStatsUtils;
 import com.android.networkstack.metrics.NetworkValidationMetrics;
@@ -475,7 +475,6 @@ public class NetworkMonitor extends StateMachine {
     private final TelephonyManager mTelephonyManager;
     private final WifiManager mWifiManager;
     private final ConnectivityManager mCm;
-    @Nullable
     private final NetworkStackNotifier mNotifier;
     private final IpConnectivityLog mMetricsLog;
     private final Dependencies mDependencies;
@@ -609,13 +608,6 @@ public class NetworkMonitor extends StateMachine {
         } catch (RemoteException e) {
             version = 0;
         }
-        // The AIDL was freezed from Q beta 5 but it's unfreezing from R before releasing. In order
-        // to distinguish the behavior between R and Q beta 5 and before Q beta 5, add SDK and
-        // CODENAME check here. Basically, it's only expected to return 0 for Q beta 4 and below
-        // because the test result has changed.
-        if (Build.VERSION.SDK_INT == Build.VERSION_CODES.Q
-                && Build.VERSION.CODENAME.equals("REL")
-                && version == Build.VERSION_CODES.CUR_DEVELOPMENT) version = 0;
         return version;
     }
 
@@ -682,7 +674,10 @@ public class NetworkMonitor extends StateMachine {
                 context, NetworkStackUtils.REEVALUATE_WHEN_RESUME);
         mAsyncPrivdnsResolutionEnabled = deps.isFeatureEnabled(context,
                 NetworkStackUtils.NETWORKMONITOR_ASYNC_PRIVDNS_RESOLUTION);
-        mDdrEnabled = deps.isFeatureEnabled(context, NetworkStackUtils.DNS_DDR_VERSION);
+        mDdrEnabled = mAsyncPrivdnsResolutionEnabled
+                && deps.isFeatureEnabled(context, NetworkStackUtils.DNS_DDR_VERSION)
+                && deps.isFeatureSupported(mContext, FEATURE_DDR_IN_CONNECTIVITY)
+                && deps.isFeatureSupported(mContext, FEATURE_DDR_IN_DNSRESOLVER);
         mUseHttps = getUseHttpsValidation();
         mCaptivePortalUserAgent = getCaptivePortalUserAgent();
         mCaptivePortalFallbackSpecs =
@@ -719,7 +714,16 @@ public class NetworkMonitor extends StateMachine {
         mNetworkCapabilities = new NetworkCapabilities(null);
         mNetworkAgentConfig = NetworkAgentConfigShimImpl.newInstance(null);
 
-        mDdrTracker = new DdrTracker();
+        // For DdrTracker that can safely update SVCB lookup results itself when the lookup
+        // completes. The callback is called inline from onAnswer, which is already posted to
+        // the handler. This ensures that strict mode hostname resolution (which calls
+        // onQueryDone when processing CMD_PRIVATE_DNS_PROBE_COMPLETED) and SVCB lookup (which calls
+        // DdrTracker#updateSvcbAnswerAndInvokeUserCallback by posting onAnswer to the Runnable)
+        // run in order: both of them post exactly once to the handler.
+        mDdrTracker = new DdrTracker(mCleartextDnsNetwork, mDependencies.getDnsResolver(),
+                getHandler()::post,
+                result -> notifyPrivateDnsConfigResolved(result),  // Run inline on handler.
+                mValidationLogs);
     }
 
     /**
@@ -1093,6 +1097,7 @@ public class NetworkMonitor extends StateMachine {
                     if (mDdrEnabled) {
                         mDdrTracker.notifyPrivateDnsSettingsChanged(cfg);
                     }
+
                     if (!isPrivateDnsValidationRequired() || !cfg.inStrictMode()) {
                         // No DNS resolution required.
                         //
@@ -1167,8 +1172,11 @@ public class NetworkMonitor extends StateMachine {
                     if (tst != null) {
                         tst.setLinkProperties(mLinkProperties);
                     }
-                    if (mDdrEnabled) {
-                        mDdrTracker.notifyLinkPropertiesChanged(mLinkProperties);
+                    final boolean dnsInfoUpdated = mDdrEnabled
+                            && mDdrTracker.notifyLinkPropertiesChanged(mLinkProperties);
+                    if (dnsInfoUpdated) {
+                        removeMessages(CMD_EVALUATE_PRIVATE_DNS);
+                        sendMessage(CMD_EVALUATE_PRIVATE_DNS);
                     }
                     break;
                 case EVENT_NETWORK_CAPABILITIES_CHANGED:
@@ -1429,7 +1437,7 @@ public class NetworkMonitor extends StateMachine {
                     final CaptivePortalProbeResult probeRes = mLastPortalProbeResult;
                     // Use redirect URL from AP if exists.
                     final String portalUrl =
-                            (useRedirectUrlForPortal() && makeURL(probeRes.redirectUrl) != null)
+                            (makeURL(probeRes.redirectUrl) != null)
                             ? probeRes.redirectUrl : probeRes.detectUrl;
                     appExtras.putString(EXTRA_CAPTIVE_PORTAL_URL, portalUrl);
                     if (probeRes.probeSpec != null) {
@@ -1438,20 +1446,12 @@ public class NetworkMonitor extends StateMachine {
                     }
                     appExtras.putString(ConnectivityManager.EXTRA_CAPTIVE_PORTAL_USER_AGENT,
                             mCaptivePortalUserAgent);
-                    if (mNotifier != null) {
-                        mNotifier.notifyCaptivePortalValidationPending(network);
-                    }
+                    mNotifier.notifyCaptivePortalValidationPending(network);
                     mCm.startCaptivePortalApp(network, appExtras);
                     return HANDLED;
                 default:
                     return NOT_HANDLED;
             }
-        }
-
-        private boolean useRedirectUrlForPortal() {
-            // It must match the conditions in CaptivePortalLogin in which the redirect URL is not
-            // used to validate that the portal is gone.
-            return ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.Q);
         }
 
         @Override
@@ -1653,12 +1653,12 @@ public class NetworkMonitor extends StateMachine {
 
     private class EvaluatingPrivateDnsState extends State {
         private int mPrivateDnsReevalDelayMs;
-        private PrivateDnsConfig mPrivateDnsConfig;
+        private PrivateDnsConfig mSyncOnlyPrivateDnsConfig;
 
         @Override
         public void enter() {
             mPrivateDnsReevalDelayMs = INITIAL_REEVALUATE_DELAY_MS;
-            mPrivateDnsConfig = null;
+            mSyncOnlyPrivateDnsConfig = null;
             if (mDdrEnabled) {
                 mDdrTracker.resetStrictModeHostnameResolutionResult();
             }
@@ -1669,6 +1669,10 @@ public class NetworkMonitor extends StateMachine {
         public boolean processMessage(Message msg) {
             switch (msg.what) {
                 case CMD_EVALUATE_PRIVATE_DNS: {
+                    if (mDdrEnabled) {
+                        mDdrTracker.startSvcbLookup();
+                    }
+
                     if (mAsyncPrivdnsResolutionEnabled) {
                         // Cancel any previously scheduled retry attempt
                         removeMessages(CMD_EVALUATE_PRIVATE_DNS);
@@ -1684,12 +1688,13 @@ public class NetworkMonitor extends StateMachine {
                         break;
                     }
 
+                    // Async resolution not enabled, do a blocking DNS lookup.
                     if (inStrictMode()) {
-                        if (!isStrictModeHostnameResolved(mPrivateDnsConfig)) {
+                        if (!isStrictModeHostnameResolved(mSyncOnlyPrivateDnsConfig)) {
                             resolveStrictModeHostname();
 
-                            if (isStrictModeHostnameResolved(mPrivateDnsConfig)) {
-                                notifyPrivateDnsConfigResolved(mPrivateDnsConfig);
+                            if (isStrictModeHostnameResolved(mSyncOnlyPrivateDnsConfig)) {
+                                notifyPrivateDnsConfigResolved(mSyncOnlyPrivateDnsConfig);
                             } else {
                                 handlePrivateDnsEvaluationFailure();
                                 // The private DNS probe fails-fast if the server hostname cannot
@@ -1748,12 +1753,9 @@ public class NetworkMonitor extends StateMachine {
                 final InetAddress[] ips = DnsUtils.getAllByName(mDependencies.getDnsResolver(),
                         mCleartextDnsNetwork, mPrivateDnsProviderHostname, getDnsProbeTimeout(),
                         str -> validationLog("Strict mode hostname resolution " + str));
-                mPrivateDnsConfig = new PrivateDnsConfig(mPrivateDnsProviderHostname, ips);
-                if (mDdrEnabled) {
-                    mDdrTracker.setStrictModeHostnameResolutionResult(ips);
-                }
+                mSyncOnlyPrivateDnsConfig = new PrivateDnsConfig(mPrivateDnsProviderHostname, ips);
             } catch (UnknownHostException uhe) {
-                mPrivateDnsConfig = null;
+                mSyncOnlyPrivateDnsConfig = null;
             }
         }
 
@@ -1978,14 +1980,16 @@ public class NetworkMonitor extends StateMachine {
 
             if (!answer.isEmpty()) {
                 final InetAddress[] ips = answer.toArray(new InetAddress[0]);
-                final PrivateDnsConfig config =
-                        new PrivateDnsConfig(mPrivateDnsProviderHostname, ips);
                 if (mDdrEnabled) {
                     mDdrTracker.setStrictModeHostnameResolutionResult(ips);
+                    notifyPrivateDnsConfigResolved(mDdrTracker.getResultForReporting());
+                } else {
+                    notifyPrivateDnsConfigResolved(
+                            new PrivateDnsConfig(mPrivateDnsProviderHostname, ips));
                 }
-                notifyPrivateDnsConfigResolved(config);
 
-                validationLog("Strict mode hostname resolution " + elapsedNanos + "ns OK "
+                validationLog("Strict mode hostname resolution "
+                        + TimeUnit.NANOSECONDS.toMillis(elapsedNanos) + "ms OK "
                         + answer + " for " + mPrivateDnsProviderHostname);
                 transitionTo(mProbingForPrivateDnsState);
             } else {
@@ -2048,7 +2052,7 @@ public class NetworkMonitor extends StateMachine {
 
             final String strIps = Objects.toString(answer);
             validationLog(PROBE_PRIVDNS, queryName,
-                    String.format("%dus: %s", elapsedNanos / 1000, strIps));
+                    String.format("%dms: %s", TimeUnit.NANOSECONDS.toMillis(elapsedNanos), strIps));
 
             mEvaluationState.noteProbeResult(NETWORK_VALIDATION_PROBE_PRIVDNS, success);
             if (success) {
@@ -3337,11 +3341,6 @@ public class NetworkMonitor extends StateMachine {
             } catch (JSONException e) {
                 validationLog("Could not parse capport API JSON: " + e.getMessage());
                 return null;
-            } catch (UnsupportedApiLevelException e) {
-                // This should never happen because LinkProperties would not have a capport URL
-                // before R.
-                validationLog("Platform API too low to support capport API");
-                return null;
             }
         }
 
@@ -3737,6 +3736,10 @@ public class NetworkMonitor extends StateMachine {
          */
         public boolean isFeatureNotChickenedOut(@NonNull Context context, @NonNull String name) {
             return DeviceConfigUtils.isNetworkStackFeatureNotChickenedOut(context, name);
+        }
+
+        boolean isFeatureSupported(@NonNull Context context, long feature) {
+            return DeviceConfigUtils.isFeatureSupported(context, feature);
         }
 
         /**
