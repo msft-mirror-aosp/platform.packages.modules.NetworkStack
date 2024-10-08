@@ -849,7 +849,7 @@ public class IpClient extends StateMachine {
     private int[] mNudFailureEventCounts = null;
 
     /**
-     * The number of NUD failure events that were stored in the moemory store since this IpClient
+     * The number of NUD failure events that were stored in the memory store since this IpClient
      * was last started. Always set to zero in StoppedState. Used to prevent writing excessive NUD
      * failure events to the memory store.
      */
@@ -2537,8 +2537,10 @@ public class IpClient extends StateMachine {
     // the last 6 hours, the code would never stop logging failures (filling up the memory store)
     // until IpClient is restarted and queries the memory store again.
     //
-    // TODO: given that the code now looks at the number of events since IpClient was last started,
-    // is the 6-hour query still necessary?
+    // The 6-hour count is still useful, even though the code looks at the number of NUD failures
+    // since IpClient was last started, because it ensures that even if the network disconnects and
+    // reconnects frequently for any other reason, the code will never store more than 10 NUD
+    // failures every 6 hours.
     private boolean shouldStopWritingNudFailureEventToDatabase() {
         // NUD failure query has not completed yet.
         if (mNudFailureEventCounts == null) return true;
