@@ -436,7 +436,7 @@ public class DhcpClient extends StateMachine {
                 return getDeviceName(context);
             }
             for (final String prop : prefHostnameProps) {
-                String prefHostname = SystemProperties.get(prop, "");
+                String prefHostname = getSystemProperty(prop);
                 if (!TextUtils.isEmpty(prefHostname)) {
                     return prefHostname;
                 }
@@ -450,6 +450,13 @@ public class DhcpClient extends StateMachine {
         public String getDeviceName(final Context context) {
             return Settings.Global.getString(context.getContentResolver(),
                     Settings.Global.DEVICE_NAME);
+        }
+
+        /**
+         * Read a system property.
+         */
+        public String getSystemProperty(String name) {
+            return SystemProperties.get(name, "" /* default*/);
         }
 
         /**
