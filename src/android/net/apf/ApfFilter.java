@@ -2243,7 +2243,7 @@ public class ApfFilter implements AndroidPacketFilter {
      * </ul>
      */
     @VisibleForTesting
-    public ApfV4GeneratorBase<?> emitPrologueLocked() throws IllegalInstructionException {
+    public ApfV4GeneratorBase<?> emitPrologue() throws IllegalInstructionException {
         // This is guaranteed to succeed because of the check in maybeCreate.
         ApfV4GeneratorBase<?> gen;
         if (shouldUseApfV6Generator()) {
@@ -2383,7 +2383,7 @@ public class ApfFilter implements AndroidPacketFilter {
             final int timeSeconds = secondsSinceBoot();
             mLastTimeInstalledProgram = timeSeconds;
             // Step 1: Determine how many RA filters we can fit in the program.
-            ApfV4GeneratorBase<?> gen = emitPrologueLocked();
+            ApfV4GeneratorBase<?> gen = emitPrologue();
 
             // The epilogue normally goes after the RA filters, but add it early to include its
             // length when estimating the total.
@@ -2415,7 +2415,7 @@ public class ApfFilter implements AndroidPacketFilter {
             mNumProgramUpdates++;
 
             // Step 2: Actually generate the program
-            gen = emitPrologueLocked();
+            gen = emitPrologue();
             for (Ra ra : rasToFilter) {
                 ra.generateFilter(gen, timeSeconds);
                 programMinLft = Math.min(programMinLft, ra.getRemainingFilterLft(timeSeconds));
