@@ -1549,7 +1549,7 @@ public class ApfFilter implements AndroidPacketFilter {
      * Preconditions:
      *  - Packet being filtered is ARP
      */
-    private void generateArpFilterLocked(ApfV4GeneratorBase<?> gen)
+    private void generateArpFilter(ApfV4GeneratorBase<?> gen)
             throws IllegalInstructionException {
         // Here's a basic summary of what the ARP filter program does:
         //
@@ -2323,7 +2323,7 @@ public class ApfFilter implements AndroidPacketFilter {
         // Add ARP filters:
         String skipArpFiltersLabel = gen.getUniqueLabel();
         gen.addJumpIfR0NotEquals(ETH_P_ARP, skipArpFiltersLabel);
-        generateArpFilterLocked(gen);
+        generateArpFilter(gen);
         gen.defineLabel(skipArpFiltersLabel);
 
         // Add mDNS filter:
