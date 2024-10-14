@@ -1841,7 +1841,7 @@ public class ApfFilter implements AndroidPacketFilter {
     /**
      * Generate allocate and transmit code to send ICMPv6 non-DAD NA packets.
      */
-    private void generateNonDadNaTransmitLocked(ApfV6GeneratorBase<?> gen)
+    private void generateNonDadNaTransmit(ApfV6GeneratorBase<?> gen)
             throws IllegalInstructionException {
         final int ipv6PayloadLen = ICMPV6_NA_HEADER_LEN + ICMPV6_ND_OPTION_TLLA_LEN;
         final int pktLen = ETH_HEADER_LEN + IPV6_HEADER_LEN + ipv6PayloadLen;
@@ -1985,7 +1985,7 @@ public class ApfFilter implements AndroidPacketFilter {
         // if multicast MAC in SLLA option -> drop
         v6Gen.addLoad8(R0, ICMP6_NS_OPTION_TYPE_OFFSET + 2)
                 .addCountAndDropIfR0AnyBitsSet(1, DROPPED_IPV6_NS_INVALID);
-        generateNonDadNaTransmitLocked(v6Gen);
+        generateNonDadNaTransmit(v6Gen);
         v6Gen.addCountAndDrop(Counter.DROPPED_IPV6_NS_REPLIED_NON_DAD);
     }
 
