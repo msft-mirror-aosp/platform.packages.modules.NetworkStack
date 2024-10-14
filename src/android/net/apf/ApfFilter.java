@@ -648,8 +648,7 @@ public class ApfFilter implements AndroidPacketFilter {
     }
 
     // Returns seconds since device boot.
-    @VisibleForTesting
-    protected int secondsSinceBoot() {
+    private int secondsSinceBoot() {
         return (int) (mDependencies.elapsedRealtime() / DateUtils.SECOND_IN_MILLIS);
     }
 
