@@ -467,7 +467,7 @@ public class ApfFilter implements AndroidPacketFilter {
         // TODO: ApfFilter should not generate programs until IpClient sends provisioning success.
         maybeCleanUpApfRam();
         // Install basic filters
-        installNewProgramLocked();
+        installNewProgram();
 
         mRaPacketReader = new RaPacketReader(mHandler, mInterfaceParams.index);
         // The class constructor must be called from the IpClient's handler thread
@@ -2377,7 +2377,7 @@ public class ApfFilter implements AndroidPacketFilter {
      * Generate and install a new filter program.
      */
     @VisibleForTesting
-    public void installNewProgramLocked() {
+    public void installNewProgram() {
         ArrayList<Ra> rasToFilter = new ArrayList<>();
         final byte[] program;
         int programMinLft = Integer.MAX_VALUE;
@@ -2515,7 +2515,7 @@ public class ApfFilter implements AndroidPacketFilter {
 
                 // Rate limit program installation
                 if (mTokenBucket.get()) {
-                    installNewProgramLocked();
+                    installNewProgram();
                 } else {
                     Log.e(TAG, "Failed to install prog for tracked RA, too many updates. " + ra);
                 }
@@ -2534,7 +2534,7 @@ public class ApfFilter implements AndroidPacketFilter {
         mRas.add(0, ra);
         // Rate limit program installation
         if (mTokenBucket.get()) {
-            installNewProgramLocked();
+            installNewProgram();
         } else {
             Log.e(TAG, "Failed to install prog for new RA, too many updates. " + ra);
         }
@@ -2605,14 +2605,14 @@ public class ApfFilter implements AndroidPacketFilter {
     public void setMulticastFilter(boolean isEnabled) {
         if (mMulticastFilter == isEnabled) return;
         mMulticastFilter = isEnabled;
-        installNewProgramLocked();
+        installNewProgram();
     }
 
     @VisibleForTesting
     public void setDozeMode(boolean isEnabled) {
         if (mInDozeMode == isEnabled) return;
         mInDozeMode = isEnabled;
-        installNewProgramLocked();
+        installNewProgram();
     }
 
     @VisibleForTesting
@@ -2680,7 +2680,7 @@ public class ApfFilter implements AndroidPacketFilter {
         mIPv6TentativeAddresses = ipv6Addresses.first;
         mIPv6NonTentativeAddresses = ipv6Addresses.second;
 
-        installNewProgramLocked();
+        installNewProgram();
     }
 
     @Override
@@ -2689,7 +2689,7 @@ public class ApfFilter implements AndroidPacketFilter {
             return;
         }
         mHasClat = add;
-        installNewProgramLocked();
+        installNewProgram();
     }
 
     @Override
@@ -2725,7 +2725,7 @@ public class ApfFilter implements AndroidPacketFilter {
         mKeepalivePackets.put(slot, (ipVersion == 4)
                 ? new TcpKeepaliveAckV4(sentKeepalivePacket)
                 : new TcpKeepaliveAckV6(sentKeepalivePacket));
-        installNewProgramLocked();
+        installNewProgram();
     }
 
     /**
@@ -2748,7 +2748,7 @@ public class ApfFilter implements AndroidPacketFilter {
         }
 
         mKeepalivePackets.put(slot, new NattKeepaliveResponse(sentKeepalivePacket));
-        installNewProgramLocked();
+        installNewProgram();
     }
 
     /**
@@ -2759,7 +2759,7 @@ public class ApfFilter implements AndroidPacketFilter {
     public void removeKeepalivePacketFilter(int slot) {
         log("Removing keepalive packet(" + slot + ")");
         mKeepalivePackets.remove(slot);
-        installNewProgramLocked();
+        installNewProgram();
     }
 
     public void dump(IndentingPrintWriter pw) {
