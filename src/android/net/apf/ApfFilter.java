@@ -2241,8 +2241,7 @@ public class ApfFilter implements AndroidPacketFilter {
      *     insertion of RA filters here, or if there aren't any, just passes the packets.
      * </ul>
      */
-    @VisibleForTesting
-    public ApfV4GeneratorBase<?> emitPrologue() throws IllegalInstructionException {
+    private ApfV4GeneratorBase<?> emitPrologue() throws IllegalInstructionException {
         // This is guaranteed to succeed because of the check in maybeCreate.
         ApfV4GeneratorBase<?> gen;
         if (shouldUseApfV6Generator()) {
