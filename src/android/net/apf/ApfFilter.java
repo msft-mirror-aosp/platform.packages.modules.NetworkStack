@@ -1752,7 +1752,7 @@ public class ApfFilter implements AndroidPacketFilter {
         generateV4NattKeepaliveFilters(gen);
 
         // If TCP unicast on port 7, drop
-        generateV4TcpPort7FilterLocked(gen);
+        generateV4TcpPort7Filter(gen);
 
         if (mMulticastFilter) {
             // Otherwise, this is an IPv4 unicast, pass
@@ -2192,7 +2192,7 @@ public class ApfFilter implements AndroidPacketFilter {
      * On entry, we know it is IPv4 ethertype, but don't know anything else.
      * R0/R1 have nothing useful in them, and can be clobbered.
      */
-    private void generateV4TcpPort7FilterLocked(ApfV4GeneratorBase<?> gen)
+    private void generateV4TcpPort7Filter(ApfV4GeneratorBase<?> gen)
             throws IllegalInstructionException {
         final String skipPort7V4Filter = gen.getUniqueLabel();
 
