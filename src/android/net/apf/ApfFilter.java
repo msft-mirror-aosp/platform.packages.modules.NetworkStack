@@ -619,10 +619,6 @@ public class ApfFilter implements AndroidPacketFilter {
         Log.d(TAG, "(" + mInterfaceParams.name + "): " + s);
     }
 
-    private long getUniqueNumberLocked() {
-        return mUniqueCounter++;
-    }
-
     private static int[] filterEthTypeBlackList(int[] ethTypeBlackList) {
         ArrayList<Integer> bl = new ArrayList<>();
 
