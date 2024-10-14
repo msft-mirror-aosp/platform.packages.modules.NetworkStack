@@ -2609,11 +2609,6 @@ public class ApfFilter implements AndroidPacketFilter {
         installNewProgram();
     }
 
-    @VisibleForTesting
-    public boolean isInDozeMode() {
-        return mInDozeMode;
-    }
-
     /** Retrieve the single IPv4 LinkAddress if there is one, otherwise return null. */
     private static LinkAddress retrieveIPv4LinkAddress(LinkProperties lp) {
         LinkAddress ipv4Address = null;
