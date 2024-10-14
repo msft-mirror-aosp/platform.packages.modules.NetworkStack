@@ -2117,7 +2117,7 @@ public class ApfFilter implements AndroidPacketFilter {
      * Generate filter code to process mDNS packets. Execution of this code ends in * DROP_LABEL
      * or PASS_LABEL if the packet is mDNS packets. Otherwise, skip this check.
      */
-    private void generateMdnsFilterLocked(ApfV4GeneratorBase<?> gen)
+    private void generateMdnsFilter(ApfV4GeneratorBase<?> gen)
             throws IllegalInstructionException {
         final String skipMdnsv4Filter = gen.getUniqueLabel();
         final String skipMdnsFilter = gen.getUniqueLabel();
@@ -2327,7 +2327,7 @@ public class ApfFilter implements AndroidPacketFilter {
         gen.defineLabel(skipArpFiltersLabel);
 
         // Add mDNS filter:
-        generateMdnsFilterLocked(gen);
+        generateMdnsFilter(gen);
         gen.addLoad16(R0, ETH_ETHERTYPE_OFFSET);
 
         // Add IPv4 filters:
