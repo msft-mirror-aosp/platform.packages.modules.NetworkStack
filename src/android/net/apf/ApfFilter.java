@@ -1091,7 +1091,7 @@ public class ApfFilter implements AndroidPacketFilter {
                     case 4: lft = getUint32(newRa.mPacket, section.start); break;
                 }
 
-                // WARNING: keep this in sync with Ra#generateFilterLocked()!
+                // WARNING: keep this in sync with Ra#generateFilter()!
                 if (section.lifetime == 0) {
                     // Case 1) old lft == 0
                     if (section.min > 0) {
@@ -1193,7 +1193,7 @@ public class ApfFilter implements AndroidPacketFilter {
 
         // Append a filter for this RA to {@code gen}. Jump to DROP_LABEL if it should be dropped.
         // Jump to the next filter if packet doesn't match this RA.
-        void generateFilterLocked(ApfV4GeneratorBase<?> gen, int timeSeconds)
+        void generateFilter(ApfV4GeneratorBase<?> gen, int timeSeconds)
                 throws IllegalInstructionException {
             String nextFilterLabel = gen.getUniqueLabel();
             // Skip if packet is not the right size
@@ -1293,7 +1293,7 @@ public class ApfFilter implements AndroidPacketFilter {
         // Append a filter for this keepalive ack to {@code gen}.
         // Jump to drop if it matches the keepalive ack.
         // Jump to the next filter if packet doesn't match the keepalive ack.
-        abstract void generateFilterLocked(ApfV4GeneratorBase<?> gen)
+        abstract void generateFilter(ApfV4GeneratorBase<?> gen)
                 throws IllegalInstructionException;
     }
 
@@ -1336,7 +1336,7 @@ public class ApfFilter implements AndroidPacketFilter {
         }
 
         @Override
-        void generateFilterLocked(ApfV4GeneratorBase<?> gen) throws IllegalInstructionException {
+        void generateFilter(ApfV4GeneratorBase<?> gen) throws IllegalInstructionException {
             final String nextFilterLabel = gen.getUniqueLabel();
 
             gen.addLoadImmediate(R0, ETH_HEADER_LEN + IPV4_SRC_ADDR_OFFSET);
@@ -1437,7 +1437,7 @@ public class ApfFilter implements AndroidPacketFilter {
         // Append a filter for this keepalive ack to {@code gen}.
         // Jump to drop if it matches the keepalive ack.
         // Jump to the next filter if packet doesn't match the keepalive ack.
-        abstract void generateFilterLocked(ApfV4GeneratorBase<?> gen)
+        abstract void generateFilter(ApfV4GeneratorBase<?> gen)
                 throws IllegalInstructionException;
     }
 
@@ -1451,7 +1451,7 @@ public class ApfFilter implements AndroidPacketFilter {
         }
 
         @Override
-        void generateFilterLocked(ApfV4GeneratorBase<?> gen) throws IllegalInstructionException {
+        void generateFilter(ApfV4GeneratorBase<?> gen) throws IllegalInstructionException {
             final String nextFilterLabel = gen.getUniqueLabel();
 
             gen.addLoadImmediate(R0, ETH_HEADER_LEN + IPV4_SRC_ADDR_OFFSET);
@@ -1493,7 +1493,7 @@ public class ApfFilter implements AndroidPacketFilter {
         }
 
         @Override
-        void generateFilterLocked(ApfV4GeneratorBase<?> gen) {
+        void generateFilter(ApfV4GeneratorBase<?> gen) {
             throw new UnsupportedOperationException("IPv6 TCP Keepalive is not supported yet");
         }
     }
@@ -1782,7 +1782,7 @@ public class ApfFilter implements AndroidPacketFilter {
         // Drop Keepalive responses
         for (int i = 0; i < mKeepalivePackets.size(); ++i) {
             final KeepalivePacket response = mKeepalivePackets.valueAt(i);
-            if (filterType.isInstance(response)) response.generateFilterLocked(gen);
+            if (filterType.isInstance(response)) response.generateFilter(gen);
         }
 
         gen.defineLabel(label);
@@ -2399,7 +2399,7 @@ public class ApfFilter implements AndroidPacketFilter {
             for (Ra ra : mRas) {
                 // skip filter if it has expired.
                 if (ra.getRemainingFilterLft(timeSeconds) <= 0) continue;
-                ra.generateFilterLocked(gen, timeSeconds);
+                ra.generateFilter(gen, timeSeconds);
                 // Stop if we get too big.
                 if (gen.programLengthOverEstimate() > mMaximumApfProgramSize) {
                     if (VDBG) Log.d(TAG, "Past maximum program size, skipping RAs");
@@ -2417,7 +2417,7 @@ public class ApfFilter implements AndroidPacketFilter {
             // Step 2: Actually generate the program
             gen = emitPrologueLocked();
             for (Ra ra : rasToFilter) {
-                ra.generateFilterLocked(gen, timeSeconds);
+                ra.generateFilter(gen, timeSeconds);
                 programMinLft = Math.min(programMinLft, ra.getRemainingFilterLft(timeSeconds));
             }
             emitEpilogue(gen);
