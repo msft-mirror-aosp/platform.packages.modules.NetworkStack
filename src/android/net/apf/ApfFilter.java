@@ -1995,7 +1995,7 @@ public class ApfFilter implements AndroidPacketFilter {
      * Preconditions:
      *  - Packet being filtered is IPv6
      */
-    private void generateIPv6FilterLocked(ApfV4GeneratorBase<?> gen)
+    private void generateIPv6Filter(ApfV4GeneratorBase<?> gen)
             throws IllegalInstructionException {
         // Here's a basic summary of what the IPv6 filter program does:
         //
@@ -2237,7 +2237,7 @@ public class ApfFilter implements AndroidPacketFilter {
      * <li>Drop IPv6 ICMPv6 NAs to anything in ff02::/120.
      * <li>Drop IPv6 ICMPv6 RSs.
      * <li>Filter IPv4 packets (see generateIPv4Filter())
-     * <li>Filter IPv6 packets (see generateIPv6FilterLocked())
+     * <li>Filter IPv6 packets (see generateIPv6Filter())
      * <li>Let execution continue off the end of the program for IPv6 ICMPv6 packets. This allows
      *     insertion of RA filters here, or if there aren't any, just passes the packets.
      * </ul>
@@ -2350,7 +2350,7 @@ public class ApfFilter implements AndroidPacketFilter {
 
         // Add IPv6 filters:
         gen.defineLabel(ipv6FilterLabel);
-        generateIPv6FilterLocked(gen);
+        generateIPv6Filter(gen);
         return gen;
     }
 
