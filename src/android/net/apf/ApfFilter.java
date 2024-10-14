@@ -1885,7 +1885,7 @@ public class ApfFilter implements AndroidPacketFilter {
         );
     }
 
-    private void generateNsFilterLocked(ApfV6Generator v6Gen)
+    private void generateNsFilter(ApfV6Generator v6Gen)
             throws IllegalInstructionException {
         final List<byte[]> allIPv6Addrs = getIpv6Addresses(
                 true /* includeNonTentative */,
@@ -2089,9 +2089,9 @@ public class ApfFilter implements AndroidPacketFilter {
         if (v6Gen != null && mShouldHandleNdOffload) {
             final String skipNsPacketFilter = v6Gen.getUniqueLabel();
             v6Gen.addJumpIfR0NotEquals(ICMPV6_NEIGHBOR_SOLICITATION, skipNsPacketFilter);
-            generateNsFilterLocked(v6Gen);
-            // End of NS filter. generateNsFilterLocked() method is terminal, so NS packet will be
-            // either dropped or passed inside generateNsFilterLocked().
+            generateNsFilter(v6Gen);
+            // End of NS filter. generateNsFilter() method is terminal, so NS packet will be
+            // either dropped or passed inside generateNsFilter().
             v6Gen.defineLabel(skipNsPacketFilter);
         }
 
