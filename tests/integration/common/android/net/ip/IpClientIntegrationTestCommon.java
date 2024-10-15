@@ -36,7 +36,6 @@ import static android.net.dhcp.DhcpPacket.ENCAP_L2;
 import static android.net.dhcp.DhcpPacket.INADDR_BROADCAST;
 import static android.net.dhcp.DhcpPacket.INFINITE_LEASE;
 import static android.net.dhcp.DhcpPacket.MIN_V6ONLY_WAIT_MS;
-import static android.net.dhcp6.Dhcp6Packet.PrefixDelegation;
 import static android.net.ip.IIpClientCallbacks.DTIM_MULTIPLIER_RESET;
 import static android.net.ip.IpClient.CONFIG_IPV6_AUTOCONF_TIMEOUT;
 import static android.net.ip.IpClient.CONFIG_ACCEPT_RA_MIN_LFT;
@@ -241,7 +240,7 @@ import com.android.testutils.CompatUtil;
 import com.android.testutils.DevSdkIgnoreRule;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo;
 import com.android.testutils.HandlerUtils;
-import com.android.testutils.TapPacketReader;
+import com.android.testutils.PollPacketReader;
 import com.android.testutils.TestableNetworkAgent;
 import com.android.testutils.TestableNetworkCallback;
 
@@ -392,7 +391,7 @@ public abstract class IpClientIntegrationTestCommon {
     private String mIfaceName;
     private HandlerThread mPacketReaderThread;
     private Handler mHandler;
-    private TapPacketReader mPacketReader;
+    private PollPacketReader mPacketReader;
     private FileDescriptor mTapFd;
     private byte[] mClientMac;
     private InetAddress mClientIpAddress;
@@ -928,7 +927,7 @@ public abstract class IpClientIntegrationTestCommon {
         // go out of scope.
         mTapFd = new FileDescriptor();
         mTapFd.setInt$(iface.getFileDescriptor().detachFd());
-        mPacketReader = new TapPacketReader(mHandler, mTapFd, DATA_BUFFER_LEN);
+        mPacketReader = new PollPacketReader(mHandler, mTapFd, DATA_BUFFER_LEN);
         mHandler.post(() -> mPacketReader.start());
     }
 
