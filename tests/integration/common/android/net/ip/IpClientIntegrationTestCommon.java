@@ -4111,6 +4111,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
+    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     public void testIpReachabilityMonitor_probeFailed() throws Exception {
         runIpReachabilityMonitorProbeFailedTest();
         assertNotifyNeighborLost(ROUTER_LINK_LOCAL /* targetIp */,
@@ -4159,6 +4160,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
+    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     public void testIpReachabilityMonitor_mcastResolicitProbeFailed() throws Exception {
         runIpReachabilityMonitorMcastResolicitProbeFailedTest();
         assertNotifyNeighborLost(ROUTER_LINK_LOCAL /* targetIp */,
@@ -4301,6 +4303,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
+    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION, enabled = false)
     public void testIpReachabilityMonitor_ignoreIpv4DefaultRouterOrganicNudFailure_flagoff()
             throws Exception {
@@ -4426,6 +4429,7 @@ public abstract class IpClientIntegrationTestCommon {
     @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     public void testIpReachabilityMonitor_incompleteIpv6DnsServerInDualStack_flagoff()
             throws Exception {
         final Inet6Address targetIp = ipv6Addr(IPV6_ON_LINK_DNS_SERVER);
@@ -4448,6 +4452,7 @@ public abstract class IpClientIntegrationTestCommon {
     @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     public void testIpReachabilityMonitor_incompleteIpv6DefaultRouterInDualStack_flagoff()
             throws Exception {
         runIpReachabilityMonitorAddressResolutionTest(IPV6_OFF_LINK_DNS_SERVER,
@@ -4470,6 +4475,7 @@ public abstract class IpClientIntegrationTestCommon {
     @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     public void testIpReachabilityMonitor_ignoreOnLinkIpv6DnsOrganicNudFailure_flagoff()
             throws Exception {
         final Inet6Address targetIp = ipv6Addr(IPV6_ON_LINK_DNS_SERVER);
@@ -4492,6 +4498,7 @@ public abstract class IpClientIntegrationTestCommon {
     @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION, enabled = false)
+    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     public void testIpReachabilityMonitor_ignoreIpv6DefaultRouterOrganicNudFailure_flagoff()
             throws Exception {
         runIpReachabilityMonitorAddressResolutionTest(IPV6_OFF_LINK_DNS_SERVER,
