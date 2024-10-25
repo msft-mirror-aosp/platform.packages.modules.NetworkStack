@@ -37,9 +37,12 @@ import kotlin.test.assertEquals
 const val HOSTNAME = "myhostname"
 const val HOSTNAME1 = "myhostname1"
 const val HOSTNAME2 = "myhostname2"
+const val HOSTNAME3 = "myhostname3"
 const val PROP1 = "ro.product.model"
 const val PROP2 = "ro.product.name"
+const val PROP3 = "ro.vendor.specialname"
 const val PROP_EMPTY = "ro.product.name_empty"
+const val PROP_INVALID = "ro.notproduct.and.notvendor"
 
 /**
  * Unit tests for DhcpClient (currently only for its Dependencies class). Note that most of
@@ -66,6 +69,8 @@ class DhcpClientTest {
         doReturn(HOSTNAME).`when`(deps).getDeviceName(any())
         doReturn(HOSTNAME1).`when`(deps).getSystemProperty(PROP1)
         doReturn(HOSTNAME2).`when`(deps).getSystemProperty(PROP2)
+        doReturn(HOSTNAME2).`when`(deps).getSystemProperty(PROP_INVALID)
+        doReturn(HOSTNAME3).`when`(deps).getSystemProperty(PROP3)
         doReturn("").`when`(deps).getSystemProperty(PROP_EMPTY)
     }
 
@@ -85,7 +90,13 @@ class DhcpClientTest {
         setHostnameProps(arrayOf(PROP1, PROP2))
         assertEquals(HOSTNAME1, deps.getCustomHostname(context))
 
+        setHostnameProps(arrayOf(PROP_INVALID, PROP1, PROP2))
+        assertEquals(HOSTNAME1, deps.getCustomHostname(context))
+
         setHostnameProps(arrayOf(PROP_EMPTY, PROP2))
         assertEquals(HOSTNAME2, deps.getCustomHostname(context))
+
+        setHostnameProps(arrayOf(PROP_EMPTY, PROP3))
+        assertEquals(HOSTNAME3, deps.getCustomHostname(context))
     }
 }

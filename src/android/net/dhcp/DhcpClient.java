@@ -426,6 +426,12 @@ public class DhcpClient extends StateMachine {
             return context.getResources().getBoolean(R.bool.config_dhcp_client_hostname);
         }
 
+        private boolean isValidCustomHostnameProperty(String prop) {
+            return "ro.product.model".equals(prop)
+                    || "ro.product.name".equals(prop)
+                    || prop.startsWith("ro.vendor.");
+        }
+
         /**
          * Get the customized hostname from RRO to fill hostname option.
          */
@@ -436,6 +442,7 @@ public class DhcpClient extends StateMachine {
                 return getDeviceName(context);
             }
             for (final String prop : prefHostnameProps) {
+                if (!isValidCustomHostnameProperty(prop)) continue;
                 String prefHostname = getSystemProperty(prop);
                 if (!TextUtils.isEmpty(prefHostname)) {
                     return prefHostname;
