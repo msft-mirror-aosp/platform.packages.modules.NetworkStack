@@ -65,6 +65,7 @@ import android.annotation.SuppressLint;
 import android.app.AlarmManager;
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.content.res.Resources;
 import android.net.ConnectivityManager;
 import android.net.INetd;
@@ -191,6 +192,7 @@ public class IpClientTest {
     @Mock private PrintWriter mWriter;
     @Mock private IpClientNetlinkMonitor mNetlinkMonitor;
     @Mock private AndroidPacketFilter mApfFilter;
+    @Mock private PackageManager mPackageManager;
 
     private InterfaceParams mIfParams;
     private INetlinkMessageProcessor mNetlinkMessageProcessor;
@@ -216,6 +218,8 @@ public class IpClientTest {
         when(mDependencies.makeIpClientNetlinkMonitor(
                 any(), any(), any(), anyInt(), any())).thenReturn(mNetlinkMonitor);
         when(mNetlinkMonitor.start()).thenReturn(true);
+        when(mContext.getPackageManager()).thenReturn(mPackageManager);
+        when(mPackageManager.hasSystemFeature(eq(PackageManager.FEATURE_WATCH))).thenReturn(false);
 
         mIfParams = null;
     }
@@ -323,7 +327,7 @@ public class IpClientTest {
                         0 /* flags */,
                         0xffffffffL /* change */);
 
-        return new RtNetlinkLinkMessage(nlmsghdr, 0 /* mtu */,  ifInfoMsg, TEST_MAC, ifaceName);
+        return RtNetlinkLinkMessage.build(nlmsghdr, ifInfoMsg, 0 /* mtu */, TEST_MAC, ifaceName);
     }
 
     private void onInterfaceAddressUpdated(final LinkAddress la, int flags) {
@@ -531,19 +535,20 @@ public class IpClientTest {
         final IpClient ipc = makeIpClient(iface);
         final String l2Key = TEST_L2KEY;
         final String cluster = TEST_CLUSTER;
+        final MacAddress bssid = MacAddress.fromString(TEST_BSSID);
 
         ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
                 .withoutIPv4()
                 .withoutIpReachabilityMonitor()
                 .withInitialConfiguration(
                         conf(links(TEST_LOCAL_ADDRESSES), prefixes(TEST_PREFIXES), ips()))
+                .withLayer2Information(new Layer2Information(l2Key, cluster, bssid))
                 .build();
 
         ipc.startProvisioning(config);
         verify(mCb, timeout(TEST_TIMEOUT_MS).times(1)).setNeighborDiscoveryOffload(true);
         verify(mCb, timeout(TEST_TIMEOUT_MS).times(1)).setFallbackMulticastFilter(false);
         verify(mCb, never()).onProvisioningFailure(any());
-        ipc.setL2KeyAndCluster(l2Key, cluster);
 
         for (String addr : TEST_LOCAL_ADDRESSES) {
             String[] parts = addr.split("/");
