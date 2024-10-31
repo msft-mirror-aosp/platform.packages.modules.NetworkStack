@@ -227,6 +227,7 @@ import java.util.Objects;
 import java.util.Random;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 
@@ -321,6 +322,7 @@ public class NetworkMonitorTest {
     private static final int DEFAULT_DNS_TIMEOUT_THRESHOLD = 5;
 
     private static final int HANDLER_TIMEOUT_MS = 1000;
+    private static final int SERIAL_PROBE_GAP_TIME_MS = 500;
     private static final int TEST_MIN_STALL_EVALUATE_INTERVAL_MS = 500;
     private static final int TEST_MIN_VALID_STALL_DNS_TIME_THRESHOLD_MS = 5000;
     private static final int STALL_EXPECTED_LAST_PROBE_TIME_MS =
@@ -374,6 +376,7 @@ public class NetworkMonitorTest {
                 .removeCapability(NET_CAPABILITY_NOT_RESTRICTED);
 
     private FakeDns mFakeDns;
+    private Semaphore mSerialProbeLock;
 
     @GuardedBy("mThreadsToBeCleared")
     private final ArrayList<Thread> mThreadsToBeCleared = new ArrayList<>();
@@ -475,6 +478,7 @@ public class NetworkMonitorTest {
         initHttpConnection(mFallbackConnection);
         initHttpConnection(mOtherFallbackConnection);
 
+        mSerialProbeLock = new Semaphore(0);
         mFakeDns = new FakeDns(mNetwork, mDnsResolver);
         mFakeDns.startMocking();
         // Set private dns suffix answer. sendPrivateDnsProbe() in NetworkMonitor send probe with
@@ -3418,6 +3422,36 @@ public class NetworkMonitorTest {
     }
 
     @Test
+    public void testSerialProbesOnFirstValidNetwork() throws Exception {
+        setupResourceForSerialProbes();
+        setStatus(mOtherHttpsConnection1, 204);
+        runSerialProbesNetworkTest(NETWORK_VALIDATION_RESULT_VALID,
+                NETWORK_VALIDATION_PROBE_DNS | NETWORK_VALIDATION_PROBE_HTTPS);
+        verify(mDependencies, timeout(HANDLER_TIMEOUT_MS).times(2)).sleep(anyInt());
+        verify(mCleartextDnsNetwork, timeout(HANDLER_TIMEOUT_MS).times(2)).openConnection(any());
+    }
+
+    @Test
+    public void testSerialProbesOnSecondValidNetwork() throws Exception {
+        setupResourceForSerialProbes();
+        setStatus(mOtherHttpsConnection2, 204);
+        mSerialProbeLock.release(2);
+        runSerialProbesNetworkTest(NETWORK_VALIDATION_RESULT_VALID,
+                NETWORK_VALIDATION_PROBE_DNS | NETWORK_VALIDATION_PROBE_HTTPS);
+        verify(mDependencies, timeout(HANDLER_TIMEOUT_MS).times(2)).sleep(anyInt());
+        verify(mCleartextDnsNetwork, timeout(HANDLER_TIMEOUT_MS).times(4)).openConnection(any());
+    }
+
+    @Test
+    public void testSerialProbesOnInValidNetwork() throws Exception {
+        setupResourceForSerialProbes();
+        mSerialProbeLock.release(2);
+        runSerialProbesNetworkTest(VALIDATION_RESULT_INVALID, 0);
+        verify(mDependencies, timeout(HANDLER_TIMEOUT_MS).times(2)).sleep(anyInt());
+        verify(mCleartextDnsNetwork, timeout(HANDLER_TIMEOUT_MS).times(4)).openConnection(any());
+    }
+
+    @Test
     public void testIsCaptivePortal_FromExternalSource() throws Exception {
         assumeTrue(CaptivePortalDataShimImpl.isSupported());
         assumeTrue(ShimUtils.isAtLeastS());
@@ -3524,6 +3558,18 @@ public class NetworkMonitorTest {
         verify(mCallbacks, never()).showProvisioningNotification(any(), any());
     }
 
+    private void waitForSerialProbes(int time) throws InterruptedException {
+        mSerialProbeLock.tryAcquire(time, TimeUnit.MILLISECONDS);
+    }
+
+    private void setupResourceForSerialProbes() {
+        doReturn(true).when(mResources)
+                .getBoolean(R.bool.config_probe_multi_http_https_url_serial);
+        doReturn(SERIAL_PROBE_GAP_TIME_MS).when(mResources)
+                .getInteger(R.integer.config_serial_url_probe_gap_time);
+        setupResourceForMultipleProbes();
+    }
+
     private void setupResourceForMultipleProbes() {
         // Configure the resource to send multiple probe.
         doReturn(TEST_HTTPS_URLS).when(mResources)
@@ -3619,6 +3665,17 @@ public class NetworkMonitorTest {
                 VALIDATION_RESULT_INVALID, 0 /* probesSucceeded */, null /* redirectUrl */);
         assertCaptivePortalAppReceiverRegistered(false /* isPortal */);
         return nm;
+    }
+
+    private void runSerialProbesNetworkTest(int testResult, int probesSucceeded) throws Exception {
+        final WrappedNetworkMonitor monitor = makeMonitor(CELL_METERED_CAPABILITIES);
+        notifyNetworkConnected(monitor, TEST_AGENT_CONFIG,
+                TEST_LINK_PROPERTIES, CELL_METERED_CAPABILITIES);
+        doAnswer(invocation -> {
+            waitForSerialProbes(invocation.getArgument(0));
+            return null;
+        }).when(mDependencies).sleep(anyInt());
+        verifyNetworkTested(testResult, probesSucceeded, 1);
     }
 
     private NetworkMonitor runPartialConnectivityNetworkTest(int probesSucceeded)
