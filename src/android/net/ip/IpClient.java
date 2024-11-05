@@ -16,6 +16,7 @@
 
 package android.net.ip;
 
+import static android.content.pm.PackageManager.FEATURE_WATCH;
 import static android.net.IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ROAM;
 import static android.net.IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_CONFIRM;
 import static android.net.IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ORGANIC;
@@ -632,14 +633,12 @@ public class IpClient extends StateMachine {
 
     @VisibleForTesting
     static final String CONFIG_ACCEPT_RA_MIN_LFT = "ipclient_accept_ra_min_lft";
-    @VisibleForTesting
-    static final int DEFAULT_ACCEPT_RA_MIN_LFT = 180;
 
     @VisibleForTesting
     static final String CONFIG_APF_COUNTER_POLLING_INTERVAL_SECS =
             "ipclient_apf_counter_polling_interval_secs";
     @VisibleForTesting
-    static final int DEFAULT_APF_COUNTER_POLLING_INTERVAL_SECS = 1800;
+    static final int DEFAULT_APF_COUNTER_POLLING_INTERVAL_SECS = 300;
 
     // Used to wait for the provisioning to complete eventually and then decide the target
     // network type, which gives the accurate hint to set DTIM multiplier. Per current IPv6
@@ -837,14 +836,23 @@ public class IpClient extends StateMachine {
     private ApfCapabilities mCurrentApfCapabilities;
     private WakeupMessage mIpv6AutoconfTimeoutAlarm = null;
     private boolean mIgnoreNudFailure;
-    // An array of NUD failure event count associated with the query database since the timestamps
-    // in the past, and is always initialized to null in StoppedState. Currently supported array
-    // elements are as follows:
-    // element 0: failures in the past week
-    // element 1: failures in the past day
-    // element 2: failures in the past 6h
+    /**
+     * An array of NUD failure event counts retrieved from the memory store  since the timestamps
+     * in the past, and is always initialized to null in StoppedState. Currently supported array
+     * elements are as follows:
+     * element 0: failures in the past week
+     * element 1: failures in the past day
+     * element 2: failures in the past 6h
+     */
     @Nullable
     private int[] mNudFailureEventCounts = null;
+
+    /**
+     * The number of NUD failure events that were stored in the memory store since this IpClient
+     * was last started. Always set to zero in StoppedState. Used to prevent writing excessive NUD
+     * failure events to the memory store.
+     */
+    private int mNudFailuresStoredSinceStart = 0;
 
     /**
      * Reading the snapshot is an asynchronous operation initiated by invoking
@@ -1051,8 +1059,9 @@ public class IpClient extends StateMachine {
         mDhcp6PrefixDelegationEnabled = mDependencies.isFeatureEnabled(mContext,
                 IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION);
 
+        final boolean isWatch = mContext.getPackageManager().hasSystemFeature(FEATURE_WATCH);
         mAcceptRaMinLft = mDependencies.getDeviceConfigPropertyInt(CONFIG_ACCEPT_RA_MIN_LFT,
-                DEFAULT_ACCEPT_RA_MIN_LFT);
+                isWatch ? 900 : 180);
         mApfCounterPollingIntervalMs = mDependencies.getDeviceConfigPropertyInt(
                 CONFIG_APF_COUNTER_POLLING_INTERVAL_SECS,
                 DEFAULT_APF_COUNTER_POLLING_INTERVAL_SECS) * DateUtils.SECOND_IN_MILLIS;
@@ -2519,11 +2528,24 @@ public class IpClient extends StateMachine {
 
     // In order to avoid overflowing the database (the maximum is 10MB) in case of a NUD failure
     // happens frequently (e.g, every 30s in a broken network), we stop writing the NUD failure
-    // event to database if the event count in past 6h has exceeded the daily threshold.
+    // event to database if the total event count in past 6h, plus the number of events written
+    // since IpClient was started, has exceeded the daily threshold.
+    //
+    // The code also counts the number of events written since this IpClient was last started.
+    // Otherwise, if NUD failures are already being ignored due to a (daily or weekly) threshold
+    // being hit by events that happened more than 6 hours ago, but there have been no failures in
+    // the last 6 hours, the code would never stop logging failures (filling up the memory store)
+    // until IpClient is restarted and queries the memory store again.
+    //
+    // The 6-hour count is still useful, even though the code looks at the number of NUD failures
+    // since IpClient was last started, because it ensures that even if the network disconnects and
+    // reconnects frequently for any other reason, the code will never store more than 10 NUD
+    // failures every 6 hours.
     private boolean shouldStopWritingNudFailureEventToDatabase() {
         // NUD failure query has not completed yet.
         if (mNudFailureEventCounts == null) return true;
-        return mNudFailureEventCounts[2] >= mNudFailureCountDailyThreshold;
+        return mNudFailureEventCounts[2] + mNudFailuresStoredSinceStart
+                >= mNudFailureCountDailyThreshold;
     }
 
     private void maybeStoreNudFailureToDatabase(final NudEventType type) {
@@ -2542,6 +2564,7 @@ public class IpClient extends StateMachine {
                         Log.e(TAG, "Failed to store NUD failure event");
                     }
                 });
+        mNudFailuresStoredSinceStart++;
         if (DBG) {
             Log.d(TAG, "store network event " + type
                     + " at " + now
@@ -2782,6 +2805,7 @@ public class IpClient extends StateMachine {
             mMulticastNsSourceAddresses.clear();
             mDelegatedPrefixes.clear();
             mNudFailureEventCounts = null;
+            mNudFailuresStoredSinceStart = 0;
 
             resetLinkProperties();
             if (mStartTimeMillis > 0) {
