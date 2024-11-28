@@ -45,6 +45,7 @@ import static android.net.ip.IpClient.CONFIG_NUD_FAILURE_COUNT_WEEKLY_THRESHOLD;
 import static android.net.ip.IpClient.DEFAULT_APF_COUNTER_POLLING_INTERVAL_SECS;
 import static android.net.ip.IpClient.DEFAULT_NUD_FAILURE_COUNT_DAILY_THRESHOLD;
 import static android.net.ip.IpClient.DEFAULT_NUD_FAILURE_COUNT_WEEKLY_THRESHOLD;
+import static android.net.ip.IpClient.NETWORK_EVENT_NUD_FAILURE_TYPES;
 import static android.net.ip.IpClient.ONE_DAY_IN_MS;
 import static android.net.ip.IpClient.ONE_WEEK_IN_MS;
 import static android.net.ip.IpClient.SIX_HOURS_IN_MS;
@@ -126,7 +127,6 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import android.app.AlarmManager;
@@ -176,6 +176,7 @@ import android.net.dhcp6.Dhcp6SolicitPacket;
 import android.net.ipmemorystore.NetworkAttributes;
 import android.net.ipmemorystore.OnNetworkAttributesRetrievedListener;
 import android.net.ipmemorystore.OnNetworkEventCountRetrievedListener;
+import android.net.ipmemorystore.OnStatusListener;
 import android.net.ipmemorystore.Status;
 import android.net.networkstack.TestNetworkStackServiceClient;
 import android.net.networkstack.aidl.dhcp.DhcpOption;
@@ -834,7 +835,19 @@ public abstract class IpClientIntegrationTestCommon {
         when(mPackageManager.getPackagesForUid(TEST_DEVICE_OWNER_APP_UID)).thenReturn(
                 new String[] { TEST_DEVICE_OWNER_APP_PACKAGE });
 
-        // Retrieve the network event count.
+        // Store a network event to db.
+        doAnswer(invocation -> {
+            final String cluster = invocation.getArgument(0);
+            final long timestamp = invocation.getArgument(1);
+            final long expiry = invocation.getArgument(2);
+            final int eventType = invocation.getArgument(3);
+            storeNetworkEvent(cluster, timestamp, expiry, eventType);
+            ((OnStatusListener) invocation.getArgument(4)).onComplete(new Status(SUCCESS));
+            return null;
+        }).when(mIpMemoryStore).storeNetworkEvent(eq(TEST_CLUSTER), anyLong(), anyLong(), anyInt(),
+                any());
+
+        // Retrieve the network event count from db.
         doAnswer(invocation -> {
             final String cluster = invocation.getArgument(0);
             final long[] sinceTimes = invocation.getArgument(1);
@@ -6136,6 +6149,20 @@ public abstract class IpClientIntegrationTestCommon {
                 NudEventType.NUD_POST_ROAMING_FAILED_CRITICAL);
     }
 
+    private void assertRetrievedNetworkEventCount(String cluster, int expectedCountInPastWeek,
+            int expectedCountInPastDay, int expectedCountInPastSixHours) {
+        final long now = System.currentTimeMillis();
+        final long[] sinceTimes = new long[3];
+        sinceTimes[0] = now - ONE_WEEK_IN_MS;
+        sinceTimes[1] = now - ONE_DAY_IN_MS;
+        sinceTimes[2] = now - SIX_HOURS_IN_MS;
+        final int[] counts = getStoredNetworkEventCount(cluster, sinceTimes,
+                NETWORK_EVENT_NUD_FAILURE_TYPES, TEST_TIMEOUT_MS);
+        assertEquals(expectedCountInPastWeek, counts[0]);
+        assertEquals(expectedCountInPastDay, counts[1]);
+        assertEquals(expectedCountInPastSixHours, counts[2]);
+    }
+
     @Test
     @Flag(name = IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION, enabled = true)
     @SignatureRequiredTest(reason = "need to delete cluster from real db in tearDown")
@@ -6147,8 +6174,8 @@ public abstract class IpClientIntegrationTestCommon {
         runIpReachabilityMonitorAddressResolutionTest(IPV6_OFF_LINK_DNS_SERVER,
                 ROUTER_LINK_LOCAL /* targetIp */,
                 false /* expectNeighborLost */);
-        verify(mIpMemoryStore, never()).storeNetworkEvent(any(), anyLong(), anyLong(),
-                eq(IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ORGANIC), any());
+        assertRetrievedNetworkEventCount(TEST_CLUSTER, 10 /* expectedCountInPastWeek */,
+                10 /* expectedCountInPastDay */, 10 /* expectedCountInPastSixHours */);
     }
 
     @Test
@@ -6172,18 +6199,19 @@ public abstract class IpClientIntegrationTestCommon {
                 ROUTER_LINK_LOCAL);
 
         // The first new failure is ignored and written to the database.
-        // The total is 10 failures in the last 6 hours.
+        // The total is 10 failures in the last 6 hours, and 20 failures
+        // in the past week and day.
         sendPacketToUnreachableNeighbor(ipv6Addr(IPV6_OFF_LINK_DNS_SERVER));
         expectAndDropMulticastNses(ROUTER_LINK_LOCAL, false /* expectNeighborLost */);
-        verify(mIpMemoryStore).storeNetworkEvent(any(), anyLong(), anyLong(),
-                eq(IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ORGANIC), any());
+        assertRetrievedNetworkEventCount(TEST_CLUSTER, 20 /* expectedCountInPastWeek */,
+                20 /* expectedCountInPastDay */, 10 /* expectedCountInPastSixHours */);
 
         // The second new failure is ignored, but not written.
-        reset(mIpMemoryStore);
         sendPacketToUnreachableNeighbor(ipv6Addr(IPV6_ON_LINK_DNS_SERVER));
         expectAndDropMulticastNses(ipv6Addr(IPV6_ON_LINK_DNS_SERVER),
                 false /* expectNeighborLost */);
-        verifyNoMoreInteractions(mIpMemoryStore);
+        assertRetrievedNetworkEventCount(TEST_CLUSTER, 20 /* expectedCountInPastWeek */,
+                20 /* expectedCountInPastDay */, 10 /* expectedCountInPastSixHours */);
     }
 
     @Test
@@ -6199,8 +6227,12 @@ public abstract class IpClientIntegrationTestCommon {
         runIpReachabilityMonitorAddressResolutionTest(IPV6_OFF_LINK_DNS_SERVER,
                 ROUTER_LINK_LOCAL /* targetIp */,
                 true /* expectNeighborLost */);
-        verify(mIpMemoryStore, never()).storeNetworkEvent(any(), anyLong(), anyLong(),
-                eq(IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ORGANIC), any());
+
+        // Given that total NUD failure event counts in the past 6 hours has been up to the
+        // threshold, the new NUD failure event will not be written to db, then the retrieved
+        // event count should still be 10.
+        assertRetrievedNetworkEventCount(TEST_CLUSTER, 10 /* expectedCountInPastWeek */,
+                10 /* expectedCountInPastDay */, 10 /* expectedCountInPastSixHours */);
     }
 
     @Test
@@ -6218,7 +6250,11 @@ public abstract class IpClientIntegrationTestCommon {
                 true /* expectNeighborLost */);
         assertNotifyNeighborLost(ROUTER_LINK_LOCAL /* targetIp */,
                 NudEventType.NUD_ORGANIC_FAILED_CRITICAL);
-        verify(mIpMemoryStore).storeNetworkEvent(any(), anyLong(), anyLong(),
-                eq(IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ORGANIC), any());
+
+        // Given that total NUD failure event counts in the past 6 hours doesn't exceed the
+        // threshold yet, the new NUD failure event will be written to db, then the retrieved
+        // event count should be 10.
+        assertRetrievedNetworkEventCount(TEST_CLUSTER, 10 /* expectedCountInPastWeek */,
+                10 /* expectedCountInPastDay */, 10 /* expectedCountInPastSixHours */);
     }
 }
