@@ -298,7 +298,7 @@ public abstract class IpClientIntegrationTestCommon {
     private static final String TAG = IpClientIntegrationTestCommon.class.getSimpleName();
     private static final int DATA_BUFFER_LEN = 4096;
     private static final int PACKET_TIMEOUT_MS = 5_000;
-    private static final String TEST_CLUSTER = "some cluster";
+    protected static final String TEST_CLUSTER = "some cluster";
     private static final int TEST_LEASE_DURATION_S = 3_600; // 1 hour
     private static final int TEST_IPV6_ONLY_WAIT_S = 1_800; // 30 min
     private static final int TEST_LOWER_IPV6_ONLY_WAIT_S = (int) (MIN_V6ONLY_WAIT_MS / 1000 - 1);
@@ -6050,7 +6050,6 @@ public abstract class IpClientIntegrationTestCommon {
 
     @Test
     @Flag(name = IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION, enabled = true)
-    @SignatureRequiredTest(reason = "need to delete cluster from real db in tearDown")
     public void testIgnoreNudFailuresIfTooManyInPastDay() throws Exception {
         // // NUD failure event count exceeds daily threshold nor weekly.
         final long when = System.currentTimeMillis() - ONE_DAY_IN_MS / 2; // 12h ago
@@ -6064,7 +6063,6 @@ public abstract class IpClientIntegrationTestCommon {
     @Test
     @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION, enabled = false)
-    @SignatureRequiredTest(reason = "need to delete cluster from real db in tearDown")
     public void testIgnoreNudFailuresIfTooManyInPastDay_flagOff() throws Exception {
         // NUD failure event count exceeds daily threshold nor weekly.
         final long when = System.currentTimeMillis() - ONE_DAY_IN_MS / 2; // 12h ago
@@ -6079,7 +6077,6 @@ public abstract class IpClientIntegrationTestCommon {
     @Test
     @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION, enabled = true)
-    @SignatureRequiredTest(reason = "need to delete cluster from real db in tearDown")
     public void testIgnoreNudFailuresIfTooManyInPastDay_notUpToThreshold()
             throws Exception {
         // NUD failure event count doesn't exceed either weekly threshold nor daily.
@@ -6094,7 +6091,6 @@ public abstract class IpClientIntegrationTestCommon {
 
     @Test
     @Flag(name = IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION, enabled = true)
-    @SignatureRequiredTest(reason = "need to delete cluster from real db in tearDown")
     public void testIgnoreNudFailuresIfTooManyInPastWeek() throws Exception {
         // NUD failure event count exceeds the weekly threshold, but not daily threshold in the past
         // day.
@@ -6113,7 +6109,6 @@ public abstract class IpClientIntegrationTestCommon {
     @Test
     @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION, enabled = false)
-    @SignatureRequiredTest(reason = "need to delete cluster from real db in tearDown")
     public void testIgnoreNudFailuresIfTooManyInPastWeek_flagOff() throws Exception {
         // NUD failure event count exceeds the weekly threshold, but not daily threshold in the past
         // day.
@@ -6133,7 +6128,6 @@ public abstract class IpClientIntegrationTestCommon {
     @Test
     @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION, enabled = true)
-    @SignatureRequiredTest(reason = "need to delete cluster from real db in tearDown")
     public void testIgnoreNudFailuresIfTooManyInPastWeek_notUpToThreshold() throws Exception {
         // NUD failure event count doesn't exceed either weekly threshold nor daily.
         long when = System.currentTimeMillis() - ONE_WEEK_IN_MS / 2; // half a week ago
@@ -6165,7 +6159,6 @@ public abstract class IpClientIntegrationTestCommon {
 
     @Test
     @Flag(name = IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION, enabled = true)
-    @SignatureRequiredTest(reason = "need to delete cluster from real db in tearDown")
     public void testIgnoreNudFailuresIfTooManyInPastWeek_stopWritingEvent() throws Exception {
         long when = (long) (System.currentTimeMillis() - SIX_HOURS_IN_MS * 0.9);
         long expiry = when + ONE_WEEK_IN_MS;
@@ -6183,7 +6176,6 @@ public abstract class IpClientIntegrationTestCommon {
     @Flag(name = IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION, enabled = true)
-    @SignatureRequiredTest(reason = "need to delete cluster from real db in tearDown")
     public void testIgnoreNudFailuresStopWritingEvents() throws Exception {
         // Add enough failures that NUD failures are ignored.
         long when = (long) (System.currentTimeMillis() - SIX_HOURS_IN_MS * 1.1);
@@ -6217,7 +6209,6 @@ public abstract class IpClientIntegrationTestCommon {
     @Test
     @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION, enabled = false)
-    @SignatureRequiredTest(reason = "need to delete cluster from real db in tearDown")
     public void testIgnoreNudFailuresIfTooManyInPastWeek_stopWritingEvent_flagOff()
             throws Exception {
         long when = (long) (System.currentTimeMillis() - SIX_HOURS_IN_MS * 0.9);
@@ -6238,7 +6229,6 @@ public abstract class IpClientIntegrationTestCommon {
     @Test
     @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION, enabled = true)
-    @SignatureRequiredTest(reason = "need to delete cluster from real db in tearDown")
     public void testIgnoreNudFailuresIfTooManyInPastWeek_stopWritingEvent_notUpToThreshold()
             throws Exception {
         long when = (long) (System.currentTimeMillis() - SIX_HOURS_IN_MS * 0.9);
