@@ -389,7 +389,8 @@ public class IpClientLinkObserver {
                             | NetlinkConstants.RTMGRP_LINK
                             | NetlinkConstants.RTMGRP_IPV4_IFADDR
                             | NetlinkConstants.RTMGRP_IPV6_IFADDR
-                            | NetlinkConstants.RTMGRP_IPV6_ROUTE),
+                            | NetlinkConstants.RTMGRP_IPV6_ROUTE
+                            | NetlinkConstants.RTMGRP_IPV6_PREFIX),
                     sockRcvbufSize);
             mHandler = h;
             mNetlinkMessageProcessor = p;
