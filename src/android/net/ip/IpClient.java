@@ -85,6 +85,7 @@ import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ARP_OFF
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ND_OFFLOAD;
 import static com.android.networkstack.util.NetworkStackUtils.APF_NEW_RA_FILTER_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.APF_POLLING_COUNTERS_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PD_PREFERRED_FLAG_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION;
@@ -812,6 +813,7 @@ public class IpClient extends StateMachine {
     private final boolean mApfShouldHandleNdOffload;
     private final boolean mApfShouldHandleMdnsOffload;
     private final boolean mIgnoreNudFailureEnabled;
+    private final boolean mDhcp6PdPreferredFlagEnabled;
 
     private InterfaceParams mInterfaceParams;
 
@@ -1091,6 +1093,8 @@ public class IpClient extends StateMachine {
         mNudFailureCountWeeklyThreshold = mDependencies.getDeviceConfigPropertyInt(
                 CONFIG_NUD_FAILURE_COUNT_WEEKLY_THRESHOLD,
                 DEFAULT_NUD_FAILURE_COUNT_WEEKLY_THRESHOLD);
+        mDhcp6PdPreferredFlagEnabled =
+                mDependencies.isFeatureEnabled(mContext, IPCLIENT_DHCPV6_PD_PREFERRED_FLAG_VERSION);
 
         IpClientLinkObserver.Configuration config = new IpClientLinkObserver.Configuration(
                 mAcceptRaMinLft, mPopulateLinkAddressLifetime);
@@ -1143,6 +1147,7 @@ public class IpClient extends StateMachine {
 
                     @Override
                     public void onNewPrefix(PrefixInfo info) {
+                        if (!mDhcp6PdPreferredFlagEnabled) return;
                         sendMessage(EVENT_PIO_PREFIX_UPDATE, info);
                     }
                 },
