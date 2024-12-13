@@ -350,6 +350,10 @@ public class ApfFilter implements AndroidPacketFilter {
     // Our tentative IPv6 addresses
     private Set<Inet6Address> mIPv6TentativeAddresses = new ArraySet<>();
 
+    // Our joined IPv4 multicast addresses
+    @VisibleForTesting
+    public Set<Inet4Address> mIPv4MulticastAddresses = new ArraySet<>();
+
     // Whether CLAT is enabled.
     private boolean mHasClat;
 
@@ -602,6 +606,14 @@ public class ApfFilter implements AndroidPacketFilter {
          */
         public int getNdTrafficClass(@NonNull String ifname) {
             return ProcfsParsingUtils.getNdTrafficClass(ifname);
+        }
+
+        /**
+         * Loads the existing IPv4 multicast addresses from the file
+         * `/proc/net/igmp`.
+         */
+        public List<Inet4Address> getIPv4MulticastAddresses(@NonNull String ifname) {
+            return ProcfsParsingUtils.getIPv4MulticastAddresses(ifname);
         }
     }
 
@@ -1321,7 +1333,7 @@ public class ApfFilter implements AndroidPacketFilter {
 
         NattKeepaliveResponse(final NattKeepalivePacketDataParcelable sentKeepalivePacket) {
             mPacket = new NattKeepaliveResponseData(sentKeepalivePacket);
-            mSrcDstAddr = concatArrays(mPacket.srcAddress, mPacket.dstAddress);
+            mSrcDstAddr = CollectionUtils.concatArrays(mPacket.srcAddress, mPacket.dstAddress);
             mPortFingerprint = generatePortFingerprint(mPacket.srcPort, mPacket.dstPort);
         }
 
@@ -1445,7 +1457,8 @@ public class ApfFilter implements AndroidPacketFilter {
             this(new TcpKeepaliveAckData(sentKeepalivePacket));
         }
         TcpKeepaliveAckV4(final TcpKeepaliveAckData packet) {
-            super(packet, concatArrays(packet.srcAddress, packet.dstAddress) /* srcDstAddr */);
+            super(packet, CollectionUtils.concatArrays(packet.srcAddress,
+                    packet.dstAddress) /* srcDstAddr */);
         }
 
         @Override
@@ -1487,7 +1500,8 @@ public class ApfFilter implements AndroidPacketFilter {
             this(new TcpKeepaliveAckData(sentKeepalivePacket));
         }
         TcpKeepaliveAckV6(final TcpKeepaliveAckData packet) {
-            super(packet, concatArrays(packet.srcAddress, packet.dstAddress) /* srcDstAddr */);
+            super(packet, CollectionUtils.concatArrays(packet.srcAddress,
+                    packet.dstAddress) /* srcDstAddr */);
         }
 
         @Override
@@ -2681,6 +2695,17 @@ public class ApfFilter implements AndroidPacketFilter {
     }
 
     @Override
+    public void updateIPv4MulticastAddrs() {
+        final Set<Inet4Address> mcastAddrs =
+                new ArraySet<>(mDependencies.getIPv4MulticastAddresses(mInterfaceParams.name));
+
+        if (!mIPv4MulticastAddresses.equals(mcastAddrs)) {
+            mIPv4MulticastAddresses = mcastAddrs;
+            installNewProgram();
+        }
+    }
+
+    @Override
     public boolean supportNdOffload() {
         return shouldUseApfV6Generator() && mShouldHandleNdOffload;
     }
@@ -3008,20 +3033,6 @@ public class ApfFilter implements AndroidPacketFilter {
                 + (uint8(bytes[1]) << 16)
                 + (uint8(bytes[2]) << 8)
                 + (uint8(bytes[3]));
-    }
-
-    private static byte[] concatArrays(final byte[]... arr) {
-        int size = 0;
-        for (byte[] a : arr) {
-            size += a.length;
-        }
-        final byte[] result = new byte[size];
-        int offset = 0;
-        for (byte[] a : arr) {
-            System.arraycopy(a, 0, result, offset, a.length);
-            offset += a.length;
-        }
-        return result;
     }
 
     private void sendNetworkQuirkMetrics(final NetworkQuirkEvent event) {
