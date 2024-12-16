@@ -42,11 +42,11 @@ import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NON_ICMP_MULTICAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_INVALID
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_OTHER_HOST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_REPLIED_NON_DAD
-import android.net.apf.ApfCounterTracker.Counter.PASSED_ETHER_OUR_SRC_MAC
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_BROADCAST_REPLY
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_REQUEST
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_UNICAST_REPLY
 import android.net.apf.ApfCounterTracker.Counter.PASSED_DHCP
+import android.net.apf.ApfCounterTracker.Counter.PASSED_ETHER_OUR_SRC_MAC
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV4
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV4_FROM_DHCPV4_SERVER
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV4_UNICAST
@@ -98,6 +98,7 @@ import com.android.testutils.DevSdkIgnoreRunner
 import com.android.testutils.quitResources
 import com.android.testutils.waitForIdle
 import java.io.FileDescriptor
+import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
 import kotlin.test.assertContentEquals
@@ -149,7 +150,7 @@ class ApfFilterTest {
     @Mock private lateinit var nsdManager: NsdManager
 
     @GuardedBy("mApfFilterCreated")
-    private val mApfFilterCreated = ArrayList<AndroidPacketFilter>()
+    private val mApfFilterCreated = ArrayList<ApfFilter>()
     private val loInterfaceParams = InterfaceParams.getByName("lo")
     private val ifParams =
         InterfaceParams(
@@ -236,7 +237,7 @@ class ApfFilterTest {
                 mApfFilterCreated.clear()
                 return@quitResources ret
             }
-        }, { apf: AndroidPacketFilter ->
+        }, { apf: ApfFilter ->
             handler.post { apf.shutdown() }
         })
 
@@ -2139,5 +2140,30 @@ class ApfFilterTest {
         apfFilter.resume()
         val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
         assertContentEquals(ByteArray(4096) { 0 }, program)
+    }
+
+    @Test
+    fun testApfIPv4MulticastAddrsUpdate() {
+        val apfFilter = getApfFilter()
+        // mock IPv4 multicast address from /proc/net/igmp
+        val mcastAddrs = mutableListOf(
+            InetAddress.getByName("224.0.0.1") as Inet4Address
+        )
+        consumeInstalledProgram(ipClientCallback, installCnt = 2)
+
+        doReturn(mcastAddrs).`when`(dependencies).getIPv4MulticastAddresses(any())
+        apfFilter.updateIPv4MulticastAddrs()
+        consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        assertEquals(mcastAddrs.toSet(), apfFilter.mIPv4MulticastAddresses)
+
+        val addr = InetAddress.getByName("239.0.0.1") as Inet4Address
+        mcastAddrs.add(addr)
+        doReturn(mcastAddrs).`when`(dependencies).getIPv4MulticastAddresses(any())
+        apfFilter.updateIPv4MulticastAddrs()
+        consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        assertEquals(mcastAddrs.toSet(), apfFilter.mIPv4MulticastAddresses)
+
+        apfFilter.updateIPv4MulticastAddrs()
+        verify(ipClientCallback, never()).installPacketFilter(any())
     }
 }
