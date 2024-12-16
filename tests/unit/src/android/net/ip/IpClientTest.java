@@ -352,7 +352,6 @@ public class IpClientTest {
         mNetlinkMessageProcessor.processNetlinkMessage(msg, TEST_UNUSED_REAL_TIME /* whenMs */);
     }
 
-
     @Test
     public void testNullInterfaceNameMostDefinitelyThrows() throws Exception {
         setTestInterfaceParams(null);
@@ -976,6 +975,46 @@ public class IpClientTest {
         verify(mDependencies, never()).maybeCreateApfFilter(any(), any(), any(), any(), any(),
                 any());
         verifyShutdown(ipc);
+    }
+
+    @Test
+    public void testApfUpdateCapabilities_raceBetweenStopAndStartIpClient() throws Exception {
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
+        ProvisioningConfiguration.Builder config = new ProvisioningConfiguration.Builder()
+                .withoutIPv4()
+                .withoutIpReachabilityMonitor()
+                .withInitialConfiguration(
+                        conf(links(TEST_LOCAL_ADDRESSES), prefixes(TEST_PREFIXES), ips()))
+                .withApfCapabilities(new ApfCapabilities(4 /* version */,
+                    4096 /* maxProgramSize */, ARPHRD_ETHER));
+        ipc.startProvisioning(config.build());
+
+        // Verify that APF filter can be created successfully.
+        ArgumentCaptor<ApfConfiguration> configCaptor = ArgumentCaptor.forClass(
+                ApfConfiguration.class);
+        verify(mDependencies, timeout(TEST_TIMEOUT_MS)).maybeCreateApfFilter(
+                any(), any(), configCaptor.capture(), any(), any(), any());
+        ApfConfiguration apfConfig = configCaptor.getValue();
+        assertEquals(SdkLevel.isAtLeastS() ? 4 : 3, apfConfig.apfVersionSupported);
+        assertEquals(4096, apfConfig.apfRamSize);
+
+        clearInvocations(mDependencies);
+
+        // Simulate stopping IpClient and restarting provisioning immediately, verify IpClient
+        // fails to create APF filter due to below race:
+        //     - stop() sends CMD_STOP to IpClient state machine, queues the command and return
+        //     - startProvisioning() sets the ApfCapabilities to non-null with prov configuration
+        //       and then sends CMD_START to IpClient state machine, queues the command and return
+        //     - IpClient state machine handles CMD_STOP and transits to StoppingState from
+        //       RunningState, sets ApfCapabilities to null at StartedState#exit
+        //     - IpClient state machine goes back to StoppedState eventually
+        //     - IpClient state machine handles CMD_START, and transits to RunningState
+        //     - Fail to create the APF filter with null ApfCapabilities
+        ipc.stop();
+        ipc.startProvisioning(config.build());
+        HandlerUtils.waitForIdle(ipc.getHandler(), TEST_TIMEOUT_MS);
+        verify(mDependencies, never()).maybeCreateApfFilter(any(), any(), any(), any(), any(),
+                any());
     }
 
     @Test
