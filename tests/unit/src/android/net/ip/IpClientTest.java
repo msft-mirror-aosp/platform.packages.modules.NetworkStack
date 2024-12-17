@@ -1001,20 +1001,18 @@ public class IpClientTest {
         clearInvocations(mDependencies);
 
         // Simulate stopping IpClient and restarting provisioning immediately, verify IpClient
-        // fails to create APF filter due to below race:
-        //     - stop() sends CMD_STOP to IpClient state machine, queues the command and return
-        //     - startProvisioning() sets the ApfCapabilities to non-null with prov configuration
-        //       and then sends CMD_START to IpClient state machine, queues the command and return
-        //     - IpClient state machine handles CMD_STOP and transits to StoppingState from
-        //       RunningState, sets ApfCapabilities to null at StartedState#exit
-        //     - IpClient state machine goes back to StoppedState eventually
-        //     - IpClient state machine handles CMD_START, and transits to RunningState
-        //     - Fail to create the APF filter with null ApfCapabilities
+        // can still create APF filter successfully, make sure the race of mApfCapabilities
+        // initialization has been fixed.
         ipc.stop();
+        // Update the maxProgramSize to differentiate with above APF config.
+        config.withApfCapabilities(new ApfCapabilities(4 /* version */,
+                2048 /* maxProgramSize */, ARPHRD_ETHER));
         ipc.startProvisioning(config.build());
-        HandlerUtils.waitForIdle(ipc.getHandler(), TEST_TIMEOUT_MS);
-        verify(mDependencies, never()).maybeCreateApfFilter(any(), any(), any(), any(), any(),
-                any());
+        verify(mDependencies, timeout(TEST_TIMEOUT_MS)).maybeCreateApfFilter(
+                any(), any(), configCaptor.capture(), any(), any(), any());
+        apfConfig = configCaptor.getValue();
+        assertEquals(SdkLevel.isAtLeastS() ? 4 : 3, apfConfig.apfVersionSupported);
+        assertEquals(2048, apfConfig.apfRamSize);
     }
 
     @Test
