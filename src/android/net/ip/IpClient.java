@@ -1052,8 +1052,8 @@ public class IpClient extends StateMachine {
         mNetd = deps.getNetd(mContext);
         mInterfaceCtrl = new InterfaceController(mInterfaceName, mNetd, mLog);
 
-        mDhcp6PrefixDelegationEnabled = mDependencies.isFeatureEnabled(mContext,
-                IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION);
+        mDhcp6PrefixDelegationEnabled = mDependencies.isFeatureNotChickenedOut(
+                mContext, IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION);
 
         mAcceptRaMinLft = mDependencies.getDeviceConfigPropertyInt(CONFIG_ACCEPT_RA_MIN_LFT,
                 DEFAULT_ACCEPT_RA_MIN_LFT);
