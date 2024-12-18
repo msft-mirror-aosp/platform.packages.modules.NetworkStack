@@ -19,12 +19,14 @@ package android.net.ip
 import android.Manifest.permission.INTERACT_ACROSS_USERS_FULL
 import android.Manifest.permission.NETWORK_SETTINGS
 import android.Manifest.permission.READ_DEVICE_CONFIG
+import android.Manifest.permission.WRITE_ALLOWLISTED_DEVICE_CONFIG
 import android.Manifest.permission.WRITE_DEVICE_CONFIG
 import android.net.IIpMemoryStore
 import android.net.IIpMemoryStoreCallbacks
 import android.net.NetworkStackIpMemoryStore
 import android.net.ipmemorystore.NetworkAttributes
 import android.net.ipmemorystore.OnNetworkAttributesRetrievedListener
+import android.net.ipmemorystore.OnNetworkEventCountRetrievedListener
 import android.net.ipmemorystore.Status
 import android.net.networkstack.TestNetworkStackServiceClient
 import android.os.Process
@@ -39,6 +41,7 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -161,6 +164,7 @@ class IpClientRootTest : IpClientIntegrationTestCommon() {
         // Delete the IpMemoryStore entry corresponding to TEST_L2KEY, make sure each test starts
         // from a clean state.
         mStore.delete(TEST_L2KEY, true) { _, _ -> latch.countDown() }
+        mStore.deleteCluster(TEST_CLUSTER, true) { _, _ -> latch.countDown() }
         assertTrue(latch.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS))
     }
 
@@ -189,7 +193,11 @@ class IpClientRootTest : IpClientIntegrationTestCommon() {
     private val mOriginalPropertyValues = ArrayMap<String, String>()
 
     override fun setDeviceConfigProperty(name: String?, value: String?) {
-        automation.adoptShellPermissionIdentity(READ_DEVICE_CONFIG, WRITE_DEVICE_CONFIG)
+        automation.adoptShellPermissionIdentity(
+            READ_DEVICE_CONFIG,
+            WRITE_DEVICE_CONFIG,
+            WRITE_ALLOWLISTED_DEVICE_CONFIG
+        )
         try {
             // Do not use computeIfAbsent as it would overwrite null values,
             // property originally unset.
@@ -212,7 +220,11 @@ class IpClientRootTest : IpClientIntegrationTestCommon() {
     @After
     fun tearDownDeviceConfigProperties() {
         if (testSkipped()) return
-        automation.adoptShellPermissionIdentity(READ_DEVICE_CONFIG, WRITE_DEVICE_CONFIG)
+        automation.adoptShellPermissionIdentity(
+            READ_DEVICE_CONFIG,
+            WRITE_DEVICE_CONFIG,
+            WRITE_ALLOWLISTED_DEVICE_CONFIG
+        )
         try {
             for (key in mOriginalPropertyValues.keys) {
                 if (key == null) continue
@@ -250,6 +262,23 @@ class IpClientRootTest : IpClientIntegrationTestCommon() {
         }
     }
 
+    private class TestNetworkEventCountRetrievedListener : OnNetworkEventCountRetrievedListener {
+        private val future = CompletableFuture<IntArray>()
+        override fun onNetworkEventCountRetrieved(
+            status: Status,
+            counts: IntArray
+        ) {
+            if (status.resultCode != Status.SUCCESS) {
+                fail("retrieved the network event count " + " status: " + status.resultCode)
+            }
+            future.complete(counts)
+        }
+
+        fun getBlockingNetworkEventCount(timeout: Long): IntArray {
+            return future.get(timeout, TimeUnit.MILLISECONDS)
+        }
+    }
+
     override fun getStoredNetworkAttributes(l2Key: String, timeout: Long): NetworkAttributes {
         val listener = TestAttributesRetrievedListener()
         mStore.retrieveNetworkAttributes(l2Key, listener)
@@ -266,6 +295,23 @@ class IpClientRootTest : IpClientIntegrationTestCommon() {
 
     override fun storeNetworkAttributes(l2Key: String, na: NetworkAttributes) {
         mStore.storeNetworkAttributes(l2Key, na, null /* listener */)
+    }
+
+    override fun storeNetworkEvent(cluster: String, now: Long, expiry: Long, eventType: Int) {
+        mStore.storeNetworkEvent(cluster, now, expiry, eventType, null /* listener */)
+    }
+
+    override fun getStoredNetworkEventCount(
+            cluster: String,
+            sinceTimes: LongArray,
+            eventType: IntArray,
+            timeout: Long
+    ): IntArray {
+        val listener = TestNetworkEventCountRetrievedListener()
+        mStore.retrieveNetworkEventCount(cluster, sinceTimes, eventType, listener)
+        val counts = listener.getBlockingNetworkEventCount(timeout)
+        assertFalse(counts.size == 0)
+        return counts
     }
 
     private fun readNudSolicitNumFromResource(name: String): Int {

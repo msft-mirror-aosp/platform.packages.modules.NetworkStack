@@ -16,6 +16,10 @@
 
 package com.android.networkstack.ipmemorystore;
 
+import static android.net.ip.IpClient.NETWORK_EVENT_NUD_FAILURE_TYPES;
+import static android.net.ip.IpClient.ONE_DAY_IN_MS;
+import static android.net.ip.IpClient.ONE_WEEK_IN_MS;
+import static android.net.ip.IpClient.SIX_HOURS_IN_MS;
 import static android.net.IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ROAM;
 import static android.net.IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_CONFIRM;
 import static android.net.IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ORGANIC;
@@ -113,18 +117,10 @@ public class IpMemoryStoreServiceTest {
     private static final long LEASE_EXPIRY_NULL = -1L;
     private static final long UNIX_TIME_MS_2000_01_01 = 946652400000L;
     private static final long UNIX_TIME_MS_2100_01_01 = 4102412400000L;
-    private static final long ONE_DAY_IN_MS = 24 * 3600 * 1000;
-    private static final long ONE_WEEK_IN_MS = 7 * 24 * 3600 * 1000;
     private static final int MTU_NULL = -1;
     private static final String[] FAKE_KEYS;
     private static final byte[] TEST_BLOB_DATA = new byte[]{-3, 6, 8, -9, 12,
             -128, 0, 89, 112, 91, -34};
-    private static final int[] NETWORK_EVENT_NUD_FAILURE_TYPES = new int[] {
-            NETWORK_EVENT_NUD_FAILURE_ROAM,
-            NETWORK_EVENT_NUD_FAILURE_CONFIRM,
-            NETWORK_EVENT_NUD_FAILURE_ORGANIC,
-            NETWORK_EVENT_NUD_FAILURE_MAC_ADDRESS_CHANGED
-    };
     static {
         FAKE_KEYS = new String[FAKE_KEY_COUNT];
         for (int i = 0; i < FAKE_KEYS.length; ++i) {
@@ -1461,6 +1457,71 @@ public class IpMemoryStoreServiceTest {
                             assertEquals(Status.ERROR_ILLEGAL_ARGUMENT, status.resultCode);
                             latch.countDown();
                         })));
+    }
+
+    @Test
+    public void testStoreNetworkEvent_deleteCluster() {
+        final long now = System.currentTimeMillis();
+        storeNetworkEventsForNudFailures(now);
+
+        // Delete the entries with TEST_CLUSTER from the fixture table.
+        doLatched("Did not finish deleting", latch ->
+                mService.deleteCluster(TEST_CLUSTER, false /* needWipe */,
+                        onDeleteStatus((status, deletedCount) -> {
+                            assertTrue("Delete failed : " + status.resultCode, status.isSuccess());
+                            // The fixture stores 40 events under TEST_CLUSTER
+                            assertEquals("Unexpected deleted count : " + deletedCount,
+                                    40, deletedCount.intValue());
+                            latch.countDown();
+                        })), LONG_TIMEOUT_MS);
+
+        // Query network event counts for NUD failures within TEST_CLUSTER, should be empty given
+        // we've already deleted that cluster.
+        final long[] sinceTimes = new long[3];
+        sinceTimes[0] = now - ONE_WEEK_IN_MS;
+        sinceTimes[1] = now - ONE_DAY_IN_MS;
+        sinceTimes[2] = now - SIX_HOURS_IN_MS;
+        doLatched("Did not complete retrieving network event count", latch ->
+                mService.retrieveNetworkEventCount(TEST_CLUSTER,
+                        sinceTimes,
+                        NETWORK_EVENT_NUD_FAILURE_TYPES,
+                        onNetworkEventCountRetrieved(
+                            (status, counts) -> {
+                                assertTrue("Retrieve network event counts not successful : "
+                                        + status.resultCode, status.isSuccess());
+                                assertTrue(counts.length == 3);
+                                assertEquals(0, counts[0]);
+                                assertEquals(0, counts[1]);
+                                assertEquals(0, counts[2]);
+                                latch.countDown();
+                            })));
+
+        // Delete the entries with TEST_CLUSTER_1 from the fixture table.
+        doLatched("Did not finish deleting", latch ->
+                mService.deleteCluster(TEST_CLUSTER_1, false /* needWipe */,
+                        onDeleteStatus((status, deletedCount) -> {
+                            assertTrue("Delete failed : " + status.resultCode, status.isSuccess());
+                            // The fixture stores 40 events under TEST_CLUSTER
+                            assertEquals("Unexpected deleted count : " + deletedCount,
+                                    20, deletedCount.intValue());
+                            latch.countDown();
+                        })), LONG_TIMEOUT_MS);
+        // Query network event counts for NUD failures within TEST_CLUSTER_1, should be empty given
+        // we've already deleted that cluster as well.
+        doLatched("Did not complete retrieving network event count", latch ->
+                mService.retrieveNetworkEventCount(TEST_CLUSTER_1,
+                        sinceTimes,
+                        NETWORK_EVENT_NUD_FAILURE_TYPES,
+                        onNetworkEventCountRetrieved(
+                            (status, counts) -> {
+                                assertTrue("Retrieve network event counts not successful : "
+                                        + status.resultCode, status.isSuccess());
+                                assertTrue(counts.length == 3);
+                                assertEquals(0, counts[0]);
+                                assertEquals(0, counts[1]);
+                                assertEquals(0, counts[2]);
+                                latch.countDown();
+                            })));
     }
 
     @Test

@@ -75,8 +75,8 @@ import android.net.LinkProperties;
 import android.net.MacAddress;
 import android.net.NetworkStackIpMemoryStore;
 import android.net.RouteInfo;
-import android.net.apf.AndroidPacketFilter;
 import android.net.apf.ApfCapabilities;
+import android.net.apf.ApfFilter;
 import android.net.apf.ApfFilter.ApfConfiguration;
 import android.net.ip.IpClientLinkObserver.IpClientNetlinkMonitor;
 import android.net.ip.IpClientLinkObserver.IpClientNetlinkMonitor.INetlinkMessageProcessor;
@@ -190,7 +190,7 @@ public class IpClientTest {
     @Mock private FileDescriptor mFd;
     @Mock private PrintWriter mWriter;
     @Mock private IpClientNetlinkMonitor mNetlinkMonitor;
-    @Mock private AndroidPacketFilter mApfFilter;
+    @Mock private ApfFilter mApfFilter;
 
     private InterfaceParams mIfParams;
     private INetlinkMessageProcessor mNetlinkMessageProcessor;
@@ -323,7 +323,7 @@ public class IpClientTest {
                         0 /* flags */,
                         0xffffffffL /* change */);
 
-        return new RtNetlinkLinkMessage(nlmsghdr, 0 /* mtu */,  ifInfoMsg, TEST_MAC, ifaceName);
+        return RtNetlinkLinkMessage.build(nlmsghdr, ifInfoMsg, 0 /* mtu */, TEST_MAC, ifaceName);
     }
 
     private void onInterfaceAddressUpdated(final LinkAddress la, int flags) {
@@ -351,7 +351,6 @@ public class IpClientTest {
         final RtNetlinkLinkMessage msg = buildRtmLinkMessage(RTM_NEWLINK, ifaceIndex, ifaceName);
         mNetlinkMessageProcessor.processNetlinkMessage(msg, TEST_UNUSED_REAL_TIME /* whenMs */);
     }
-
 
     @Test
     public void testNullInterfaceNameMostDefinitelyThrows() throws Exception {
@@ -531,19 +530,20 @@ public class IpClientTest {
         final IpClient ipc = makeIpClient(iface);
         final String l2Key = TEST_L2KEY;
         final String cluster = TEST_CLUSTER;
+        final MacAddress bssid = MacAddress.fromString(TEST_BSSID);
 
         ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
                 .withoutIPv4()
                 .withoutIpReachabilityMonitor()
                 .withInitialConfiguration(
                         conf(links(TEST_LOCAL_ADDRESSES), prefixes(TEST_PREFIXES), ips()))
+                .withLayer2Information(new Layer2Information(l2Key, cluster, bssid))
                 .build();
 
         ipc.startProvisioning(config);
         verify(mCb, timeout(TEST_TIMEOUT_MS).times(1)).setNeighborDiscoveryOffload(true);
         verify(mCb, timeout(TEST_TIMEOUT_MS).times(1)).setFallbackMulticastFilter(false);
         verify(mCb, never()).onProvisioningFailure(any());
-        ipc.setL2KeyAndCluster(l2Key, cluster);
 
         for (String addr : TEST_LOCAL_ADDRESSES) {
             String[] parts = addr.split("/");
@@ -850,10 +850,10 @@ public class IpClientTest {
                 ApfConfiguration.class);
         if (isApfSupported) {
             verify(mDependencies, timeout(TEST_TIMEOUT_MS)).maybeCreateApfFilter(
-                    any(), any(), configCaptor.capture(), any(), any(), any(), anyBoolean());
+                    any(), any(), configCaptor.capture(), any(), any(), any());
         } else {
             verify(mDependencies, never()).maybeCreateApfFilter(
-                    any(), any(), configCaptor.capture(), any(), any(), any(), anyBoolean());
+                    any(), any(), configCaptor.capture(), any(), any(), any());
         }
 
         return isApfSupported ? configCaptor.getValue() : null;
@@ -922,7 +922,7 @@ public class IpClientTest {
         final ArgumentCaptor<ApfConfiguration> configCaptor = ArgumentCaptor.forClass(
                 ApfConfiguration.class);
         verify(mDependencies, timeout(TEST_TIMEOUT_MS)).maybeCreateApfFilter(
-                any(), any(), configCaptor.capture(), any(), any(), any(), anyBoolean());
+                any(), any(), configCaptor.capture(), any(), any(), any());
         final ApfConfiguration actual = configCaptor.getValue();
         assertNotNull(actual);
         assertEquals(SdkLevel.isAtLeastS() ? 4 : 3, actual.apfVersionSupported);
@@ -957,7 +957,7 @@ public class IpClientTest {
         ipc.updateApfCapabilities(newApfCapabilities);
         HandlerUtils.waitForIdle(ipc.getHandler(), TEST_TIMEOUT_MS);
         verify(mDependencies, never()).maybeCreateApfFilter(any(), any(), any(), any(), any(),
-                any(), anyBoolean());
+                any());
         verifyShutdown(ipc);
     }
 
@@ -973,15 +973,53 @@ public class IpClientTest {
         ipc.updateApfCapabilities(null /* apfCapabilities */);
         HandlerUtils.waitForIdle(ipc.getHandler(), TEST_TIMEOUT_MS);
         verify(mDependencies, never()).maybeCreateApfFilter(any(), any(), any(), any(), any(),
-                any(), anyBoolean());
+                any());
         verifyShutdown(ipc);
+    }
+
+    @Test
+    public void testApfUpdateCapabilities_raceBetweenStopAndStartIpClient() throws Exception {
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
+        ProvisioningConfiguration.Builder config = new ProvisioningConfiguration.Builder()
+                .withoutIPv4()
+                .withoutIpReachabilityMonitor()
+                .withInitialConfiguration(
+                        conf(links(TEST_LOCAL_ADDRESSES), prefixes(TEST_PREFIXES), ips()))
+                .withApfCapabilities(new ApfCapabilities(4 /* version */,
+                    4096 /* maxProgramSize */, ARPHRD_ETHER));
+        ipc.startProvisioning(config.build());
+
+        // Verify that APF filter can be created successfully.
+        ArgumentCaptor<ApfConfiguration> configCaptor = ArgumentCaptor.forClass(
+                ApfConfiguration.class);
+        verify(mDependencies, timeout(TEST_TIMEOUT_MS)).maybeCreateApfFilter(
+                any(), any(), configCaptor.capture(), any(), any(), any());
+        ApfConfiguration apfConfig = configCaptor.getValue();
+        assertEquals(SdkLevel.isAtLeastS() ? 4 : 3, apfConfig.apfVersionSupported);
+        assertEquals(4096, apfConfig.apfRamSize);
+
+        clearInvocations(mDependencies);
+
+        // Simulate stopping IpClient and restarting provisioning immediately, verify IpClient
+        // can still create APF filter successfully, make sure the race of mApfCapabilities
+        // initialization has been fixed.
+        ipc.stop();
+        // Update the maxProgramSize to differentiate with above APF config.
+        config.withApfCapabilities(new ApfCapabilities(4 /* version */,
+                2048 /* maxProgramSize */, ARPHRD_ETHER));
+        ipc.startProvisioning(config.build());
+        verify(mDependencies, timeout(TEST_TIMEOUT_MS)).maybeCreateApfFilter(
+                any(), any(), configCaptor.capture(), any(), any(), any());
+        apfConfig = configCaptor.getValue();
+        assertEquals(SdkLevel.isAtLeastS() ? 4 : 3, apfConfig.apfVersionSupported);
+        assertEquals(2048, apfConfig.apfRamSize);
     }
 
     @Test
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     public void testVendorNdOffloadDisabledWhenApfV6Supported() throws Exception {
-        when(mDependencies.maybeCreateApfFilter(any(), any(), any(), any(), any(), any(),
-                anyBoolean())).thenReturn(mApfFilter);
+        when(mDependencies.maybeCreateApfFilter(any(), any(), any(), any(), any(),
+                any())).thenReturn(mApfFilter);
         when(mApfFilter.supportNdOffload()).thenReturn(true);
         final IpClient ipc = makeIpClient(TEST_IFNAME);
         ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
@@ -1006,8 +1044,8 @@ public class IpClientTest {
     @Test
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     public void testVendorNdOffloadEnabledWhenApfV6NotSupported() throws Exception {
-        when(mDependencies.maybeCreateApfFilter(any(), any(), any(), any(), any(), any(),
-                anyBoolean())).thenReturn(mApfFilter);
+        when(mDependencies.maybeCreateApfFilter(any(), any(), any(), any(), any(),
+                any())).thenReturn(mApfFilter);
         when(mApfFilter.supportNdOffload()).thenReturn(false);
         final IpClient ipc = makeIpClient(TEST_IFNAME);
         ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
@@ -1030,8 +1068,8 @@ public class IpClientTest {
     @Test
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     public void testVendorNdOffloadDisabledWhenApfCapabilitiesUpdated() throws Exception {
-        when(mDependencies.maybeCreateApfFilter(any(), any(), any(), any(), any(), any(),
-                anyBoolean())).thenReturn(mApfFilter);
+        when(mDependencies.maybeCreateApfFilter(any(), any(), any(), any(), any(),
+                any())).thenReturn(mApfFilter);
         when(mApfFilter.supportNdOffload()).thenReturn(true);
         final IpClient ipc = makeIpClient(TEST_IFNAME);
         ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
@@ -1053,8 +1091,8 @@ public class IpClientTest {
 
     @Test
     public void testLinkPropertiesUpdate_callSetLinkPropertiesOnApfFilter() throws Exception {
-        when(mDependencies.maybeCreateApfFilter(any(), any(), any(), any(), any(), any(),
-                anyBoolean())).thenReturn(mApfFilter);
+        when(mDependencies.maybeCreateApfFilter(any(), any(), any(), any(), any(),
+                any())).thenReturn(mApfFilter);
         final IpClient ipc = makeIpClient(TEST_IFNAME);
         verifyApfFilterCreatedOnStart(ipc, true /* isApfSupported */);
         onInterfaceAddressUpdated(
