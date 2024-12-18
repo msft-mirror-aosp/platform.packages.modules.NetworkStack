@@ -57,7 +57,6 @@ import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
@@ -179,7 +178,7 @@ public class ApfTest {
     @Mock private IpClientRaInfoMetrics mIpClientRaInfoMetrics;
     @Mock private IpClient.IpClientCallbacksWrapper mIpClientCb;
     @GuardedBy("mApfFilterCreated")
-    private final ArrayList<AndroidPacketFilter> mApfFilterCreated = new ArrayList<>();
+    private final ArrayList<ApfFilter> mApfFilterCreated = new ArrayList<>();
     private FileDescriptor mWriteSocket;
     private HandlerThread mHandlerThread;
     private Handler mHandler;
@@ -212,7 +211,7 @@ public class ApfTest {
     private void shutdownApfFilters() throws Exception {
         ConcurrentUtils.quitResources(THREAD_QUIT_MAX_RETRY_COUNT, () -> {
             synchronized (mApfFilterCreated) {
-                final ArrayList<AndroidPacketFilter> ret =
+                final ArrayList<ApfFilter> ret =
                         new ArrayList<>(mApfFilterCreated);
                 mApfFilterCreated.clear();
                 return ret;
@@ -2355,7 +2354,7 @@ public class ApfTest {
         mCurrentTimeMs += timePassedSeconds * DateUtils.SECOND_IN_MILLIS;
         doReturn(mCurrentTimeMs).when(mDependencies).elapsedRealtime();
         synchronized (apfFilter) {
-            apfFilter.installNewProgramLocked();
+            apfFilter.installNewProgram();
         }
         byte[] program = consumeInstalledProgram(mIpClientCb, 1 /* installCnt */);
         verifyRaLifetime(program, basePacket, routerLifetime, timePassedSeconds);
@@ -2365,7 +2364,7 @@ public class ApfTest {
                 ((routerLifetime / 6) - timePassedSeconds - 1) * DateUtils.SECOND_IN_MILLIS;
         doReturn(mCurrentTimeMs).when(mDependencies).elapsedRealtime();
         synchronized (apfFilter) {
-            apfFilter.installNewProgramLocked();
+            apfFilter.installNewProgram();
         }
         program = consumeInstalledProgram(mIpClientCb, 1 /* installCnt */);
         assertDrop(program, basePacket.array());
@@ -2373,7 +2372,7 @@ public class ApfTest {
         mCurrentTimeMs += DateUtils.SECOND_IN_MILLIS;
         doReturn(mCurrentTimeMs).when(mDependencies).elapsedRealtime();
         synchronized (apfFilter) {
-            apfFilter.installNewProgramLocked();
+            apfFilter.installNewProgram();
         }
         program = consumeInstalledProgram(mIpClientCb, 1 /* installCnt */);
         assertPass(program, basePacket.array());
@@ -2810,7 +2809,7 @@ public class ApfTest {
         verify(mNetworkQuirkMetrics).statsWrite();
         reset(mNetworkQuirkMetrics);
         synchronized (apfFilter) {
-            apfFilter.installNewProgramLocked();
+            apfFilter.installNewProgram();
         }
         verify(mNetworkQuirkMetrics).setEvent(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
         verify(mNetworkQuirkMetrics).statsWrite();
@@ -2829,21 +2828,6 @@ public class ApfTest {
         // The generated program size will be 529, which is larger than 512
         consumeInstalledProgram(mIpClientCb, 1 /* installCnt */);
         verify(mNetworkQuirkMetrics).setEvent(NetworkQuirkEvent.QE_APF_OVER_SIZE_FAILURE);
-        verify(mNetworkQuirkMetrics).statsWrite();
-    }
-
-    @Test
-    public void testGenerateApfProgramException() {
-        final ApfConfiguration config = getDefaultConfig();
-        ApfFilter apfFilter = getApfFilter(config);
-        // Simulate exception during installNewProgramLocked() by mocking
-        // mDependencies.elapsedRealtime() to throw an exception (this method doesn't throw in
-        // real-world scenarios).
-        doThrow(new IllegalStateException("test exception")).when(mDependencies).elapsedRealtime();
-        synchronized (apfFilter) {
-            apfFilter.installNewProgramLocked();
-        }
-        verify(mNetworkQuirkMetrics).setEvent(NetworkQuirkEvent.QE_APF_GENERATE_FILTER_EXCEPTION);
         verify(mNetworkQuirkMetrics).statsWrite();
     }
 

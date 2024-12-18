@@ -15,6 +15,11 @@
  */
 package android.net.apf;
 
+import static com.android.net.module.util.NetworkStackConstants.ETHER_HEADER_LEN;
+import static com.android.net.module.util.NetworkStackConstants.IPV4_HEADER_MIN_LEN;
+
+import android.net.InetAddresses;
+
 /**
  * The class which declares constants used in ApfFilter and unit tests.
  */
@@ -38,6 +43,15 @@ public final class ApfConstants {
     public static final int IPV4_DEST_ADDR_OFFSET = ETH_HEADER_LEN + 16;
     public static final int IPV4_ANY_HOST_ADDRESS = 0;
     public static final int IPV4_BROADCAST_ADDRESS = -1; // 255.255.255.255
+    // The IPv4 all hosts destination 224.0.0.1
+    public static final byte[] IPV4_ALL_HOSTS_ADDRESS =
+            InetAddresses.parseNumericAddress("224.0.0.1").getAddress();
+    // The IPv4 all multicast routers destination 224.0.0.22
+    public static final byte[] IPV4_ALL_IGMPV3_MULTICAST_ROUTERS_ADDRESS =
+            InetAddresses.parseNumericAddress("224.0.0.22").getAddress();
+    public static final int IPV4_ROUTER_ALERT_OPTION_LEN = 4;
+    public static final int IGMP_CHECKSUM_OFFSET =
+            ETHER_HEADER_LEN + IPV4_HEADER_MIN_LEN + IPV4_ROUTER_ALERT_OPTION_LEN + 2;
 
     // Traffic class and Flow label are not byte aligned. Luckily we
     // don't care about either value so we'll consider bytes 1-3 of the
@@ -59,6 +73,10 @@ public final class ApfConstants {
     // The IPv6 solicited nodes multicast address prefix ff02::1:ffXX:X/104
     public static final byte[] IPV6_SOLICITED_NODES_PREFIX =
             { (byte) 0xff, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, (byte) 0xff};
+
+    public static final int ICMP4_TYPE_OFFSET = ETH_HEADER_LEN + IPV4_HEADER_MIN_LEN;
+    public static final int ICMP4_CHECKSUM_OFFSET = ETH_HEADER_LEN + IPV4_HEADER_MIN_LEN + 2;
+    public static final int ICMP4_CONTENT_OFFSET = ETH_HEADER_LEN + IPV4_HEADER_MIN_LEN + 4;
 
     public static final int ICMP6_TYPE_OFFSET = ETH_HEADER_LEN + IPV6_HEADER_LEN;
     public static final int ICMP6_CODE_OFFSET = ETH_HEADER_LEN + IPV6_HEADER_LEN + 1;
@@ -87,6 +105,8 @@ public final class ApfConstants {
     public static final int ICMP6_MTU_OPTION_TYPE = 5;
     // From RFC6106: Recursive DNS Server option
     public static final int ICMP6_RDNSS_OPTION_TYPE = 25;
+    // From RFC5175: RA Flags Extension option
+    public static final int ICMP6_RA_FLAGS_EXTENSION_OPTION_TYPE = 26;
     // From RFC6106: DNS Search List option
     public static final int ICMP6_DNSSL_OPTION_TYPE = 31;
     // From RFC8910: Captive-Portal option
@@ -104,6 +124,7 @@ public final class ApfConstants {
     // NOTE: this must be added to the IPv4 header length in MemorySlot.IPV4_HEADER_SIZE
     public static final int TCP_UDP_SOURCE_PORT_OFFSET = ETH_HEADER_LEN;
     public static final int TCP_UDP_DESTINATION_PORT_OFFSET = ETH_HEADER_LEN + 2;
+    public static final int IGMP_MULTICAST_ADDRESS_OFFSET = ETH_HEADER_LEN + 4;
     public static final int UDP_HEADER_LEN = 8;
 
     public static final int TCP_HEADER_SIZE_OFFSET = 12;
@@ -137,6 +158,8 @@ public final class ApfConstants {
             {(byte) 0x01, (byte) 0x00, (byte) 0x5e, (byte) 0x00, (byte) 0x00, (byte) 0xfb};
     public static final byte[] ETH_MULTICAST_MDNS_V6_MAC_ADDRESS =
             {(byte) 0x33, (byte) 0x33, (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0xfb};
+    public static final byte[] ETH_MULTICAST_IGMP_V3_ALL_MULTICAST_ROUTERS_ADDRESS =
+            { (byte) 0x01, 0, (byte) 0x5e, 0, 0, (byte) 0x16};
     public static final int MDNS_PORT = 5353;
 
     public static final int ECHO_PORT = 7;

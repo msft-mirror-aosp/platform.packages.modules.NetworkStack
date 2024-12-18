@@ -58,10 +58,11 @@ import com.android.net.module.util.structs.PrefixInformationOption
 import com.android.networkstack.util.NetworkStackUtils
 import com.android.testutils.ArpRequestFilter
 import com.android.testutils.IPv4UdpFilter
-import com.android.testutils.TapPacketReader
+import com.android.testutils.PollPacketReader
 import java.io.FileDescriptor
 import java.net.Inet4Address
 import java.net.Inet6Address
+import java.net.InetAddress
 import java.nio.ByteBuffer
 import java.util.Arrays
 import kotlin.reflect.KClass
@@ -94,7 +95,7 @@ class NetworkStackUtilsIntegrationTest {
     private val readerHandler = HandlerThread(
             NetworkStackUtilsIntegrationTest::class.java.simpleName)
     private lateinit var iface: TestNetworkInterface
-    private lateinit var reader: TapPacketReader
+    private lateinit var reader: PollPacketReader
 
     @Before
     fun setUp() {
@@ -106,7 +107,7 @@ class NetworkStackUtilsIntegrationTest {
             inst.uiAutomation.dropShellPermissionIdentity()
         }
         readerHandler.start()
-        reader = TapPacketReader(readerHandler.threadHandler, iface.fileDescriptor.fileDescriptor,
+        reader = PollPacketReader(readerHandler.threadHandler, iface.fileDescriptor.fileDescriptor,
                 1500 /* maxPacketSize */)
         readerHandler.threadHandler.post { reader.start() }
     }
@@ -345,6 +346,30 @@ class NetworkStackUtilsIntegrationTest {
     @Test
     fun testGenericDhcpResponseWithMfBitDropped() {
         doTestDhcpResponseWithMfBitDropped(true)
+    }
+
+    @Test
+    fun testConvertIpv4AddressToEthernetMulticast() {
+        var mcastAddrs = listOf(
+            // ipv4 multicast address, multicast ethernet address
+            Pair(
+                InetAddress.getByName("224.0.0.1") as Inet4Address,
+                MacAddress.fromString("01:00:5e:00:00:01")
+            ),
+            Pair(
+                InetAddress.getByName("239.128.1.1") as Inet4Address,
+                MacAddress.fromString("01:00:5e:00:01:01")
+            ),
+            Pair(
+                InetAddress.getByName("239.255.255.255") as Inet4Address,
+                MacAddress.fromString("01:00:5e:7f:ff:ff")
+            )
+        )
+
+        for ((addr, expectAddr) in mcastAddrs) {
+            val ether = NetworkStackUtils.ipv4MulticastToEthernetMulticast(addr)
+            assertEquals(expectAddr, ether)
+        }
     }
 }
 

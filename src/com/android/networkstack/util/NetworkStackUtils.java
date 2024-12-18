@@ -276,8 +276,15 @@ public class NetworkStackUtils {
 
     /**
      * Experiment flag to enable Discovery of Designated Resolvers (DDR).
+     * This flag requires networkmonitor_async_privdns_resolution flag.
      */
     public static final String DNS_DDR_VERSION = "dns_ddr_version";
+
+    /**
+     * Experiment flag to ignore all NUD failures if we've seen too many NUD failure in a network.
+     */
+    public static final String IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION =
+            "ip_reachability_ignore_nud_failure_version";
 
     /**** BEGIN Feature Kill Switch Flags ****/
 
@@ -313,6 +320,21 @@ public class NetworkStackUtils {
 
     static {
         System.loadLibrary("networkstackutilsjni");
+    }
+
+    /**
+     * Convert IPv4 multicast address to ethernet multicast address in network order.
+     */
+    public static MacAddress ipv4MulticastToEthernetMulticast(@NonNull final Inet4Address addr) {
+        final byte[] etherMulticast = new byte[6];
+        final byte[] ipv4Multicast = addr.getAddress();
+        etherMulticast[0] = (byte) 0x01;
+        etherMulticast[1] = (byte) 0x00;
+        etherMulticast[2] = (byte) 0x5e;
+        etherMulticast[3] = (byte) (ipv4Multicast[1] & 0x7f);
+        etherMulticast[4] = ipv4Multicast[2];
+        etherMulticast[5] = ipv4Multicast[3];
+        return MacAddress.fromBytes(etherMulticast);
     }
 
     /**
