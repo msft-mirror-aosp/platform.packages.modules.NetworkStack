@@ -2706,7 +2706,7 @@ public class ApfFilter {
 
     @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */, codename =
             "VanillaIceCream")
-    public boolean shouldEnableMdnsOffload() {
+    private boolean shouldEnableMdnsOffload() {
         return shouldUseApfV6Generator() && mShouldHandleMdnsOffload;
     }
 
