@@ -31,6 +31,7 @@ import android.net.apf.ApfCounterTracker.Counter.DROPPED_ETHERTYPE_NOT_ALLOWED
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_GARP_REPLY
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IGMP_INVALID
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IGMP_REPORT
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IGMP_V2_GENERAL_QUERY_REPLIED
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IGMP_V3_GENERAL_QUERY_REPLIED
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_BROADCAST_ADDR
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_BROADCAST_NET
@@ -745,7 +746,7 @@ class ApfFilterTest {
 
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     @Test
-    fun testIgmpV2GeneralQueryPassed() {
+    fun testIgmpV2GeneralQueryReplied() {
         val apfFilter = getIgmpApfFilter()
         val program = consumeInstalledProgram(apfController, installCnt = 3)
         // Using scapy to generate IGMPv2 general query packet without router alert option:
@@ -761,13 +762,120 @@ class ApfFilterTest {
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(pkt),
-            PASSED_IPV4
+            DROPPED_IGMP_V2_GENERAL_QUERY_REPLIED
         )
+
+        val igmpv2ReportPkts = setOf(
+            // ###[ Ethernet ]###
+            //   dst       = 01:00:5e:00:00:01
+            //   src       = 02:03:04:05:06:07
+            //   type      = IPv4
+            // ###[ IP ]###
+            //      version   = 4
+            //      ihl       = 6
+            //      tos       = 0xc0
+            //      len       = 32
+            //      id        = 0
+            //      flags     = DF
+            //      frag      = 0
+            //      ttl       = 1
+            //      proto     = igmp
+            //      chksum    = 0xeb15
+            //      src       = 10.0.0.1
+            //      dst       = 239.0.0.1
+            //      \options   \
+            //       |###[ IP Option Router Alert ]###
+            //       |  copy_flag = 1
+            //       |  optclass  = control
+            //       |  option    = router_alert
+            //       |  length    = 4
+            //       |  alert     = router_shall_examine_packet
+            // ###[ IGMP ]###
+            //         type      = Version 2 - Membership Report
+            //         mrcode    = 0
+            //         chksum    = 0xfafd
+            //         gaddr     = 239.0.0.1
+            """
+            01005e000001020304050607080046c00020000040000102eb150a000001ef000001940400001600fafd
+            ef000001
+            """.replace("\\s+".toRegex(), "").trim().uppercase(),
+
+            // ###[ Ethernet ]###
+            //   dst       = 01:00:5e:00:00:02
+            //   src       = 02:03:04:05:06:07
+            //   type      = IPv4
+            // ###[ IP ]###
+            //      version   = 4
+            //      ihl       = 6
+            //      tos       = 0xc0
+            //      len       = 32
+            //      id        = 0
+            //      flags     = DF
+            //      frag      = 0
+            //      ttl       = 1
+            //      proto     = igmp
+            //      chksum    = 0xeb14
+            //      src       = 10.0.0.1
+            //      dst       = 239.0.0.2
+            //      \options   \
+            //       |###[ IP Option Router Alert ]###
+            //       |  copy_flag = 1
+            //       |  optclass  = control
+            //       |  option    = router_alert
+            //       |  length    = 4
+            //       |  alert     = router_shall_examine_packet
+            // ###[ IGMP ]###
+            //         type      = Version 2 - Membership Report
+            //         mrcode    = 0
+            //         chksum    = 0xfafc
+            //         gaddr     = 239.0.0.2
+            """
+            01005e000002020304050607080046c00020000040000102eb140a000001ef000002940400001600fafc
+            ef000002
+            """.replace("\\s+".toRegex(), "").trim().uppercase(),
+            // ###[ Ethernet ]###
+            //   dst       = 01:00:5e:00:00:03
+            //   src       = 02:03:04:05:06:07
+            //   type      = IPv4
+            // ###[ IP ]###
+            //      version   = 4
+            //      ihl       = 6
+            //      tos       = 0xc0
+            //      len       = 32
+            //      id        = 0
+            //      flags     = DF
+            //      frag      = 0
+            //      ttl       = 1
+            //      proto     = igmp
+            //      chksum    = 0xeb13
+            //      src       = 10.0.0.1
+            //      dst       = 239.0.0.3
+            //      \options   \
+            //       |###[ IP Option Router Alert ]###
+            //       |  copy_flag = 1
+            //       |  optclass  = control
+            //       |  option    = router_alert
+            //       |  length    = 4
+            //       |  alert     = router_shall_examine_packet
+            // ###[ IGMP ]###
+            //         type      = Version 2 - Membership Report
+            //         mrcode    = 0
+            //         chksum    = 0xfafb
+            //         gaddr     = 239.0.0.3
+            """
+            01005e000003020304050607080046c00020000040000102eb130a000001ef000003940400001600fafb
+            ef000003
+            """.replace("\\s+".toRegex(), "").trim().uppercase()
+        )
+
+        val transmitPackets = ApfJniUtils.getAllTransmittedPackets()
+            .map { HexDump.toHexString(it).uppercase() }.toSet()
+        assertEquals(igmpv2ReportPkts, transmitPackets)
     }
 
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     @Test
-    fun testIgmpV2GeneralQueryWithRouterAlertOptionPassed() {
+    fun testIgmpV2GeneralQueryWithRouterAlertOptionReplied() {
         val apfFilter = getIgmpApfFilter()
         val program = consumeInstalledProgram(apfController, installCnt = 3)
         // Using scapy to generate IGMPv2 general query packet with router alert option:
@@ -784,8 +892,116 @@ class ApfFilterTest {
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(pkt),
-            PASSED_IPV4
+            DROPPED_IGMP_V2_GENERAL_QUERY_REPLIED
         )
+
+        val igmpv2ReportPkts = setOf(
+            // ###[ Ethernet ]###
+            //   dst       = 01:00:5e:00:00:01
+            //   src       = 02:03:04:05:06:07
+            //   type      = IPv4
+            // ###[ IP ]###
+            //      version   = 4
+            //      ihl       = 6
+            //      tos       = 0xc0
+            //      len       = 32
+            //      id        = 0
+            //      flags     = DF
+            //      frag      = 0
+            //      ttl       = 1
+            //      proto     = igmp
+            //      chksum    = 0xeb15
+            //      src       = 10.0.0.1
+            //      dst       = 239.0.0.1
+            //      \options   \
+            //       |###[ IP Option Router Alert ]###
+            //       |  copy_flag = 1
+            //       |  optclass  = control
+            //       |  option    = router_alert
+            //       |  length    = 4
+            //       |  alert     = router_shall_examine_packet
+            // ###[ IGMP ]###
+            //         type      = Version 2 - Membership Report
+            //         mrcode    = 0
+            //         chksum    = 0xfafd
+            //         gaddr     = 239.0.0.1
+            """
+            01005e000001020304050607080046c00020000040000102eb150a000001ef000001940400001600fafd
+            ef000001
+            """.replace("\\s+".toRegex(), "").trim().uppercase(),
+
+            // ###[ Ethernet ]###
+            //   dst       = 01:00:5e:00:00:02
+            //   src       = 02:03:04:05:06:07
+            //   type      = IPv4
+            // ###[ IP ]###
+            //      version   = 4
+            //      ihl       = 6
+            //      tos       = 0xc0
+            //      len       = 32
+            //      id        = 0
+            //      flags     = DF
+            //      frag      = 0
+            //      ttl       = 1
+            //      proto     = igmp
+            //      chksum    = 0xeb14
+            //      src       = 10.0.0.1
+            //      dst       = 239.0.0.2
+            //      \options   \
+            //       |###[ IP Option Router Alert ]###
+            //       |  copy_flag = 1
+            //       |  optclass  = control
+            //       |  option    = router_alert
+            //       |  length    = 4
+            //       |  alert     = router_shall_examine_packet
+            // ###[ IGMP ]###
+            //         type      = Version 2 - Membership Report
+            //         mrcode    = 0
+            //         chksum    = 0xfafc
+            //         gaddr     = 239.0.0.2
+            """
+            01005e000002020304050607080046c00020000040000102eb140a000001ef000002940400001600fafc
+            ef000002
+            """.replace("\\s+".toRegex(), "").trim().uppercase(),
+
+            // ###[ Ethernet ]###
+            //   dst       = 01:00:5e:00:00:03
+            //   src       = 02:03:04:05:06:07
+            //   type      = IPv4
+            // ###[ IP ]###
+            //      version   = 4
+            //      ihl       = 6
+            //      tos       = 0xc0
+            //      len       = 32
+            //      id        = 0
+            //      flags     = DF
+            //      frag      = 0
+            //      ttl       = 1
+            //      proto     = igmp
+            //      chksum    = 0xeb13
+            //      src       = 10.0.0.1
+            //      dst       = 239.0.0.3
+            //      \options   \
+            //       |###[ IP Option Router Alert ]###
+            //       |  copy_flag = 1
+            //       |  optclass  = control
+            //       |  option    = router_alert
+            //       |  length    = 4
+            //       |  alert     = router_shall_examine_packet
+            // ###[ IGMP ]###
+            //         type      = Version 2 - Membership Report
+            //         mrcode    = 0
+            //         chksum    = 0xfafb
+            //         gaddr     = 239.0.0.3
+            """
+            01005e000003020304050607080046c00020000040000102eb130a000001ef000003940400001600fafb
+            ef000003
+            """.replace("\\s+".toRegex(), "").trim().uppercase()
+        )
+
+        val transmitPackets = ApfJniUtils.getAllTransmittedPackets()
+            .map { HexDump.toHexString(it).uppercase() }.toSet()
+        assertEquals(igmpv2ReportPkts, transmitPackets)
     }
 
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
