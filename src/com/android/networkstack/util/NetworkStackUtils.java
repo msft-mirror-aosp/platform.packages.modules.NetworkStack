@@ -323,6 +323,21 @@ public class NetworkStackUtils {
     }
 
     /**
+     * Convert IPv4 multicast address to ethernet multicast address in network order.
+     */
+    public static MacAddress ipv4MulticastToEthernetMulticast(@NonNull final Inet4Address addr) {
+        final byte[] etherMulticast = new byte[6];
+        final byte[] ipv4Multicast = addr.getAddress();
+        etherMulticast[0] = (byte) 0x01;
+        etherMulticast[1] = (byte) 0x00;
+        etherMulticast[2] = (byte) 0x5e;
+        etherMulticast[3] = (byte) (ipv4Multicast[1] & 0x7f);
+        etherMulticast[4] = ipv4Multicast[2];
+        etherMulticast[5] = ipv4Multicast[3];
+        return MacAddress.fromBytes(etherMulticast);
+    }
+
+    /**
      * Convert IPv6 multicast address to ethernet multicast address in network order.
      */
     public static MacAddress ipv6MulticastToEthernetMulticast(@NonNull final Inet6Address addr) {
@@ -436,6 +451,16 @@ public class NetworkStackUtils {
             String ifname, FileDescriptor fd) throws IOException {
         addArpEntry(ethAddr.toByteArray(), ipv4Addr.getAddress(), ifname, fd);
     }
+
+    /**
+     * Attaches a socket filter that accepts egress IGMPv2/IGMPv3 reports to the given socket.
+     *
+     * This filter doesn't include IGMPv1 report since device will not send out IGMPv1 report
+     * when the device leaves a multicast address group.
+     *
+     * @param fd the socket's {@link FileDescriptor}.
+     */
+    public static native void attachEgressIgmpReportFilter(FileDescriptor fd) throws ErrnoException;
 
     private static native void addArpEntry(byte[] ethAddr, byte[] netAddr, String ifname,
             FileDescriptor fd) throws IOException;

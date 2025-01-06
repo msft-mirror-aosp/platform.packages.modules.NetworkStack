@@ -15,6 +15,19 @@
  */
 package android.net.apf;
 
+import static com.android.net.module.util.NetworkStackConstants.ETHER_HEADER_LEN;
+import static com.android.net.module.util.NetworkStackConstants.IPV4_HEADER_MIN_LEN;
+import static com.android.net.module.util.NetworkStackConstants.IPV4_IGMP_TYPE_V1_REPORT;
+import static com.android.net.module.util.NetworkStackConstants.IPV4_IGMP_TYPE_V2_JOIN_REPORT;
+import static com.android.net.module.util.NetworkStackConstants.IPV4_IGMP_TYPE_V2_LEAVE_REPORT;
+import static com.android.net.module.util.NetworkStackConstants.IPV4_IGMP_TYPE_V3_REPORT;
+import static com.android.net.module.util.NetworkStackConstants.IPV4_OPTION_LEN_ROUTER_ALERT;
+import static com.android.net.module.util.NetworkStackConstants.IPV4_OPTION_TYPE_ROUTER_ALERT;
+
+import android.net.InetAddresses;
+
+import java.util.Set;
+
 /**
  * The class which declares constants used in ApfFilter and unit tests.
  */
@@ -38,6 +51,29 @@ public final class ApfConstants {
     public static final int IPV4_DEST_ADDR_OFFSET = ETH_HEADER_LEN + 16;
     public static final int IPV4_ANY_HOST_ADDRESS = 0;
     public static final int IPV4_BROADCAST_ADDRESS = -1; // 255.255.255.255
+    // The IPv4 all hosts destination 224.0.0.1
+    public static final byte[] IPV4_ALL_HOSTS_ADDRESS =
+            InetAddresses.parseNumericAddress("224.0.0.1").getAddress();
+    // The IPv4 all multicast routers destination 224.0.0.22
+    public static final byte[] IPV4_ALL_IGMPV3_MULTICAST_ROUTERS_ADDRESS =
+            InetAddresses.parseNumericAddress("224.0.0.22").getAddress();
+    public static final Set<Long> IGMP_TYPE_REPORTS = Set.of(
+            (long) IPV4_IGMP_TYPE_V1_REPORT,
+            (long) IPV4_IGMP_TYPE_V2_JOIN_REPORT,
+            (long) IPV4_IGMP_TYPE_V2_LEAVE_REPORT,
+            (long) IPV4_IGMP_TYPE_V3_REPORT);
+    public static final byte[] IPV4_ROUTER_ALERT_OPTION = {
+            (byte) IPV4_OPTION_TYPE_ROUTER_ALERT,   // option type
+            (byte) IPV4_OPTION_LEN_ROUTER_ALERT,    // option length
+            0,  0   // option value
+    };
+    public static final int IPV4_ROUTER_ALERT_OPTION_LEN = 4;
+    public static final int IGMP_CHECKSUM_OFFSET =
+            ETHER_HEADER_LEN + IPV4_HEADER_MIN_LEN + IPV4_ROUTER_ALERT_OPTION_LEN + 2;
+
+    // IGMPv3 group record types
+    // From include/uapi/linux/igmp.h
+    public static final int IGMPV3_MODE_IS_EXCLUDE = 2;
 
     // Traffic class and Flow label are not byte aligned. Luckily we
     // don't care about either value so we'll consider bytes 1-3 of the
@@ -59,6 +95,10 @@ public final class ApfConstants {
     // The IPv6 solicited nodes multicast address prefix ff02::1:ffXX:X/104
     public static final byte[] IPV6_SOLICITED_NODES_PREFIX =
             { (byte) 0xff, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, (byte) 0xff};
+
+    public static final int ICMP4_TYPE_OFFSET = ETH_HEADER_LEN + IPV4_HEADER_MIN_LEN;
+    public static final int ICMP4_CHECKSUM_OFFSET = ETH_HEADER_LEN + IPV4_HEADER_MIN_LEN + 2;
+    public static final int ICMP4_CONTENT_OFFSET = ETH_HEADER_LEN + IPV4_HEADER_MIN_LEN + 4;
 
     public static final int ICMP6_TYPE_OFFSET = ETH_HEADER_LEN + IPV6_HEADER_LEN;
     public static final int ICMP6_CODE_OFFSET = ETH_HEADER_LEN + IPV6_HEADER_LEN + 1;
@@ -106,6 +146,8 @@ public final class ApfConstants {
     // NOTE: this must be added to the IPv4 header length in MemorySlot.IPV4_HEADER_SIZE
     public static final int TCP_UDP_SOURCE_PORT_OFFSET = ETH_HEADER_LEN;
     public static final int TCP_UDP_DESTINATION_PORT_OFFSET = ETH_HEADER_LEN + 2;
+    public static final int IGMP_MAX_RESP_TIME_OFFSET = ETHER_HEADER_LEN + 1;
+    public static final int IGMP_MULTICAST_ADDRESS_OFFSET = ETH_HEADER_LEN + 4;
     public static final int UDP_HEADER_LEN = 8;
 
     public static final int TCP_HEADER_SIZE_OFFSET = 12;
@@ -139,6 +181,8 @@ public final class ApfConstants {
             {(byte) 0x01, (byte) 0x00, (byte) 0x5e, (byte) 0x00, (byte) 0x00, (byte) 0xfb};
     public static final byte[] ETH_MULTICAST_MDNS_V6_MAC_ADDRESS =
             {(byte) 0x33, (byte) 0x33, (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0xfb};
+    public static final byte[] ETH_MULTICAST_IGMP_V3_ALL_MULTICAST_ROUTERS_ADDRESS =
+            { (byte) 0x01, 0, (byte) 0x5e, 0, 0, (byte) 0x16};
     public static final int MDNS_PORT = 5353;
 
     public static final int ECHO_PORT = 7;

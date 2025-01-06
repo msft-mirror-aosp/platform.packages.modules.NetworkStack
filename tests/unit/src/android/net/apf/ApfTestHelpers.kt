@@ -94,7 +94,7 @@ class ApfTestHelpers private constructor() {
             data: ByteArray?,
             filterAge: Int
         ) {
-            val msg = """Unexpected APF verdict. To debug:
+            val msg = "Unexpected APF verdict. To debug: \n" + """
                 apf_run
                     --program ${HexDump.toHexString(program)}
                     --packet ${HexDump.toHexString(packet)}
@@ -102,7 +102,7 @@ class ApfTestHelpers private constructor() {
                     --age $filterAge
                     ${if (apfVersion > 4) "--v6" else ""}
                     --trace | less
-            """
+            """.replace("\n", " ").replace("\\s+".toRegex(), " ") + "\n"
             assertReturnCodesEqual(
                 msg,
                 expected,
@@ -329,6 +329,15 @@ class ApfTestHelpers private constructor() {
 
             clearInvocations<Any>(ipClientCb)
             return programCaptor.value
+        }
+
+        fun consumeTransmittedPackets(
+            expectCnt: Int
+        ): List<ByteArray> {
+            val transmittedPackets = ApfJniUtils.getAllTransmittedPackets()
+            assertEquals(expectCnt, transmittedPackets.size)
+            ApfJniUtils.resetTransmittedPacketMemory()
+            return transmittedPackets
         }
     }
 }

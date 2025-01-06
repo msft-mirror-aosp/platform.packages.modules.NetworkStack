@@ -86,8 +86,6 @@ import static android.net.apf.ApfConstants.TCP_UDP_DESTINATION_PORT_OFFSET;
 import static android.net.apf.ApfConstants.TCP_UDP_SOURCE_PORT_OFFSET;
 import static android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_INVALID;
 import static android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_OTHER_HOST;
-import static android.net.apf.ApfCounterTracker.Counter.FILTER_AGE_16384THS;
-import static android.net.apf.ApfCounterTracker.Counter.FILTER_AGE_SECONDS;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_ETHER_OUR_SRC_MAC;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_DAD;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_NO_SLLA_OPTION;
@@ -103,6 +101,7 @@ import static android.net.util.SocketUtils.makePacketSocketAddress;
 import static android.os.PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED;
 import static android.os.PowerManager.ACTION_DEVICE_LIGHT_IDLE_MODE_CHANGED;
 import static android.system.OsConstants.AF_PACKET;
+import static android.system.OsConstants.ETH_P_ALL;
 import static android.system.OsConstants.ETH_P_ARP;
 import static android.system.OsConstants.ETH_P_IP;
 import static android.system.OsConstants.ETH_P_IPV6;
@@ -127,6 +126,7 @@ import static com.android.net.module.util.NetworkStackConstants.ICMPV6_NEIGHBOR_
 import static com.android.net.module.util.NetworkStackConstants.ICMPV6_NEIGHBOR_SOLICITATION;
 import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ROUTER_ADVERTISEMENT;
 import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ROUTER_SOLICITATION;
+import static com.android.net.module.util.NetworkStackConstants.IPV4_ADDR_ALL_HOST_MULTICAST;
 import static com.android.net.module.util.NetworkStackConstants.IPV4_ADDR_LEN;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_LEN;
 
@@ -145,6 +145,7 @@ import android.net.NattKeepalivePacketDataParcelable;
 import android.net.TcpKeepalivePacketDataParcelable;
 import android.net.apf.ApfCounterTracker.Counter;
 import android.net.apf.BaseApfGenerator.IllegalInstructionException;
+import android.net.ip.IgmpReportMonitor;
 import android.net.ip.IpClient.IpClientCallbacksWrapper;
 import android.net.nsd.NsdManager;
 import android.net.nsd.OffloadEngine;
@@ -202,7 +203,7 @@ import java.util.Set;
  *
  * @hide
  */
-public class ApfFilter implements AndroidPacketFilter {
+public class ApfFilter {
 
     // Helper class for specifying functional filter parameters.
     public static class ApfConfiguration {
@@ -219,6 +220,7 @@ public class ApfFilter implements AndroidPacketFilter {
         public boolean shouldHandleArpOffload;
         public boolean shouldHandleNdOffload;
         public boolean shouldHandleMdnsOffload;
+        public boolean shouldHandleIgmpOffload;
     }
 
 
@@ -286,11 +288,14 @@ public class ApfFilter implements AndroidPacketFilter {
     private final boolean mShouldHandleArpOffload;
     private final boolean mShouldHandleNdOffload;
     private final boolean mShouldHandleMdnsOffload;
+    private final boolean mShouldHandleIgmpOffload;
 
     private final NetworkQuirkMetrics mNetworkQuirkMetrics;
     private final IpClientRaInfoMetrics mIpClientRaInfoMetrics;
     private final ApfSessionInfoMetrics mApfSessionInfoMetrics;
     private final NsdManager mNsdManager;
+    private final IgmpReportMonitor mIgmpReportMonitor;
+
     @VisibleForTesting
     final List<OffloadServiceInfo> mOffloadServiceInfos = new ArrayList<>();
     private OffloadEngine mOffloadEngine;
@@ -349,6 +354,14 @@ public class ApfFilter implements AndroidPacketFilter {
 
     // Our tentative IPv6 addresses
     private Set<Inet6Address> mIPv6TentativeAddresses = new ArraySet<>();
+
+    // Our joined IPv4 multicast addresses
+    @VisibleForTesting
+    final Set<Inet4Address> mIPv4MulticastAddresses = new ArraySet<>();
+
+    // Our joined IPv4 multicast address exclude all all host multicast (224.0.0.1)
+    @VisibleForTesting
+    final Set<Inet4Address> mIPv4McastAddrsExcludeAllHost = new ArraySet<>();
 
     // Whether CLAT is enabled.
     private boolean mHasClat;
@@ -440,6 +453,7 @@ public class ApfFilter implements AndroidPacketFilter {
         mShouldHandleArpOffload = config.shouldHandleArpOffload;
         mShouldHandleNdOffload = config.shouldHandleNdOffload;
         mShouldHandleMdnsOffload = config.shouldHandleMdnsOffload;
+        mShouldHandleIgmpOffload = config.shouldHandleIgmpOffload;
         mDependencies = dependencies;
         mNetworkQuirkMetrics = networkQuirkMetrics;
         mIpClientRaInfoMetrics = dependencies.getIpClientRaInfoMetrics();
@@ -474,6 +488,17 @@ public class ApfFilter implements AndroidPacketFilter {
             Log.wtf(TAG, "Failed to start RaPacketReader");
         }
 
+        mIgmpReportMonitor = new IgmpReportMonitor(
+            mHandler,
+            mInterfaceParams,
+            this::updateIPv4MulticastAddrs,
+            mDependencies.createEgressIgmpReportsReaderSocket(ifParams.index)
+        );
+
+        if (shouldEnableIgmpOffload()) {
+            mIgmpReportMonitor.start();
+        }
+
         // Listen for doze-mode transition changes to enable/disable the IPv6 multicast filter.
         mDependencies.addDeviceIdleReceiver(mDeviceIdleReceiver);
 
@@ -481,6 +506,11 @@ public class ApfFilter implements AndroidPacketFilter {
         if (shouldEnableMdnsOffload()) {
             registerOffloadEngine();
         }
+
+        mIPv4MulticastAddresses.addAll(
+                mDependencies.getIPv4MulticastAddresses(mInterfaceParams.name));
+        mIPv4McastAddrsExcludeAllHost.addAll(mIPv4MulticastAddresses);
+        mIPv4McastAddrsExcludeAllHost.remove((IPV4_ADDR_ALL_HOST_MULTICAST));
     }
 
     /**
@@ -508,6 +538,24 @@ public class ApfFilter implements AndroidPacketFilter {
                 Log.wtf(TAG, "Error starting filter", e);
                 return null;
             }
+            return socket;
+        }
+
+        /**
+         * Create a socket to read egress IGMPv2/v3 reports.
+         */
+        @Nullable
+        public FileDescriptor createEgressIgmpReportsReaderSocket(int ifIndex) {
+            FileDescriptor socket;
+            try {
+                socket = Os.socket(AF_PACKET, SOCK_RAW | SOCK_NONBLOCK, 0);
+                NetworkStackUtils.attachEgressIgmpReportFilter(socket);
+                Os.bind(socket, makePacketSocketAddress(ETH_P_ALL, ifIndex));
+            } catch (SocketException | ErrnoException e) {
+                Log.wtf(TAG, "Error starting filter", e);
+                return null;
+            }
+
             return socket;
         }
 
@@ -552,7 +600,7 @@ public class ApfFilter implements AndroidPacketFilter {
          * This method is designed to be overridden in test classes to collect created ApfFilter
          * instances.
          */
-        public void onApfFilterCreated(@NonNull AndroidPacketFilter apfFilter) {
+        public void onApfFilterCreated(@NonNull ApfFilter apfFilter) {
         }
 
         /**
@@ -603,9 +651,16 @@ public class ApfFilter implements AndroidPacketFilter {
         public int getNdTrafficClass(@NonNull String ifname) {
             return ProcfsParsingUtils.getNdTrafficClass(ifname);
         }
+
+        /**
+         * Loads the existing IPv4 multicast addresses from the file
+         * `/proc/net/igmp`.
+         */
+        public List<Inet4Address> getIPv4MulticastAddresses(@NonNull String ifname) {
+            return ProcfsParsingUtils.getIPv4MulticastAddresses(ifname);
+        }
     }
 
-    @Override
     public String setDataSnapshot(byte[] data) {
         mDataSnapshot = data;
         if (mIsRunning) {
@@ -1321,7 +1376,7 @@ public class ApfFilter implements AndroidPacketFilter {
 
         NattKeepaliveResponse(final NattKeepalivePacketDataParcelable sentKeepalivePacket) {
             mPacket = new NattKeepaliveResponseData(sentKeepalivePacket);
-            mSrcDstAddr = concatArrays(mPacket.srcAddress, mPacket.dstAddress);
+            mSrcDstAddr = CollectionUtils.concatArrays(mPacket.srcAddress, mPacket.dstAddress);
             mPortFingerprint = generatePortFingerprint(mPacket.srcPort, mPacket.dstPort);
         }
 
@@ -1445,7 +1500,8 @@ public class ApfFilter implements AndroidPacketFilter {
             this(new TcpKeepaliveAckData(sentKeepalivePacket));
         }
         TcpKeepaliveAckV4(final TcpKeepaliveAckData packet) {
-            super(packet, concatArrays(packet.srcAddress, packet.dstAddress) /* srcDstAddr */);
+            super(packet, CollectionUtils.concatArrays(packet.srcAddress,
+                    packet.dstAddress) /* srcDstAddr */);
         }
 
         @Override
@@ -1487,7 +1543,8 @@ public class ApfFilter implements AndroidPacketFilter {
             this(new TcpKeepaliveAckData(sentKeepalivePacket));
         }
         TcpKeepaliveAckV6(final TcpKeepaliveAckData packet) {
-            super(packet, concatArrays(packet.srcAddress, packet.dstAddress) /* srcDstAddr */);
+            super(packet, CollectionUtils.concatArrays(packet.srcAddress,
+                    packet.dstAddress) /* srcDstAddr */);
         }
 
         @Override
@@ -2593,6 +2650,10 @@ public class ApfFilter implements AndroidPacketFilter {
         if (shouldEnableMdnsOffload()) {
             unregisterOffloadEngine();
         }
+
+        if (shouldEnableIgmpOffload()) {
+            mIgmpReportMonitor.stop();
+        }
     }
 
     public void setMulticastFilter(boolean isEnabled) {
@@ -2671,7 +2732,6 @@ public class ApfFilter implements AndroidPacketFilter {
         installNewProgram();
     }
 
-    @Override
     public void updateClatInterfaceState(boolean add) {
         if (mHasClat == add) {
             return;
@@ -2680,16 +2740,33 @@ public class ApfFilter implements AndroidPacketFilter {
         installNewProgram();
     }
 
-    @Override
+    public void updateIPv4MulticastAddrs() {
+        final Set<Inet4Address> mcastAddrs =
+                new ArraySet<>(mDependencies.getIPv4MulticastAddresses(mInterfaceParams.name));
+
+        if (!mIPv4MulticastAddresses.equals(mcastAddrs)) {
+            mIPv4MulticastAddresses.clear();
+            mIPv4MulticastAddresses.addAll(mcastAddrs);
+
+            mIPv4McastAddrsExcludeAllHost.clear();
+            mIPv4McastAddrsExcludeAllHost.addAll(mcastAddrs);
+            mIPv4McastAddrsExcludeAllHost.remove(IPV4_ADDR_ALL_HOST_MULTICAST);
+            installNewProgram();
+        }
+    }
+
     public boolean supportNdOffload() {
         return shouldUseApfV6Generator() && mShouldHandleNdOffload;
     }
 
     @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */, codename =
             "VanillaIceCream")
-    @Override
-    public boolean shouldEnableMdnsOffload() {
+    private boolean shouldEnableMdnsOffload() {
         return shouldUseApfV6Generator() && mShouldHandleMdnsOffload;
+    }
+
+    private boolean shouldEnableIgmpOffload() {
+        return shouldUseApfV6Generator() && mShouldHandleIgmpOffload;
     }
 
     private boolean shouldUseApfV6Generator() {
@@ -2750,6 +2827,14 @@ public class ApfFilter implements AndroidPacketFilter {
         installNewProgram();
     }
 
+    /**
+     * Determines whether the APF interpreter advertises support for the data buffer access
+     * opcodes LDDW (LoaD Data Word) and STDW (STore Data Word).
+     */
+    public boolean hasDataAccess(int apfVersionSupported) {
+        return apfVersionSupported > 2;
+    }
+
     public void dump(IndentingPrintWriter pw) {
         // TODO: use HandlerUtils.runWithScissors() to dump APF on the handler thread.
         pw.println(String.format(
@@ -2768,6 +2853,12 @@ public class ApfFilter implements AndroidPacketFilter {
         pw.decreaseIndent();
         try {
             pw.println("IPv4 address: " + InetAddress.getByAddress(mIPv4Address).getHostAddress());
+            pw.println("IPv4 multicast addresses: ");
+            pw.increaseIndent();
+            for (Inet4Address addr: mIPv4MulticastAddresses) {
+                pw.println(addr.getHostAddress());
+            }
+            pw.decreaseIndent();
             pw.println("IPv6 non-tentative addresses: ");
             pw.increaseIndent();
             for (Inet6Address addr : mIPv6NonTentativeAddresses) {
@@ -3008,20 +3099,6 @@ public class ApfFilter implements AndroidPacketFilter {
                 + (uint8(bytes[1]) << 16)
                 + (uint8(bytes[2]) << 8)
                 + (uint8(bytes[3]));
-    }
-
-    private static byte[] concatArrays(final byte[]... arr) {
-        int size = 0;
-        for (byte[] a : arr) {
-            size += a.length;
-        }
-        final byte[] result = new byte[size];
-        int offset = 0;
-        for (byte[] a : arr) {
-            System.arraycopy(a, 0, result, offset, a.length);
-            offset += a.length;
-        }
-        return result;
     }
 
     private void sendNetworkQuirkMetrics(final NetworkQuirkEvent event) {

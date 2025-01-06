@@ -19,6 +19,7 @@ package android.net.ip
 import android.Manifest.permission.INTERACT_ACROSS_USERS_FULL
 import android.Manifest.permission.NETWORK_SETTINGS
 import android.Manifest.permission.READ_DEVICE_CONFIG
+import android.Manifest.permission.WRITE_ALLOWLISTED_DEVICE_CONFIG
 import android.Manifest.permission.WRITE_DEVICE_CONFIG
 import android.net.IIpMemoryStore
 import android.net.IIpMemoryStoreCallbacks
@@ -163,6 +164,7 @@ class IpClientRootTest : IpClientIntegrationTestCommon() {
         // Delete the IpMemoryStore entry corresponding to TEST_L2KEY, make sure each test starts
         // from a clean state.
         mStore.delete(TEST_L2KEY, true) { _, _ -> latch.countDown() }
+        mStore.deleteCluster(TEST_CLUSTER, true) { _, _ -> latch.countDown() }
         assertTrue(latch.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS))
     }
 
@@ -191,7 +193,11 @@ class IpClientRootTest : IpClientIntegrationTestCommon() {
     private val mOriginalPropertyValues = ArrayMap<String, String>()
 
     override fun setDeviceConfigProperty(name: String?, value: String?) {
-        automation.adoptShellPermissionIdentity(READ_DEVICE_CONFIG, WRITE_DEVICE_CONFIG)
+        automation.adoptShellPermissionIdentity(
+            READ_DEVICE_CONFIG,
+            WRITE_DEVICE_CONFIG,
+            WRITE_ALLOWLISTED_DEVICE_CONFIG
+        )
         try {
             // Do not use computeIfAbsent as it would overwrite null values,
             // property originally unset.
@@ -214,7 +220,11 @@ class IpClientRootTest : IpClientIntegrationTestCommon() {
     @After
     fun tearDownDeviceConfigProperties() {
         if (testSkipped()) return
-        automation.adoptShellPermissionIdentity(READ_DEVICE_CONFIG, WRITE_DEVICE_CONFIG)
+        automation.adoptShellPermissionIdentity(
+            READ_DEVICE_CONFIG,
+            WRITE_DEVICE_CONFIG,
+            WRITE_ALLOWLISTED_DEVICE_CONFIG
+        )
         try {
             for (key in mOriginalPropertyValues.keys) {
                 if (key == null) continue
