@@ -89,6 +89,7 @@ import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PR
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_REPLACE_NETD_WITH_NETLINK_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.createInet6AddressFromEui64;
 import static com.android.networkstack.util.NetworkStackUtils.macAddressToEui64;
@@ -800,7 +801,7 @@ public class IpClient extends StateMachine {
     private final int mNudFailureCountDailyThreshold;
     private final int mNudFailureCountWeeklyThreshold;
 
-    // Experiment flag read from device config.
+    // Experiment flags read from device config.
     private final boolean mDhcp6PrefixDelegationEnabled;
     private final boolean mIsAcceptRaMinLftEnabled;
     private final boolean mEnableApfPollingCounters;
@@ -810,6 +811,7 @@ public class IpClient extends StateMachine {
     private final boolean mApfShouldHandleMdnsOffload;
     private final boolean mIgnoreNudFailureEnabled;
     private final boolean mDhcp6PdPreferredFlagEnabled;
+    private final boolean mReplaceNetdWithNetlinkEnabled;
 
     private InterfaceParams mInterfaceParams;
 
@@ -1083,7 +1085,8 @@ public class IpClient extends StateMachine {
                 DEFAULT_NUD_FAILURE_COUNT_WEEKLY_THRESHOLD);
         mDhcp6PdPreferredFlagEnabled =
                 mDependencies.isFeatureEnabled(mContext, IPCLIENT_DHCPV6_PD_PREFERRED_FLAG_VERSION);
-
+        mReplaceNetdWithNetlinkEnabled = mDependencies.isFeatureEnabled(mContext,
+                IPCLIENT_REPLACE_NETD_WITH_NETLINK_VERSION);
         IpClientLinkObserver.Configuration config = new IpClientLinkObserver.Configuration(
                 mAcceptRaMinLft, mPopulateLinkAddressLifetime);
 
