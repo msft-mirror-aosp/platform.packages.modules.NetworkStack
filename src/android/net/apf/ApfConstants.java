@@ -96,9 +96,11 @@ public final class ApfConstants {
     public static final byte[] IPV6_SOLICITED_NODES_PREFIX =
             { (byte) 0xff, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, (byte) 0xff};
 
-    public static final int ICMP4_TYPE_OFFSET = ETH_HEADER_LEN + IPV4_HEADER_MIN_LEN;
-    public static final int ICMP4_CHECKSUM_OFFSET = ETH_HEADER_LEN + IPV4_HEADER_MIN_LEN + 2;
-    public static final int ICMP4_CONTENT_OFFSET = ETH_HEADER_LEN + IPV4_HEADER_MIN_LEN + 4;
+    public static final int ICMP4_TYPE_NO_OPTIONS_OFFSET = ETH_HEADER_LEN + IPV4_HEADER_MIN_LEN;
+    public static final int ICMP4_CHECKSUM_NO_OPTIONS_OFFSET =
+            ETH_HEADER_LEN + IPV4_HEADER_MIN_LEN + 2;
+    public static final int ICMP4_CONTENT_NO_OPTIONS_OFFSET =
+            ETH_HEADER_LEN + IPV4_HEADER_MIN_LEN + 4;
 
     public static final int ICMP6_TYPE_OFFSET = ETH_HEADER_LEN + IPV6_HEADER_LEN;
     public static final int ICMP6_CODE_OFFSET = ETH_HEADER_LEN + IPV6_HEADER_LEN + 1;
@@ -156,13 +158,13 @@ public final class ApfConstants {
     public static final int DHCP_CLIENT_PORT = 68;
 
     public static final int DNS_HEADER_LEN = 12;
-    public static final int IPV4_UDP_DESTINATION_PORT_OFFSET =
+    public static final int IPV4_UDP_DESTINATION_PORT_NO_OPTIONS_OFFSET =
             ETH_HEADER_LEN + IPV4_HEADER_MIN_LEN + 2;
-    public static final int IPV4_UDP_DESTINATION_CHECKSUM_OFFSET =
+    public static final int IPV4_UDP_DESTINATION_CHECKSUM_NO_OPTIONS_OFFSET =
             ETH_HEADER_LEN + IPV4_HEADER_MIN_LEN + 6;
-    public static final int IPV4_UDP_PAYLOAD_OFFSET =
+    public static final int IPV4_UDP_PAYLOAD_NO_OPTIONS_OFFSET =
             ETH_HEADER_LEN + IPV4_HEADER_MIN_LEN + UDP_HEADER_LEN;
-    public static final int IPV4_DNS_QDCOUNT_OFFSET =
+    public static final int IPV4_DNS_QDCOUNT_NO_OPTIONS_OFFSET =
             ETH_HEADER_LEN + IPV4_HEADER_MIN_LEN + UDP_HEADER_LEN + 4;
     public static final int IPV6_UDP_DESTINATION_PORT_OFFSET =
             ETH_HEADER_LEN + IPV6_HEADER_LEN + 2;
