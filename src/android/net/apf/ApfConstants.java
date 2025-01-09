@@ -26,6 +26,8 @@ import static com.android.net.module.util.NetworkStackConstants.IPV4_OPTION_TYPE
 
 import android.net.InetAddresses;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Set;
 
 /**
@@ -204,6 +206,8 @@ public final class ApfConstants {
     public static final byte[] ETH_MULTICAST_IGMP_V3_ALL_MULTICAST_ROUTERS_ADDRESS =
             { (byte) 0x01, 0, (byte) 0x5e, 0, 0, (byte) 0x16};
     public static final int MDNS_PORT = 5353;
+    public static final byte[] MDNS_PORT_IN_BYTES = ByteBuffer.allocate(2).order(
+            ByteOrder.BIG_ENDIAN).putShort((short) MDNS_PORT).array();
 
     public static final long MDNS_IPV4_ADDR_IN_LONG = 0xE00000FBL;
     public static final byte[] MDNS_IPV4_ADDR = InetAddresses.parseNumericAddress(
