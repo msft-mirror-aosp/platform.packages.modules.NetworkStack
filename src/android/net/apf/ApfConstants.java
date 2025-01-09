@@ -72,6 +72,22 @@ public final class ApfConstants {
     public static final int IPV4_ROUTER_ALERT_OPTION_LEN = 4;
     public static final int IGMP_CHECKSUM_OFFSET =
             ETHER_HEADER_LEN + IPV4_HEADER_MIN_LEN + IPV4_ROUTER_ALERT_OPTION_LEN + 2;
+    public static final byte[] IGMPV2_REPORT_FROM_IPV4_OPTION_TO_IGMP_CHECKSUM = {
+            // option type
+            (byte) IPV4_OPTION_TYPE_ROUTER_ALERT,
+            // option length
+            (byte) IPV4_OPTION_LEN_ROUTER_ALERT,
+            // option value
+            0,  0,
+            // IGMP type
+            // Indicating an IGMPv2 Membership Report (Join Group)
+            (byte) IPV4_IGMP_TYPE_V2_JOIN_REPORT,
+            // max response time
+            // Typically used in IGMP queries,but is not significant in IGMPv2 reports.
+            0,
+            // checksum, calculate later
+            0, 0
+    };
 
     // IGMPv3 group record types
     // From include/uapi/linux/igmp.h
