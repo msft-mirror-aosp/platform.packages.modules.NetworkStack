@@ -239,7 +239,7 @@ public final class ProcfsParsingUtils {
 
                 ipAddresses.add(ipv4Address);
             }
-        } catch (UnknownHostException | IllegalArgumentException e) {
+        } catch (Exception e) {
             Log.wtf(TAG, "failed to convert to Inet4Address.", e);
             // always return IPv4 all host address (224.0.0.1) if any error during parsing.
             // this aligns with kernel behavior, it will join 224.0.0.1 when the interface is up.
@@ -268,14 +268,14 @@ public final class ProcfsParsingUtils {
     /**
      * Returns the default TTL value for IPv4 packets.
      */
-    private static int getIpv4DefaultTtl() {
+    public static int getIpv4DefaultTtl() {
         return parseDefaultTtl(readFile(IPV4_DEFAULT_TTL_PATH));
     }
 
     /**
      * Returns the default HopLimit value for IPv6 packets.
      */
-    private static int getIpv6DefaultHopLimit(@NonNull String ifname) {
+    public static int getIpv6DefaultHopLimit(@NonNull String ifname) {
         final String hopLimitPath = IPV6_CONF_PATH + ifname + "/hop_limit";
         return parseDefaultTtl(readFile(hopLimitPath));
     }
