@@ -1009,8 +1009,10 @@ public class IpClient extends StateMachine {
          * Create an IpClientNetlinkMonitor instance.
          */
         public IpClientNetlinkMonitor makeIpClientNetlinkMonitor(Handler h, SharedLog log,
-                String tag, int sockRcvbufSize, INetlinkMessageProcessor p) {
-            return new IpClientNetlinkMonitor(h, log, tag, sockRcvbufSize, p);
+                String tag, int sockRcvbufSize, boolean isDhcp6PdPreferredFlagEnabled,
+                INetlinkMessageProcessor p) {
+            return new IpClientNetlinkMonitor(h, log, tag, sockRcvbufSize,
+                    isDhcp6PdPreferredFlagEnabled, p);
         }
     }
 
@@ -1088,7 +1090,7 @@ public class IpClient extends StateMachine {
                 mDependencies.isFeatureEnabled(mContext, IPCLIENT_DHCPV6_PD_PREFERRED_FLAG_VERSION);
 
         IpClientLinkObserver.Configuration config = new IpClientLinkObserver.Configuration(
-                mAcceptRaMinLft, mPopulateLinkAddressLifetime);
+                mAcceptRaMinLft, mPopulateLinkAddressLifetime, mDhcp6PdPreferredFlagEnabled);
 
         mLinkObserver = new IpClientLinkObserver(
                 mContext, getHandler(),
