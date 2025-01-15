@@ -26,6 +26,8 @@ import static com.android.net.module.util.NetworkStackConstants.IPV4_OPTION_TYPE
 
 import android.net.InetAddresses;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Set;
 
 /**
@@ -70,6 +72,22 @@ public final class ApfConstants {
     public static final int IPV4_ROUTER_ALERT_OPTION_LEN = 4;
     public static final int IGMP_CHECKSUM_OFFSET =
             ETHER_HEADER_LEN + IPV4_HEADER_MIN_LEN + IPV4_ROUTER_ALERT_OPTION_LEN + 2;
+    public static final byte[] IGMPV2_REPORT_FROM_IPV4_OPTION_TO_IGMP_CHECKSUM = {
+            // option type
+            (byte) IPV4_OPTION_TYPE_ROUTER_ALERT,
+            // option length
+            (byte) IPV4_OPTION_LEN_ROUTER_ALERT,
+            // option value
+            0,  0,
+            // IGMP type
+            // Indicating an IGMPv2 Membership Report (Join Group)
+            (byte) IPV4_IGMP_TYPE_V2_JOIN_REPORT,
+            // max response time
+            // Typically used in IGMP queries,but is not significant in IGMPv2 reports.
+            0,
+            // checksum, calculate later
+            0, 0
+    };
 
     // IGMPv3 group record types
     // From include/uapi/linux/igmp.h
@@ -204,6 +222,8 @@ public final class ApfConstants {
     public static final byte[] ETH_MULTICAST_IGMP_V3_ALL_MULTICAST_ROUTERS_ADDRESS =
             { (byte) 0x01, 0, (byte) 0x5e, 0, 0, (byte) 0x16};
     public static final int MDNS_PORT = 5353;
+    public static final byte[] MDNS_PORT_IN_BYTES = ByteBuffer.allocate(2).order(
+            ByteOrder.BIG_ENDIAN).putShort((short) MDNS_PORT).array();
 
     public static final long MDNS_IPV4_ADDR_IN_LONG = 0xE00000FBL;
     public static final byte[] MDNS_IPV4_ADDR = InetAddresses.parseNumericAddress(
