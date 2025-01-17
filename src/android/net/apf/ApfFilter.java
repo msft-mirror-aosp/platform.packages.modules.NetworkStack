@@ -1744,7 +1744,7 @@ public class ApfFilter {
      * On entry, we know it is IPv4 ethertype, but don't know anything else.
      * R0/R1 have nothing useful in them, and can be clobbered.
      */
-    private void generateUnicastIpv4PingOffload(ApfV6Generator gen)
+    private void generateUnicastIpv4PingOffload(ApfV6GeneratorBase<?> gen)
             throws IllegalInstructionException {
 
         final String skipIpv4PingFilter = gen.getUniqueLabel();
@@ -2019,7 +2019,7 @@ public class ApfFilter {
         );
     }
 
-    private void generateNsFilter(ApfV6Generator v6Gen)
+    private void generateNsFilter(ApfV6GeneratorBase<?> v6Gen)
             throws IllegalInstructionException {
         final List<byte[]> allIPv6Addrs = getIpv6Addresses(
                 true /* includeNonTentative */,
