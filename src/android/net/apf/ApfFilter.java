@@ -31,8 +31,6 @@ import static android.net.apf.ApfConstants.ECHO_PORT;
 import static android.net.apf.ApfConstants.ETH_DEST_ADDR_OFFSET;
 import static android.net.apf.ApfConstants.ETH_ETHERTYPE_OFFSET;
 import static android.net.apf.ApfConstants.ETH_HEADER_LEN;
-import static android.net.apf.ApfConstants.ETH_MULTICAST_MDNS_V4_MAC_ADDRESS;
-import static android.net.apf.ApfConstants.ETH_MULTICAST_MDNS_V6_MAC_ADDRESS;
 import static android.net.apf.ApfConstants.ETH_TYPE_MAX;
 import static android.net.apf.ApfConstants.ETH_TYPE_MIN;
 import static android.net.apf.ApfConstants.FIXED_ARP_REPLY_HEADER;
@@ -84,7 +82,6 @@ import static android.net.apf.ApfConstants.IPV6_PAYLOAD_LEN_OFFSET;
 import static android.net.apf.ApfConstants.IPV6_SOLICITED_NODES_PREFIX;
 import static android.net.apf.ApfConstants.IPV6_SRC_ADDR_OFFSET;
 import static android.net.apf.ApfConstants.IPV6_UNSPECIFIED_ADDRESS;
-import static android.net.apf.ApfConstants.MDNS_PORT;
 import static android.net.apf.ApfConstants.TCP_HEADER_SIZE_OFFSET;
 import static android.net.apf.ApfConstants.TCP_UDP_DESTINATION_PORT_OFFSET;
 import static android.net.apf.ApfConstants.TCP_UDP_SOURCE_PORT_OFFSET;
@@ -1599,8 +1596,6 @@ public class ApfFilter {
 
     private final ArrayList<Ra> mRas = new ArrayList<>();
     private final SparseArray<KeepalivePacket> mKeepalivePackets = new SparseArray<>();
-    // TODO: change the mMdnsAllowList to proper type for APFv6 based mDNS offload
-    private final List<String[]> mMdnsAllowList = new ArrayList<>();
 
     // We don't want to filter an RA for it's whole lifetime as it'll be expired by the time we ever
     // see a refresh.  Using half the lifetime might be a good idea except for the fact that
@@ -2294,79 +2289,6 @@ public class ApfFilter {
     }
 
     /**
-     * Generate filter code to process mDNS packets. Execution of this code ends in * DROP_LABEL
-     * or PASS_LABEL if the packet is mDNS packets. Otherwise, skip this check.
-     */
-    private void generateMdnsFilter(ApfV4GeneratorBase<?> gen)
-            throws IllegalInstructionException {
-        final String skipMdnsv4Filter = gen.getUniqueLabel();
-        final String skipMdnsFilter = gen.getUniqueLabel();
-        final String checkMdnsUdpPort = gen.getUniqueLabel();
-
-        // Only turn on the filter if multicast filter is on and the qname allowlist is non-empty.
-        if (!mMulticastFilter || mMdnsAllowList.isEmpty()) {
-            return;
-        }
-
-        // Here's a basic summary of what the mDNS filter program does:
-        //
-        // A packet is considered as a multicast mDNS packet if it matches all the following
-        // conditions
-        //   1. its destination MAC address matches 01:00:5E:00:00:FB or 33:33:00:00:00:FB, for
-        //   v4 and v6 respectively.
-        //   2. it is an IPv4/IPv6 packet
-        //   3. it is a UDP packet with port 5353
-
-        // Check it's L2 mDNS multicast address.
-        gen.addLoadImmediate(R0, ETH_DEST_ADDR_OFFSET);
-        gen.addJumpIfBytesAtR0NotEqual(ETH_MULTICAST_MDNS_V4_MAC_ADDRESS, skipMdnsv4Filter);
-
-        // Checks it's IPv4.
-        gen.addLoad16(R0, ETH_ETHERTYPE_OFFSET);
-        gen.addJumpIfR0NotEquals(ETH_P_IP, skipMdnsFilter);
-
-        // Check it's not a fragment.
-        gen.addLoad16(R0, IPV4_FRAGMENT_OFFSET_OFFSET);
-        gen.addJumpIfR0AnyBitsSet(IPV4_FRAGMENT_MORE_FRAGS_MASK | IPV4_FRAGMENT_OFFSET_MASK,
-                skipMdnsFilter);
-
-        // Checks it's UDP.
-        gen.addLoad8(R0, IPV4_PROTOCOL_OFFSET);
-        gen.addJumpIfR0NotEquals(IPPROTO_UDP, skipMdnsFilter);
-
-        // Set R1 to IPv4 header.
-        gen.addLoadFromMemory(R1, MemorySlot.IPV4_HEADER_SIZE);
-        gen.addJump(checkMdnsUdpPort);
-
-        gen.defineLabel(skipMdnsv4Filter);
-
-        // Checks it's L2 mDNS multicast address.
-        // Relies on R0 containing the ethernet destination mac address offset.
-        gen.addJumpIfBytesAtR0NotEqual(ETH_MULTICAST_MDNS_V6_MAC_ADDRESS, skipMdnsFilter);
-
-        // Checks it's IPv6.
-        gen.addLoad16(R0, ETH_ETHERTYPE_OFFSET);
-        gen.addJumpIfR0NotEquals(ETH_P_IPV6, skipMdnsFilter);
-
-        // Checks it's UDP.
-        gen.addLoad8(R0, IPV6_NEXT_HEADER_OFFSET);
-        gen.addJumpIfR0NotEquals(IPPROTO_UDP, skipMdnsFilter);
-
-        // Set R1 to IPv6 header.
-        gen.addLoadImmediate(R1, IPV6_HEADER_LEN);
-
-        // Checks it's mDNS UDP port
-        gen.defineLabel(checkMdnsUdpPort);
-        gen.addLoad16Indexed(R0, TCP_UDP_DESTINATION_PORT_OFFSET);
-        gen.addJumpIfR0NotEquals(MDNS_PORT, skipMdnsFilter);
-
-        // TODO: implement APFv6 mDNS offload
-
-        // end of mDNS filter
-        gen.defineLabel(skipMdnsFilter);
-    }
-
-    /**
      * Generate filter code to drop IPv4 TCP packets on port 7.
      * <p>
      * On entry, we know it is IPv4 ethertype, but don't know anything else.
@@ -2505,8 +2427,6 @@ public class ApfFilter {
         generateArpFilter(gen);
         gen.defineLabel(skipArpFiltersLabel);
 
-        // Add mDNS filter:
-        generateMdnsFilter(gen);
         gen.addLoad16(R0, ETH_ETHERTYPE_OFFSET);
 
         // Add IPv4 filters:
