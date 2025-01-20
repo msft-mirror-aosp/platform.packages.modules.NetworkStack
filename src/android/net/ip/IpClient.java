@@ -82,6 +82,7 @@ import static com.android.net.module.util.NetworkStackConstants.VENDOR_SPECIFIC_
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_MANAGETEMPADDR;
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_NOPREFIXROUTE;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ARP_OFFLOAD;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_IGMP_OFFLOAD_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ND_OFFLOAD;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_PING4_OFFLOAD_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.APF_POLLING_COUNTERS_VERSION;
@@ -1092,8 +1093,9 @@ public class IpClient extends StateMachine {
                 mContext, APF_HANDLE_ND_OFFLOAD);
         // TODO: turn on APF mDNS offload.
         mApfShouldHandleMdnsOffload = false;
-        // TODO: turn on APF IGMP offload for V.
-        mApfShouldHandleIgmpOffload = NetworkStackUtils.isAtLeast25Q2();
+        mApfShouldHandleIgmpOffload =
+                isAtLeast25Q2() || mDependencies.isFeatureEnabled(context,
+                        APF_HANDLE_IGMP_OFFLOAD_VERSION);
         mApfShouldHandleIpv4PingOffload =
                 isAtLeast25Q2() || mDependencies.isFeatureEnabled(context,
                         APF_HANDLE_PING4_OFFLOAD_VERSION);
