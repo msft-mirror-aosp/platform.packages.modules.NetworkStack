@@ -83,6 +83,7 @@ import static com.android.networkstack.apishim.ConstantsShim.IFA_F_MANAGETEMPADD
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_NOPREFIXROUTE;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ARP_OFFLOAD;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ND_OFFLOAD;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_PING4_OFFLOAD_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.APF_POLLING_COUNTERS_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PD_PREFERRED_FLAG_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION;
@@ -92,6 +93,7 @@ import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_POPULATE_
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_REPLACE_NETD_WITH_NETLINK_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.createInet6AddressFromEui64;
+import static com.android.networkstack.util.NetworkStackUtils.isAtLeast25Q2;
 import static com.android.networkstack.util.NetworkStackUtils.macAddressToEui64;
 import static com.android.server.util.PermissionUtil.enforceNetworkStackCallingPermission;
 
@@ -1092,8 +1094,9 @@ public class IpClient extends StateMachine {
         mApfShouldHandleMdnsOffload = false;
         // TODO: turn on APF IGMP offload for V.
         mApfShouldHandleIgmpOffload = NetworkStackUtils.isAtLeast25Q2();
-        // TODO: turn on Ping4 offload for V.
-        mApfShouldHandleIpv4PingOffload = NetworkStackUtils.isAtLeast25Q2();
+        mApfShouldHandleIpv4PingOffload =
+                isAtLeast25Q2() || mDependencies.isFeatureEnabled(context,
+                        APF_HANDLE_PING4_OFFLOAD_VERSION);
         mPopulateLinkAddressLifetime = mDependencies.isFeatureEnabled(context,
                 IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION);
         mIgnoreNudFailureEnabled = mDependencies.isFeatureEnabled(mContext,
