@@ -558,15 +558,22 @@ public class ApfFilter {
             Log.wtf(TAG, "Failed to start RaPacketReader");
         }
 
-        mIgmpReportMonitor = new IgmpReportMonitor(
-            mHandler,
-            mInterfaceParams,
-            this::updateIPv4MulticastAddrs,
-            mDependencies.createEgressIgmpReportsReaderSocket(ifParams.index)
-        );
-
         if (shouldEnableIgmpOffload()) {
-            mIgmpReportMonitor.start();
+            final FileDescriptor socketFd = mDependencies.createEgressIgmpReportsReaderSocket(
+                    ifParams.index);
+            if (socketFd != null) {
+                mIgmpReportMonitor = new IgmpReportMonitor(
+                        mHandler,
+                        mInterfaceParams,
+                        this::updateIPv4MulticastAddrs,
+                        socketFd
+                );
+                mIgmpReportMonitor.start();
+            } else {
+                mIgmpReportMonitor = null;
+            }
+        } else {
+            mIgmpReportMonitor = null;
         }
 
         // Listen for doze-mode transition changes to enable/disable the IPv6 multicast filter.
@@ -2811,7 +2818,7 @@ public class ApfFilter {
             unregisterOffloadEngine();
         }
 
-        if (shouldEnableIgmpOffload()) {
+        if (shouldEnableIgmpOffload() && mIgmpReportMonitor != null) {
             mIgmpReportMonitor.stop();
         }
     }
