@@ -31,6 +31,7 @@ import android.net.apf.ApfCounterTracker.Counter.DROPPED_ETHERTYPE_NOT_ALLOWED
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_GARP_REPLY
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IGMP_INVALID
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IGMP_REPORT
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IGMP_V3_GENERAL_QUERY_REPLIED
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_BROADCAST_ADDR
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_BROADCAST_NET
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_ICMP_INVALID
@@ -834,7 +835,7 @@ class ApfFilterTest {
 
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     @Test
-    fun testIgmpV3GeneralQueryPassed() {
+    fun testIgmpV3GeneralQueryReplied() {
         val apfFilter = getIgmpApfFilter()
         val program = consumeInstalledProgram(apfController, installCnt = 3)
         // Using scapy to generate IGMPv3 general query packet without router alert option:
@@ -851,13 +852,75 @@ class ApfFilterTest {
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(pkt),
-            PASSED_IPV4
+            DROPPED_IGMP_V3_GENERAL_QUERY_REPLIED
+        )
+
+        val transmittedIgmpv3Reports = consumeTransmittedPackets(1)
+
+        // ###[ Ethernet ]###
+        //   dst       = 01:00:5e:00:00:16
+        //   src       = 02:03:04:05:06:07
+        //   type      = IPv4
+        // ###[ IP ]###
+        //      version   = 4
+        //      ihl       = 6
+        //      tos       = 0xc0
+        //      len       = 56
+        //      id        = 0
+        //      flags     = DF
+        //      frag      = 0
+        //      ttl       = 1
+        //      proto     = igmp
+        //      chksum    = 0xf9e8
+        //      src       = 10.0.0.1
+        //      dst       = 224.0.0.22
+        //      \options   \
+        //       |###[ IP Option Router Alert ]###
+        //       |  copy_flag = 1
+        //       |  optclass  = control
+        //       |  option    = router_alert
+        //       |  length    = 4
+        //       |  alert     = router_shall_examine_packet
+        // ###[ IGMPv3 ]###
+        //         type      = Version 3 Membership Report
+        //         mrcode    = 0
+        //         chksum    = 0xaf4
+        // ###[ IGMPv3mr ]###
+        //            res2      = 0x0
+        //            numgrp    = 3
+        //            \records   \
+        //             |###[ IGMPv3gr ]###
+        //             |  rtype     = Mode Is Exclude
+        //             |  auxdlen   = 0
+        //             |  numsrc    = 0
+        //             |  maddr     = 239.0.0.1
+        //             |  srcaddrs  = []
+        //             |###[ IGMPv3gr ]###
+        //             |  rtype     = Mode Is Exclude
+        //             |  auxdlen   = 0
+        //             |  numsrc    = 0
+        //             |  maddr     = 239.0.0.2
+        //             |  srcaddrs  = []
+        //             |###[ IGMPv3gr ]###
+        //             |  rtype     = Mode Is Exclude
+        //             |  auxdlen   = 0
+        //             |  numsrc    = 0
+        //             |  maddr     = 239.0.0.3
+        //             |  srcaddrs  = []
+        val igmpv3ReportPkt = """
+            01005e000016020304050607080046c00038000040000102f9e80a000001e00000169404000022000af40
+            000000302000000ef00000102000000ef00000202000000ef000003
+        """.replace("\\s+".toRegex(), "").trim()
+
+        assertContentEquals(
+            HexDump.hexStringToByteArray(igmpv3ReportPkt),
+            transmittedIgmpv3Reports[0]
         )
     }
 
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     @Test
-    fun testIgmpV3GeneralQueryWithRouterAlertOptionPassed() {
+    fun testIgmpV3GeneralQueryWithRouterAlertOptionReplied() {
         val apfFilter = getIgmpApfFilter()
         val program = consumeInstalledProgram(apfController, installCnt = 3)
         // Using scapy to generate IGMPv3 general query packet with router alert option:
@@ -874,7 +937,69 @@ class ApfFilterTest {
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(pkt),
-            PASSED_IPV4
+            DROPPED_IGMP_V3_GENERAL_QUERY_REPLIED
+        )
+
+        val transmittedIgmpv3Reports = consumeTransmittedPackets(1)
+
+        // ###[ Ethernet ]###
+        //   dst       = 01:00:5e:00:00:16
+        //   src       = 02:03:04:05:06:07
+        //   type      = IPv4
+        // ###[ IP ]###
+        //      version   = 4
+        //      ihl       = 6
+        //      tos       = 0xc0
+        //      len       = 56
+        //      id        = 0
+        //      flags     = DF
+        //      frag      = 0
+        //      ttl       = 1
+        //      proto     = igmp
+        //      chksum    = 0xf9e8
+        //      src       = 10.0.0.1
+        //      dst       = 224.0.0.22
+        //      \options   \
+        //       |###[ IP Option Router Alert ]###
+        //       |  copy_flag = 1
+        //       |  optclass  = control
+        //       |  option    = router_alert
+        //       |  length    = 4
+        //       |  alert     = router_shall_examine_packet
+        // ###[ IGMPv3 ]###
+        //         type      = Version 3 Membership Report
+        //         mrcode    = 0
+        //         chksum    = 0xaf4
+        // ###[ IGMPv3mr ]###
+        //            res2      = 0x0
+        //            numgrp    = 3
+        //            \records   \
+        //             |###[ IGMPv3gr ]###
+        //             |  rtype     = Mode Is Exclude
+        //             |  auxdlen   = 0
+        //             |  numsrc    = 0
+        //             |  maddr     = 239.0.0.1
+        //             |  srcaddrs  = []
+        //             |###[ IGMPv3gr ]###
+        //             |  rtype     = Mode Is Exclude
+        //             |  auxdlen   = 0
+        //             |  numsrc    = 0
+        //             |  maddr     = 239.0.0.2
+        //             |  srcaddrs  = []
+        //             |###[ IGMPv3gr ]###
+        //             |  rtype     = Mode Is Exclude
+        //             |  auxdlen   = 0
+        //             |  numsrc    = 0
+        //             |  maddr     = 239.0.0.3
+        //             |  srcaddrs  = []
+        val igmpv3ReportPkt = """
+            01005e000016020304050607080046c00038000040000102f9e80a000001e00000169404000022000af40
+            000000302000000ef00000102000000ef00000202000000ef000003
+        """.replace("\\s+".toRegex(), "").trim()
+
+        assertContentEquals(
+            HexDump.hexStringToByteArray(igmpv3ReportPkt),
+            transmittedIgmpv3Reports[0]
         )
     }
 
