@@ -267,7 +267,7 @@ class ApfFilterTest {
         shutdownApfFilters()
         handler.waitForIdle(TIMEOUT_MS)
         Mockito.framework().clearInlineMocks()
-        ApfJniUtils.resetTransmittedPacketMemory()
+        ApfTestHelpers.resetTransmittedPacketMemory()
         handlerThread.quitSafely()
         handlerThread.join()
     }
@@ -868,7 +868,7 @@ class ApfFilterTest {
             """.replace("\\s+".toRegex(), "").trim().uppercase()
         )
 
-        val transmitPackets = ApfJniUtils.getAllTransmittedPackets()
+        val transmitPackets = ApfTestHelpers.getAllTransmittedPackets()
             .map { HexDump.toHexString(it).uppercase() }.toSet()
         assertEquals(igmpv2ReportPkts, transmitPackets)
     }
@@ -999,7 +999,7 @@ class ApfFilterTest {
             """.replace("\\s+".toRegex(), "").trim().uppercase()
         )
 
-        val transmitPackets = ApfJniUtils.getAllTransmittedPackets()
+        val transmitPackets = ApfTestHelpers.getAllTransmittedPackets()
             .map { HexDump.toHexString(it).uppercase() }.toSet()
         assertEquals(igmpv2ReportPkts, transmitPackets)
     }
