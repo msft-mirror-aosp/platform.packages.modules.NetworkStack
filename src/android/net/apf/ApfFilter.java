@@ -3236,7 +3236,6 @@ public class ApfFilter {
     }
 
     public void dump(IndentingPrintWriter pw) {
-        // TODO: use HandlerUtils.runWithScissors() to dump APF on the handler thread.
         pw.println(String.format(
                 "Capabilities: { apfVersionSupported: %d, maximumApfProgramSize: %d }",
                 mApfVersionSupported, mApfRamSize));
