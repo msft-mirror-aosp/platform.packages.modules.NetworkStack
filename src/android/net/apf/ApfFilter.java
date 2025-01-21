@@ -574,7 +574,7 @@ public class ApfFilter {
             Log.wtf(TAG, "Failed to start RaPacketReader");
         }
 
-        if (shouldMonitoringIgmpReports()) {
+        if (shouldMonitorIgmpReports()) {
             final FileDescriptor socketFd = mDependencies.createEgressIgmpReportsReaderSocket(
                     ifParams.index);
             if (socketFd != null) {
@@ -3038,7 +3038,7 @@ public class ApfFilter {
             unregisterOffloadEngine();
         }
 
-        if (shouldMonitoringIgmpReports() && mIgmpReportMonitor != null) {
+        if (shouldMonitorIgmpReports() && mIgmpReportMonitor != null) {
             mIgmpReportMonitor.stop();
         }
     }
@@ -3152,7 +3152,7 @@ public class ApfFilter {
         return shouldUseApfV6Generator() && mShouldHandleMdnsOffload;
     }
 
-    private boolean shouldMonitoringIgmpReports() {
+    private boolean shouldMonitorIgmpReports() {
         return shouldUseApfV6Generator() && mShouldHandleIgmpOffload;
     }
 
@@ -3161,7 +3161,7 @@ public class ApfFilter {
         // multicast, and IGMP packets are not needed for this address, IGMP offloading is only
         // necessary if there are additional joined multicast addresses
         // (mIPv4MulticastAddresses.size() > 1).
-        return shouldMonitoringIgmpReports() && mIPv4MulticastAddresses.size() > 1
+        return shouldMonitorIgmpReports() && mIPv4MulticastAddresses.size() > 1
                 && mIPv4Address != null;
     }
 
