@@ -2013,6 +2013,10 @@ public class ApfFilter {
         // If TCP unicast on port 7, drop
         generateV4TcpPort7Filter(gen);
 
+        if (shouldEnableIpv4PingOffload()) {
+            generateUnicastIpv4PingOffload((ApfV6GeneratorBase<?>) gen);
+        }
+
         if (mMulticastFilter) {
             // Otherwise, this is an IPv4 unicast, pass
             // If L2 broadcast packet, drop.
@@ -2020,10 +2024,6 @@ public class ApfFilter {
             gen.addLoadImmediate(R0, ETH_DEST_ADDR_OFFSET);
             gen.addCountAndPassIfBytesAtR0NotEqual(ETHER_BROADCAST, PASSED_IPV4_UNICAST);
             gen.addCountAndDrop(DROPPED_IPV4_L2_BROADCAST);
-        }
-
-        if (shouldEnableIpv4PingOffload()) {
-            generateUnicastIpv4PingOffload((ApfV6GeneratorBase<?>) gen);
         }
 
         // Otherwise, pass

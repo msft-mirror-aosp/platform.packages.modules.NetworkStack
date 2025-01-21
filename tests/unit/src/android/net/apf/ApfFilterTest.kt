@@ -2725,8 +2725,11 @@ class ApfFilterTest {
         }
     }
 
-    private fun getApfWithIpv4PingOffloadEnabled(): Pair<ApfFilter, ByteArray> {
+    private fun getApfWithIpv4PingOffloadEnabled(
+        enableMultiCastFilter: Boolean = true
+    ): Pair<ApfFilter, ByteArray> {
         val apfConfig = getDefaultConfig()
+        apfConfig.multicastFilter = enableMultiCastFilter
         apfConfig.shouldHandleIpv4PingOffload = true
         val apfFilter = getApfFilter(apfConfig)
         consumeInstalledProgram(apfController, installCnt = 2)
@@ -2838,7 +2841,7 @@ class ApfFilterTest {
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(ipv4EchoRequestPkt),
-            PASSED_IPV4
+            PASSED_IPV4_UNICAST
         )
     }
 
@@ -2860,14 +2863,14 @@ class ApfFilterTest {
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(ipv4EchoRequestPkt),
-            PASSED_IPV4
+            PASSED_IPV4_UNICAST
         )
     }
 
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     @Test
     fun testBroadcastIpv4EchoRequestPassed() {
-        val (apfFilter, program) = getApfWithIpv4PingOffloadEnabled()
+        val (apfFilter, program) = getApfWithIpv4PingOffloadEnabled(enableMultiCastFilter = false)
         // Using scapy to generate broadcast IPv4 echo request packet:
         // eth = Ether(src="01:02:03:04:05:06", dst="ff:ff:ff:ff:ff:ff")
         // ip = IP(src="10.0.0.2", dst="10.0.0.255")
@@ -2904,7 +2907,7 @@ class ApfFilterTest {
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(ipv4EchoReplyPkt),
-            PASSED_IPV4
+            PASSED_IPV4_UNICAST
         )
     }
 
