@@ -2023,7 +2023,7 @@ public class ApfFilter {
         }
 
         if (shouldEnableIpv4PingOffload()) {
-            generateUnicastIpv4PingOffload(tryToConvertToApfV6Generator(gen));
+            generateUnicastIpv4PingOffload((ApfV6GeneratorBase<?>) gen);
         }
 
         // Otherwise, pass
