@@ -202,7 +202,7 @@ public class ApfTest {
         mHandlerThread = new HandlerThread("ApfTestThread");
         mHandlerThread.start();
         mHandler = new Handler(mHandlerThread.getLooper());
-        mApfTestHelpers = new ApfTestHelpers();
+        mApfTestHelpers = new ApfTestHelpers(6);
     }
 
     private void shutdownApfFilters() throws Exception {
