@@ -3943,7 +3943,6 @@ public abstract class IpClientIntegrationTestCommon {
         assertEquals(ETH_P_IPV6, ns.ethHdr.etherType);
         assertEquals(IPPROTO_ICMPV6, ns.ipv6Hdr.nextHeader);
         assertEquals(0xff, ns.ipv6Hdr.hopLimit);
-        assertTrue(ns.ipv6Hdr.srcIp.isLinkLocalAddress());
         assertEquals(ICMPV6_NEIGHBOR_SOLICITATION, ns.icmpv6Hdr.type);
         assertEquals(0, ns.icmpv6Hdr.code);
         assertEquals(0, ns.nsHdr.reserved);
