@@ -1090,10 +1090,10 @@ public class IpClient extends StateMachine {
                 mContext, APF_HANDLE_ND_OFFLOAD);
         // TODO: turn on APF mDNS offload.
         mApfShouldHandleMdnsOffload = false;
-        // TODO: turn on APF IGMP offload.
-        mApfShouldHandleIgmpOffload = false;
-        // TODO: turn on Ping4 offload.
-        mApfShouldHandleIpv4PingOffload = false;
+        // TODO: turn on APF IGMP offload for V.
+        mApfShouldHandleIgmpOffload = NetworkStackUtils.isAtLeast25Q2();
+        // TODO: turn on Ping4 offload for V.
+        mApfShouldHandleIpv4PingOffload = NetworkStackUtils.isAtLeast25Q2();
         mPopulateLinkAddressLifetime = mDependencies.isFeatureEnabled(context,
                 IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION);
         mIgnoreNudFailureEnabled = mDependencies.isFeatureEnabled(mContext,
