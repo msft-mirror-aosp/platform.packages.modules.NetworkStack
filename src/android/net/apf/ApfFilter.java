@@ -2264,12 +2264,15 @@ public class ApfFilter {
         //
         // if there is a hop-by-hop option present (e.g. MLD query)
         //   pass
+        //
         // if we're dropping multicast
         //   if it's not ICMPv6 or it's ICMPv6 but we're in doze mode:
         //     if it's multicast:
         //       drop
         //     pass
-        // (APFv6+ specific logic) if it's ICMPv6 NS:
+        //
+        // (APFv6+ specific logic)
+        // if it's ICMPv6 NS:
         //   if there are no IPv6 addresses (including link local address) on the interface:
         //     pass
         //   if MAC dst is none of known {unicast, multicast, broadcast} MAC addresses
@@ -2298,10 +2301,13 @@ public class ApfFilter {
         //   if multicast MAC in SLLA option:
         //     drop
         //   transmit NA and drop
+        //
         // if it's ICMPv6 RS to any:
         //   drop
+        //
         // if it's ICMPv6 NA to anything in ff02::/120
         //   drop
+        //
         // if keepalive ack
         //   drop
 
