@@ -16,6 +16,9 @@
 
 package com.android.networkstack.util;
 
+import static android.os.Build.VERSION.CODENAME;
+import static android.os.Build.VERSION.SDK_INT;
+
 import android.content.Context;
 import android.net.IpPrefix;
 import android.net.LinkAddress;
@@ -23,6 +26,7 @@ import android.net.MacAddress;
 import android.system.ErrnoException;
 import android.util.Log;
 
+import androidx.annotation.ChecksSdkIntAtLeast;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
@@ -64,7 +68,7 @@ public class NetworkStackUtils {
     public static final String CAPTIVE_PORTAL_OTHER_HTTP_URLS = "captive_portal_other_http_urls";
 
     /**
-     * A comma separated list of URLs used for network validation. in addition to the HTTPS url
+     * A comma separated list of URLs used for network validation in addition to the HTTPS url
      * associated with the CAPTIVE_PORTAL_HTTPS_URL settings.
      */
     public static final String CAPTIVE_PORTAL_OTHER_HTTPS_URLS = "captive_portal_other_https_urls";
@@ -292,6 +296,18 @@ public class NetworkStackUtils {
     public static final String IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION =
             "ip_reachability_ignore_nud_failure_version";
 
+    /**
+     * Experiment flag to enable the feature of handle IPv4 ping offload in Apf.
+     */
+    public static final String APF_HANDLE_PING4_OFFLOAD_VERSION =
+            "apf_handle_ping_offload_version";
+
+    /**
+     * Experiment flag to enable the feature of handle IGMP offload in Apf.
+     */
+    public static final String APF_HANDLE_IGMP_OFFLOAD_VERSION =
+            "apf_handle_igmp_offload_version";
+
     /**** BEGIN Feature Kill Switch Flags ****/
 
     /**
@@ -428,6 +444,23 @@ public class NetworkStackUtils {
             Log.e(TAG, "Invalid IPv6 address " + HexDump.toHexString(address), e);
             return null;
         }
+    }
+
+    /** Checks if the device is running on a release version of Android Baklava or newer */
+    @ChecksSdkIntAtLeast(api = 36 /* BUILD_VERSION_CODES.Baklava */)
+    public static boolean isAtLeast25Q2() {
+        return SDK_INT >= 36 || (SDK_INT == 35 && isAtLeastPreReleaseCodename("Baklava"));
+    }
+
+    private static boolean isAtLeastPreReleaseCodename(@NonNull String codename) {
+        // Special case "REL", which means the build is not a pre-release build.
+        if ("REL".equals(CODENAME)) {
+            return false;
+        }
+
+        // Otherwise lexically compare them. Return true if the build codename is equal to or
+        // greater than the requested codename.
+        return CODENAME.compareTo(codename) >= 0;
     }
 
     /**

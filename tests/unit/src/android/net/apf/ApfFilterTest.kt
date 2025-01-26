@@ -29,13 +29,19 @@ import android.net.apf.ApfCounterTracker.Counter.DROPPED_ARP_UNKNOWN
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_ARP_V6_ONLY
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_ETHERTYPE_NOT_ALLOWED
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_GARP_REPLY
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IGMP_INVALID
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IGMP_REPORT
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IGMP_V2_GENERAL_QUERY_REPLIED
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IGMP_V3_GENERAL_QUERY_REPLIED
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_BROADCAST_ADDR
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_BROADCAST_NET
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_ICMP_INVALID
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_KEEPALIVE_ACK
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_L2_BROADCAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_MULTICAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_NATT_KEEPALIVE
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_NON_DHCP4
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_PING_REQUEST_REPLIED
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_TCP_PORT7_UNICAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_MULTICAST_NA
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NON_ICMP_MULTICAST
@@ -295,6 +301,26 @@ class ApfFilterTest {
             )
         }
         handlerThread.waitForIdle(TIMEOUT_MS)
+        return apfFilter
+    }
+
+    private fun getIgmpApfFilter(): ApfFilter {
+        val mcastAddrs = listOf(
+            InetAddress.getByName("224.0.0.1") as Inet4Address,
+            InetAddress.getByName("239.0.0.1") as Inet4Address,
+            InetAddress.getByName("239.0.0.2") as Inet4Address,
+            InetAddress.getByName("239.0.0.3") as Inet4Address
+        )
+        val apfConfig = getDefaultConfig()
+        apfConfig.shouldHandleIgmpOffload = true
+
+        // mock IPv4 multicast address from /proc/net/igmp
+        doReturn(mcastAddrs).`when`(dependencies).getIPv4MulticastAddresses(any())
+        val apfFilter = getApfFilter(apfConfig)
+        val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
+        val lp = LinkProperties()
+        lp.addLinkAddress(linkAddress)
+        apfFilter.setLinkProperties(lp)
         return apfFilter
     }
 
@@ -562,6 +588,680 @@ class ApfFilterTest {
                 program,
                 HexDump.hexStringToByteArray(nonDhcpBcastPkt),
                 PASSED_ETHER_OUR_SRC_MAC
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testInvalidIgmpPacketDropped() {
+        val apfFilter = getIgmpApfFilter()
+        val program = consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate invalid length IGMPv1 general query packet:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:01')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.1', len=24, proto=2)
+        //   payload = Raw(b'\x11\x00\xee\xff\x01\x02\x03\x04\x05\x06')
+        //   pkt = ether/ip/payload
+        val payloadLen10Pkt = """
+            01005e00000100112233445508004500001800010000400290e00a000002e00000011100eeff010203040506
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(payloadLen10Pkt),
+            DROPPED_IGMP_INVALID
+        )
+
+        // Using scapy to generate invalid length IGMPv1 general query packet:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:01')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.1', len=20, proto=2)
+        //   payload = Raw(b'\x11\x00\xee\xff\x01\x02')
+        //   pkt = ether/ip/payload
+        val payloadLen7Pkt = """
+            01005e00000100112233445508004500001400010000400290e40a000002e00000011100eeff010203
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(payloadLen7Pkt),
+            DROPPED_IGMP_INVALID
+        )
+
+        // Using scapy to generate invalid length IGMP general query which the destination IP is
+        // not 224.0.0.1:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:05')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.5')
+        //   igmp = IGMP(type=0x11, mrcode=0)
+        //   pkt = ether/ip/igmp
+        val pktWithWrongDst = """
+            01005e00000300112233445508004500001c000100000102cfda0a000002e00000031100eeff00000000
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pktWithWrongDst),
+            DROPPED_IGMP_INVALID
+        )
+
+        // Using scapy to generate invalid IGMP general query with wrong type:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:01')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.1')
+        //   igmp = IGMP(type=0x51, mrcode=0)
+        //   pkt = ether/ip/igmp
+        val pktWithWrongType = """
+            01005e00000100112233445508004500001c000100000102cfdc0a000002e00000015100aeff00000000
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pktWithWrongType),
+            DROPPED_IGMP_INVALID
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV1ReportDropped() {
+        val apfFilter = getIgmpApfFilter()
+        val program = consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv1 report packet:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:7f:00:01')
+        //   ip = IP(src='10.0.0.2', dst='239.0.0.1')
+        //   igmp = IGMP(type=0x12, mrcode=0, gaddr='239.0.0.1')
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e7f000100112233445508004500001c000100000102c0dc0a000002ef0000011200fefdef000001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            DROPPED_IGMP_REPORT
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV1GeneralQueryPassed() {
+        val apfFilter = getIgmpApfFilter()
+        val program = consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv1 general query packet:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:01')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.1')
+        //   igmp = IGMP(type=0x11, mrcode=0)
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e00000100112233445508004500001c000100000102cfdc0a000002e00000011100eeff00000000
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            PASSED_IPV4
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV2ReportDropped() {
+        val apfFilter = getIgmpApfFilter()
+        val program = consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv2 report packet:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:7f:00:01')
+        //   ip = IP(src='10.0.0.2', dst='239.0.0.1')
+        //   igmp = IGMP(type=0x16, gaddr='239.0.0.1')
+        //   pkt = ether/ip/igmp
+        val v2ReportPkt = """
+            01005e7f000100112233445508004500001c000100000102c0dc0a000002ef0000011614fae9ef000001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(v2ReportPkt),
+            DROPPED_IGMP_REPORT
+        )
+
+        // Using scapy to generate IGMPv2 leave packet:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:7f:00:01')
+        //   ip = IP(src='10.0.0.2', dst='239.0.0.1')
+        //   igmp = IGMP(type=0x17, gaddr='239.0.0.1')
+        //   pkt = ether/ip/igmp
+        val v2LeaveReportPkt = """
+            01005e7f000100112233445508004500001c000100000102c0dc0a000002ef0000011714f9e9ef000001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(v2LeaveReportPkt),
+            DROPPED_IGMP_REPORT
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV2GeneralQueryReplied() {
+        val apfFilter = getIgmpApfFilter()
+        val program = consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv2 general query packet without router alert option:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:01')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.1')
+        //   igmp = IGMP(type=0x11)
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e00000100112233445508004500001c000100000102cfdc0a000002e00000011114eeeb00000000
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            DROPPED_IGMP_V2_GENERAL_QUERY_REPLIED
+        )
+
+        val igmpv2ReportPkts = setOf(
+            // ###[ Ethernet ]###
+            //   dst       = 01:00:5e:00:00:01
+            //   src       = 02:03:04:05:06:07
+            //   type      = IPv4
+            // ###[ IP ]###
+            //      version   = 4
+            //      ihl       = 6
+            //      tos       = 0xc0
+            //      len       = 32
+            //      id        = 0
+            //      flags     = DF
+            //      frag      = 0
+            //      ttl       = 1
+            //      proto     = igmp
+            //      chksum    = 0xeb15
+            //      src       = 10.0.0.1
+            //      dst       = 239.0.0.1
+            //      \options   \
+            //       |###[ IP Option Router Alert ]###
+            //       |  copy_flag = 1
+            //       |  optclass  = control
+            //       |  option    = router_alert
+            //       |  length    = 4
+            //       |  alert     = router_shall_examine_packet
+            // ###[ IGMP ]###
+            //         type      = Version 2 - Membership Report
+            //         mrcode    = 0
+            //         chksum    = 0xfafd
+            //         gaddr     = 239.0.0.1
+            """
+            01005e000001020304050607080046c00020000040000102eb150a000001ef000001940400001600fafd
+            ef000001
+            """.replace("\\s+".toRegex(), "").trim().uppercase(),
+
+            // ###[ Ethernet ]###
+            //   dst       = 01:00:5e:00:00:02
+            //   src       = 02:03:04:05:06:07
+            //   type      = IPv4
+            // ###[ IP ]###
+            //      version   = 4
+            //      ihl       = 6
+            //      tos       = 0xc0
+            //      len       = 32
+            //      id        = 0
+            //      flags     = DF
+            //      frag      = 0
+            //      ttl       = 1
+            //      proto     = igmp
+            //      chksum    = 0xeb14
+            //      src       = 10.0.0.1
+            //      dst       = 239.0.0.2
+            //      \options   \
+            //       |###[ IP Option Router Alert ]###
+            //       |  copy_flag = 1
+            //       |  optclass  = control
+            //       |  option    = router_alert
+            //       |  length    = 4
+            //       |  alert     = router_shall_examine_packet
+            // ###[ IGMP ]###
+            //         type      = Version 2 - Membership Report
+            //         mrcode    = 0
+            //         chksum    = 0xfafc
+            //         gaddr     = 239.0.0.2
+            """
+            01005e000002020304050607080046c00020000040000102eb140a000001ef000002940400001600fafc
+            ef000002
+            """.replace("\\s+".toRegex(), "").trim().uppercase(),
+            // ###[ Ethernet ]###
+            //   dst       = 01:00:5e:00:00:03
+            //   src       = 02:03:04:05:06:07
+            //   type      = IPv4
+            // ###[ IP ]###
+            //      version   = 4
+            //      ihl       = 6
+            //      tos       = 0xc0
+            //      len       = 32
+            //      id        = 0
+            //      flags     = DF
+            //      frag      = 0
+            //      ttl       = 1
+            //      proto     = igmp
+            //      chksum    = 0xeb13
+            //      src       = 10.0.0.1
+            //      dst       = 239.0.0.3
+            //      \options   \
+            //       |###[ IP Option Router Alert ]###
+            //       |  copy_flag = 1
+            //       |  optclass  = control
+            //       |  option    = router_alert
+            //       |  length    = 4
+            //       |  alert     = router_shall_examine_packet
+            // ###[ IGMP ]###
+            //         type      = Version 2 - Membership Report
+            //         mrcode    = 0
+            //         chksum    = 0xfafb
+            //         gaddr     = 239.0.0.3
+            """
+            01005e000003020304050607080046c00020000040000102eb130a000001ef000003940400001600fafb
+            ef000003
+            """.replace("\\s+".toRegex(), "").trim().uppercase()
+        )
+
+        val transmitPackets = ApfJniUtils.getAllTransmittedPackets()
+            .map { HexDump.toHexString(it).uppercase() }.toSet()
+        assertEquals(igmpv2ReportPkts, transmitPackets)
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV2GeneralQueryWithRouterAlertOptionReplied() {
+        val apfFilter = getIgmpApfFilter()
+        val program = consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv2 general query packet with router alert option:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:01')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.1', options=[IPOption_Router_Alert()])
+        //   igmp = IGMP(type=0x11)
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e0000010011223344550800460000200001000001023ad40a000002e0000001940400001114eeeb
+            00000000
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            DROPPED_IGMP_V2_GENERAL_QUERY_REPLIED
+        )
+
+        val igmpv2ReportPkts = setOf(
+            // ###[ Ethernet ]###
+            //   dst       = 01:00:5e:00:00:01
+            //   src       = 02:03:04:05:06:07
+            //   type      = IPv4
+            // ###[ IP ]###
+            //      version   = 4
+            //      ihl       = 6
+            //      tos       = 0xc0
+            //      len       = 32
+            //      id        = 0
+            //      flags     = DF
+            //      frag      = 0
+            //      ttl       = 1
+            //      proto     = igmp
+            //      chksum    = 0xeb15
+            //      src       = 10.0.0.1
+            //      dst       = 239.0.0.1
+            //      \options   \
+            //       |###[ IP Option Router Alert ]###
+            //       |  copy_flag = 1
+            //       |  optclass  = control
+            //       |  option    = router_alert
+            //       |  length    = 4
+            //       |  alert     = router_shall_examine_packet
+            // ###[ IGMP ]###
+            //         type      = Version 2 - Membership Report
+            //         mrcode    = 0
+            //         chksum    = 0xfafd
+            //         gaddr     = 239.0.0.1
+            """
+            01005e000001020304050607080046c00020000040000102eb150a000001ef000001940400001600fafd
+            ef000001
+            """.replace("\\s+".toRegex(), "").trim().uppercase(),
+
+            // ###[ Ethernet ]###
+            //   dst       = 01:00:5e:00:00:02
+            //   src       = 02:03:04:05:06:07
+            //   type      = IPv4
+            // ###[ IP ]###
+            //      version   = 4
+            //      ihl       = 6
+            //      tos       = 0xc0
+            //      len       = 32
+            //      id        = 0
+            //      flags     = DF
+            //      frag      = 0
+            //      ttl       = 1
+            //      proto     = igmp
+            //      chksum    = 0xeb14
+            //      src       = 10.0.0.1
+            //      dst       = 239.0.0.2
+            //      \options   \
+            //       |###[ IP Option Router Alert ]###
+            //       |  copy_flag = 1
+            //       |  optclass  = control
+            //       |  option    = router_alert
+            //       |  length    = 4
+            //       |  alert     = router_shall_examine_packet
+            // ###[ IGMP ]###
+            //         type      = Version 2 - Membership Report
+            //         mrcode    = 0
+            //         chksum    = 0xfafc
+            //         gaddr     = 239.0.0.2
+            """
+            01005e000002020304050607080046c00020000040000102eb140a000001ef000002940400001600fafc
+            ef000002
+            """.replace("\\s+".toRegex(), "").trim().uppercase(),
+
+            // ###[ Ethernet ]###
+            //   dst       = 01:00:5e:00:00:03
+            //   src       = 02:03:04:05:06:07
+            //   type      = IPv4
+            // ###[ IP ]###
+            //      version   = 4
+            //      ihl       = 6
+            //      tos       = 0xc0
+            //      len       = 32
+            //      id        = 0
+            //      flags     = DF
+            //      frag      = 0
+            //      ttl       = 1
+            //      proto     = igmp
+            //      chksum    = 0xeb13
+            //      src       = 10.0.0.1
+            //      dst       = 239.0.0.3
+            //      \options   \
+            //       |###[ IP Option Router Alert ]###
+            //       |  copy_flag = 1
+            //       |  optclass  = control
+            //       |  option    = router_alert
+            //       |  length    = 4
+            //       |  alert     = router_shall_examine_packet
+            // ###[ IGMP ]###
+            //         type      = Version 2 - Membership Report
+            //         mrcode    = 0
+            //         chksum    = 0xfafb
+            //         gaddr     = 239.0.0.3
+            """
+            01005e000003020304050607080046c00020000040000102eb130a000001ef000003940400001600fafb
+            ef000003
+            """.replace("\\s+".toRegex(), "").trim().uppercase()
+        )
+
+        val transmitPackets = ApfJniUtils.getAllTransmittedPackets()
+            .map { HexDump.toHexString(it).uppercase() }.toSet()
+        assertEquals(igmpv2ReportPkts, transmitPackets)
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV2GroupSpecificQueryPassed() {
+        val apfFilter = getIgmpApfFilter()
+        val program = consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv2 group specific query packet without router alert option:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:7f:00:01')
+        //   ip = IP(src='10.0.0.2', dst='239.0.0.1')
+        //   igmp = IGMP(type=0x11, gaddr='239.0.0.1')
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e7f000100112233445508004500001c000100000102c0dc0a000002ef0000011114ffe9ef000001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            PASSED_IPV4
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV3ReportDropped() {
+        val apfFilter = getIgmpApfFilter()
+        val program = consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv3 report packet without router alert option:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:16')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.22')
+        //   igmp = IGMPv3(type=0x22)/IGMPv3mr(records=[IGMPv3gr(rtype=2, maddr='239.0.0.1')])
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e000001001122334455080045c00024000100000102cf140a000002e00000012200ecfc000000
+            0102000000ef000001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            DROPPED_IGMP_REPORT
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV3GeneralQueryReplied() {
+        val apfFilter = getIgmpApfFilter()
+        val program = consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv3 general query packet without router alert option:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:01')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.1')
+        //   igmp = IGMPv3(type=0x11)/IGMPv3mq()
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e000001001122334455080045c00020000100000102cf180a000002e00000011114eeeb00000000
+            00000000
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            DROPPED_IGMP_V3_GENERAL_QUERY_REPLIED
+        )
+
+        val transmittedIgmpv3Reports = consumeTransmittedPackets(1)
+
+        // ###[ Ethernet ]###
+        //   dst       = 01:00:5e:00:00:16
+        //   src       = 02:03:04:05:06:07
+        //   type      = IPv4
+        // ###[ IP ]###
+        //      version   = 4
+        //      ihl       = 6
+        //      tos       = 0xc0
+        //      len       = 56
+        //      id        = 0
+        //      flags     = DF
+        //      frag      = 0
+        //      ttl       = 1
+        //      proto     = igmp
+        //      chksum    = 0xf9e8
+        //      src       = 10.0.0.1
+        //      dst       = 224.0.0.22
+        //      \options   \
+        //       |###[ IP Option Router Alert ]###
+        //       |  copy_flag = 1
+        //       |  optclass  = control
+        //       |  option    = router_alert
+        //       |  length    = 4
+        //       |  alert     = router_shall_examine_packet
+        // ###[ IGMPv3 ]###
+        //         type      = Version 3 Membership Report
+        //         mrcode    = 0
+        //         chksum    = 0xaf4
+        // ###[ IGMPv3mr ]###
+        //            res2      = 0x0
+        //            numgrp    = 3
+        //            \records   \
+        //             |###[ IGMPv3gr ]###
+        //             |  rtype     = Mode Is Exclude
+        //             |  auxdlen   = 0
+        //             |  numsrc    = 0
+        //             |  maddr     = 239.0.0.1
+        //             |  srcaddrs  = []
+        //             |###[ IGMPv3gr ]###
+        //             |  rtype     = Mode Is Exclude
+        //             |  auxdlen   = 0
+        //             |  numsrc    = 0
+        //             |  maddr     = 239.0.0.2
+        //             |  srcaddrs  = []
+        //             |###[ IGMPv3gr ]###
+        //             |  rtype     = Mode Is Exclude
+        //             |  auxdlen   = 0
+        //             |  numsrc    = 0
+        //             |  maddr     = 239.0.0.3
+        //             |  srcaddrs  = []
+        val igmpv3ReportPkt = """
+            01005e000016020304050607080046c00038000040000102f9e80a000001e00000169404000022000af40
+            000000302000000ef00000102000000ef00000202000000ef000003
+        """.replace("\\s+".toRegex(), "").trim()
+
+        assertContentEquals(
+            HexDump.hexStringToByteArray(igmpv3ReportPkt),
+            transmittedIgmpv3Reports[0]
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV3GeneralQueryWithRouterAlertOptionReplied() {
+        val apfFilter = getIgmpApfFilter()
+        val program = consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv3 general query packet with router alert option:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:01')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.1', options=[IPOption_Router_Alert()])
+        //   igmp = IGMPv3(type=0x11)/IGMPv3mq()
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e000001001122334455080046c000240001000001023a100a000002e0000001940400001114eeeb0
+            000000000000000
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            DROPPED_IGMP_V3_GENERAL_QUERY_REPLIED
+        )
+
+        val transmittedIgmpv3Reports = consumeTransmittedPackets(1)
+
+        // ###[ Ethernet ]###
+        //   dst       = 01:00:5e:00:00:16
+        //   src       = 02:03:04:05:06:07
+        //   type      = IPv4
+        // ###[ IP ]###
+        //      version   = 4
+        //      ihl       = 6
+        //      tos       = 0xc0
+        //      len       = 56
+        //      id        = 0
+        //      flags     = DF
+        //      frag      = 0
+        //      ttl       = 1
+        //      proto     = igmp
+        //      chksum    = 0xf9e8
+        //      src       = 10.0.0.1
+        //      dst       = 224.0.0.22
+        //      \options   \
+        //       |###[ IP Option Router Alert ]###
+        //       |  copy_flag = 1
+        //       |  optclass  = control
+        //       |  option    = router_alert
+        //       |  length    = 4
+        //       |  alert     = router_shall_examine_packet
+        // ###[ IGMPv3 ]###
+        //         type      = Version 3 Membership Report
+        //         mrcode    = 0
+        //         chksum    = 0xaf4
+        // ###[ IGMPv3mr ]###
+        //            res2      = 0x0
+        //            numgrp    = 3
+        //            \records   \
+        //             |###[ IGMPv3gr ]###
+        //             |  rtype     = Mode Is Exclude
+        //             |  auxdlen   = 0
+        //             |  numsrc    = 0
+        //             |  maddr     = 239.0.0.1
+        //             |  srcaddrs  = []
+        //             |###[ IGMPv3gr ]###
+        //             |  rtype     = Mode Is Exclude
+        //             |  auxdlen   = 0
+        //             |  numsrc    = 0
+        //             |  maddr     = 239.0.0.2
+        //             |  srcaddrs  = []
+        //             |###[ IGMPv3gr ]###
+        //             |  rtype     = Mode Is Exclude
+        //             |  auxdlen   = 0
+        //             |  numsrc    = 0
+        //             |  maddr     = 239.0.0.3
+        //             |  srcaddrs  = []
+        val igmpv3ReportPkt = """
+            01005e000016020304050607080046c00038000040000102f9e80a000001e00000169404000022000af40
+            000000302000000ef00000102000000ef00000202000000ef000003
+        """.replace("\\s+".toRegex(), "").trim()
+
+        assertContentEquals(
+            HexDump.hexStringToByteArray(igmpv3ReportPkt),
+            transmittedIgmpv3Reports[0]
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV3GroupSpecificQueryPassed() {
+        val apfFilter = getIgmpApfFilter()
+        val program = consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv3 group specific query packet
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:7f:00:01')
+        //   ip = IP(src='10.0.0.2', dst='239.0.0.1')
+        //   igmp = IGMPv3(type=0x11)/IGMPv3mq(gaddr='239.0.0.1')
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e7f0001001122334455080045c00020000100000102c0180a000002ef0000011114ffe9ef000001
+            00000000
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            PASSED_IPV4
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV3GroupAndSourceSpecificQueryPassed() {
+        val apfFilter = getIgmpApfFilter()
+        val program = consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv3 group and source specific query packet
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:7f:00:01')
+        //   ip = IP(src='10.0.0.2', dst='239.0.0.1')
+        //   igmp = IGMPv3(type=0x11)/IGMPv3mq(gaddr='239.0.0.1', numsrc=1, srcaddrs=['10.0.0.1'])
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e7f0001001122334455080045c00024000100000102c0140a000002ef0000011114f5e7ef0000010
+            00000010a000001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            PASSED_IPV4
         )
     }
 
@@ -2023,6 +2723,192 @@ class ApfFilterTest {
                 PASSED_IPV6_ICMP
             )
         }
+    }
+
+    private fun getApfWithIpv4PingOffloadEnabled(
+        enableMultiCastFilter: Boolean = true
+    ): Pair<ApfFilter, ByteArray> {
+        val apfConfig = getDefaultConfig()
+        apfConfig.multicastFilter = enableMultiCastFilter
+        apfConfig.shouldHandleIpv4PingOffload = true
+        val apfFilter = getApfFilter(apfConfig)
+        consumeInstalledProgram(apfController, installCnt = 2)
+        val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
+        val lp = LinkProperties()
+        lp.addLinkAddress(linkAddress)
+        apfFilter.setLinkProperties(lp)
+        val program = consumeInstalledProgram(apfController, installCnt = 1)
+        return Pair(apfFilter, program)
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIpv4EchoRequestReplied() {
+        doReturn(64).`when`(dependencies).ipv4DefaultTtl
+        val (apfFilter, program) = getApfWithIpv4PingOffloadEnabled()
+        // Using scapy to generate IPv4 echo request packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="02:03:04:05:06:07")
+        // ip = IP(src="10.0.0.2", dst="10.0.0.1")
+        // icmp = ICMP(id=1, seq=123)
+        // pkt = eth/ip/icmp/b"hello"
+        val ipv4EchoRequestPkt = """
+            02030405060701020304050608004500002100010000400166d90a0000020a0
+            000010800b3b10001007b68656c6c6f
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(ipv4EchoRequestPkt),
+            DROPPED_IPV4_PING_REQUEST_REPLIED
+        )
+
+        val transmitPkt = consumeTransmittedPackets(1)[0]
+
+        // ###[ Ethernet ]###
+        //   dst       = 01:02:03:04:05:06
+        //   src       = 02:03:04:05:06:07
+        //   type      = IPv4
+        // ###[ IP ]###
+        //      version   = 4
+        //      ihl       = 5
+        //      tos       = 0x0
+        //      len       = 33
+        //      id        = 1
+        //      flags     =
+        //      frag      = 0
+        //      ttl       = 64
+        //      proto     = icmp
+        //      chksum    = 0x66d9
+        //      src       = 10.0.0.1
+        //      dst       = 10.0.0.2
+        //      \options   \
+        // ###[ ICMP ]###
+        //         type      = echo-reply
+        //         code      = 0
+        //         chksum    = 0xbbb1
+        //         id        = 0x1
+        //         seq       = 0x7b
+        //         unused    = b''
+        // ###[ Raw ]###
+        //            load      = b'hello'
+        val expectedReply = """
+            01020304050602030405060708004500002100010000400166D90A0000010A0
+            000020000BBB10001007B68656C6C6F
+        """.replace("\\s+".toRegex(), "").trim()
+        assertContentEquals(
+            HexDump.hexStringToByteArray(expectedReply),
+            transmitPkt
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testCorruptedIpv4IcmpPacketDropped() {
+        val (apfFilter, program) = getApfWithIpv4PingOffloadEnabled()
+        // Using scapy to generate corrupted icmp packet
+        // eth = Ether(src="01:02:03:04:05:06", dst="02:03:04:05:06:07")
+        // ip = IP(proto=1, src="10.0.0.2", dst="10.0.0.1")
+        // pkt = eth/ip/b"hello"
+        val ipv4EchoRequestPkt = """
+            02030405060701020304050608004500001900010000400166e10a0000020a0
+            0000168656c6c6f
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(ipv4EchoRequestPkt),
+            DROPPED_IPV4_ICMP_INVALID
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIpv4EchoRequestWithOptionPassed() {
+        val (apfFilter, program) = getApfWithIpv4PingOffloadEnabled()
+        // Using scapy to generate IPv4 echo request packet with option:
+        // eth = Ether(src="01:02:03:04:05:06", dst="02:03:04:05:06:07")
+        // ip = IP(src="10.0.0.2", dst="10.0.0.1", options=IPOption(b'\x94\x04\x00\x00'))
+        // icmp = ICMP(id=1, seq=123)
+        // pkt = eth/ip/icmp/b"hello"
+        val ipv4EchoRequestPkt = """
+            020304050607010203040506080046000025000100004001d1d00a0000020a0
+            00001940400000800b3b10001007b68656c6c6f
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(ipv4EchoRequestPkt),
+            PASSED_IPV4_UNICAST
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIpv4EchoRequestToOtherHostPassed() {
+        val (apfFilter, program) = getApfWithIpv4PingOffloadEnabled()
+        // Using scapy to generate IPv4 echo request packet to other host:
+        // eth = Ether(src="01:02:03:04:05:06", dst="02:03:04:05:06:07")
+        // ip = IP(src="10.0.0.2", dst="10.0.0.111")
+        // icmp = ICMP(id=1, seq=123)
+        // pkt = eth/ip/icmp/b"hello"
+        val ipv4EchoRequestPkt = """
+            020304050607010203040506080045000021000100004001666b0a0000020a0
+            0006f0800b3b10001007b68656c6c6f
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(ipv4EchoRequestPkt),
+            PASSED_IPV4_UNICAST
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testBroadcastIpv4EchoRequestPassed() {
+        val (apfFilter, program) = getApfWithIpv4PingOffloadEnabled(enableMultiCastFilter = false)
+        // Using scapy to generate broadcast IPv4 echo request packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="ff:ff:ff:ff:ff:ff")
+        // ip = IP(src="10.0.0.2", dst="10.0.0.255")
+        // icmp = ICMP(id=1, seq=123)
+        // pkt = eth/ip/icmp/b"hello"
+        val ipv4EchoRequestPkt = """
+            ffffffffffff01020304050608004500002100010000400165db0a0000020a0
+            000ff0800b3b10001007b68656c6c6f
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(ipv4EchoRequestPkt),
+            PASSED_IPV4
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIpv4EchoReplyPassed() {
+        val (apfFilter, program) = getApfWithIpv4PingOffloadEnabled()
+        // Using scapy to generate IPv4 echo reply packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="02:03:04:05:06:07")
+        // ip = IP(src="10.0.0.2", dst="10.0.0.1")
+        // icmp = ICMP(type=0, id=1, seq=123)
+        // pkt = eth/ip/icmp/b"hello"
+        val ipv4EchoReplyPkt = """
+            02030405060701020304050608004500002100010000400166d90a0000020a0
+            000010000bbb10001007b68656c6c6f
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(ipv4EchoReplyPkt),
+            PASSED_IPV4_UNICAST
+        )
     }
 
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
