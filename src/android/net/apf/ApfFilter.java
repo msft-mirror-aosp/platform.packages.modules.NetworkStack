@@ -3115,12 +3115,12 @@ public class ApfFilter {
         }
     }
 
+    @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)
     public boolean enableNdOffload() {
         return mHandleNdOffload && useApfV6Generator();
     }
 
-    @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */, codename =
-            "VanillaIceCream")
+    @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)
     private boolean enableOffloadEngineRegistration() {
         return mHandleMdnsOffload && useApfV6Generator();
     }
@@ -3129,6 +3129,7 @@ public class ApfFilter {
         return mHandleIgmpOffload && useApfV6Generator();
     }
 
+    @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)
     private boolean enableIgmpOffload() {
         // Since the all-hosts multicast address (224.0.0.1) is always present for IPv4
         // multicast, and IGMP packets are not needed for this address, IGMP offloading is only
@@ -3138,10 +3139,12 @@ public class ApfFilter {
                 && mIPv4Address != null;
     }
 
+    @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)
     private boolean enableIpv4PingOffload() {
         return mHandleIpv4PingOffload && useApfV6Generator() && mIPv4Address != null;
     }
 
+    @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)
     private boolean useApfV6Generator() {
         return SdkLevel.isAtLeastV() && ApfV6Generator.supportsVersion(mApfVersionSupported);
     }
