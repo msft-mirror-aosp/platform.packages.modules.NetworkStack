@@ -20,6 +20,8 @@ import android.Manifest.permission.MANAGE_TEST_NETWORKS
 import android.content.Context
 import android.net.InetAddresses.parseNumericAddress
 import android.net.IpPrefix
+import android.net.LinkAddress
+import android.net.LinkProperties
 import android.net.MacAddress
 import android.net.TestNetworkInterface
 import android.net.TestNetworkManager
@@ -32,7 +34,10 @@ import android.system.OsConstants.AF_INET
 import android.system.OsConstants.AF_PACKET
 import android.system.OsConstants.ETH_P_ALL
 import android.system.OsConstants.ETH_P_IPV6
+import android.system.OsConstants.IFA_F_DEPRECATED
+import android.system.OsConstants.IFA_F_TENTATIVE
 import android.system.OsConstants.IPPROTO_UDP
+import android.system.OsConstants.RT_SCOPE_LINK
 import android.system.OsConstants.SOCK_CLOEXEC
 import android.system.OsConstants.SOCK_DGRAM
 import android.system.OsConstants.SOCK_NONBLOCK
@@ -586,6 +591,25 @@ class NetworkStackUtilsIntegrationTest {
             val ether = NetworkStackUtils.ipv4MulticastToEthernetMulticast(addr)
             assertEquals(expectAddr, ether)
         }
+    }
+
+    @Test
+    fun testSelectPreferredIPv6LinkLocalAddress() {
+        val addr1 = LinkAddress("fe80::1/64", IFA_F_TENTATIVE, RT_SCOPE_LINK)
+        val addr2 = LinkAddress("fe80::2/64", 0 /* flags */, RT_SCOPE_LINK)
+        val addr3 = LinkAddress("fe80::3/64", IFA_F_DEPRECATED, RT_SCOPE_LINK)
+
+        val lp1 = LinkProperties()
+        lp1.setLinkAddresses(listOf(addr1, addr2, addr3))
+        assertEquals(addr2.address, NetworkStackUtils.selectPreferredIPv6LinkLocalAddress(lp1))
+
+        val lp2 = LinkProperties()
+        lp2.setLinkAddresses(listOf(addr1, addr3))
+        assertEquals(addr3.address, NetworkStackUtils.selectPreferredIPv6LinkLocalAddress(lp2))
+
+       val lp3 = LinkProperties()
+        lp3.setLinkAddresses(listOf(addr1))
+        assertNull(NetworkStackUtils.selectPreferredIPv6LinkLocalAddress(lp3))
     }
 }
 
