@@ -3109,6 +3109,7 @@ public class ApfFilter {
         return mHandleMdnsOffload && useApfV6Generator();
     }
 
+    @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)
     private boolean enableIgmpReportsMonitor() {
         return mHandleIgmpOffload && useApfV6Generator();
     }
