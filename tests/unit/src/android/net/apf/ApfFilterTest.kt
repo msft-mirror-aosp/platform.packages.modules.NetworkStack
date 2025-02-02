@@ -101,6 +101,7 @@ import com.android.testutils.DevSdkIgnoreRule
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo
 import com.android.testutils.DevSdkIgnoreRunner
 import com.android.testutils.quitResources
+import com.android.testutils.visibleOnHandlerThread
 import com.android.testutils.waitForIdle
 import java.io.FileDescriptor
 import java.net.Inet4Address
@@ -280,8 +281,8 @@ class ApfFilterTest {
         config.multicastFilter = false
         config.ieee802_3Filter = false
         config.ethTypeBlackList = IntArray(0)
-        config.shouldHandleArpOffload = true
-        config.shouldHandleNdOffload = true
+        config.handleArpOffload = true
+        config.handleNdOffload = true
         return config
     }
 
@@ -312,7 +313,7 @@ class ApfFilterTest {
             InetAddress.getByName("239.0.0.3") as Inet4Address
         )
         val apfConfig = getDefaultConfig()
-        apfConfig.shouldHandleIgmpOffload = true
+        apfConfig.handleIgmpOffload = true
 
         // mock IPv4 multicast address from /proc/net/igmp
         doReturn(mcastAddrs).`when`(dependencies).getIPv4MulticastAddresses(any())
@@ -2036,7 +2037,7 @@ class ApfFilterTest {
     @Test
     fun testArpOffloadDisabled() {
         val apfConfig = getDefaultConfig()
-        apfConfig.shouldHandleArpOffload = false
+        apfConfig.handleArpOffload = false
         val apfFilter = getApfFilter(apfConfig)
         consumeInstalledProgram(apfController, installCnt = 2)
         val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
@@ -2674,7 +2675,7 @@ class ApfFilterTest {
     @Test
     fun testNdOffloadDisabled() {
         val apfConfig = getDefaultConfig()
-        apfConfig.shouldHandleNdOffload = false
+        apfConfig.handleNdOffload = false
         val apfFilter = getApfFilter(apfConfig)
         val lp = LinkProperties()
         for (addr in hostIpv6Addresses) {
@@ -2730,7 +2731,7 @@ class ApfFilterTest {
     ): Pair<ApfFilter, ByteArray> {
         val apfConfig = getDefaultConfig()
         apfConfig.multicastFilter = enableMultiCastFilter
-        apfConfig.shouldHandleIpv4PingOffload = true
+        apfConfig.handleIpv4PingOffload = true
         val apfFilter = getApfFilter(apfConfig)
         consumeInstalledProgram(apfController, installCnt = 2)
         val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
@@ -2913,59 +2914,34 @@ class ApfFilterTest {
 
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     @Test
-    fun testRegisterOffloadEngine() {
+    fun testOffloadServiceInfoUpdateTriggersProgramInstall() {
         val apfConfig = getDefaultConfig()
-        apfConfig.shouldHandleMdnsOffload = true
+        apfConfig.handleMdnsOffload = true
         val apfFilter = getApfFilter(apfConfig)
+        consumeInstalledProgram(apfController, installCnt = 2)
         val captor = ArgumentCaptor.forClass(OffloadEngine::class.java)
         verify(nsdManager).registerOffloadEngine(
-                eq(ifParams.name),
-                anyLong(),
-                anyLong(),
-                any(),
-                captor.capture()
+            eq(ifParams.name),
+            anyLong(),
+            anyLong(),
+            any(),
+            captor.capture()
         )
         val offloadEngine = captor.value
-        val info1 = OffloadServiceInfo(
-                OffloadServiceInfo.Key("TestServiceName", "_advertisertest._tcp"),
-                listOf(),
-                "Android_test.local",
-                byteArrayOf(0x01, 0x02, 0x03, 0x04),
-                0,
-                OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
+        val info = OffloadServiceInfo(
+            OffloadServiceInfo.Key("gambit", "_googlecast._tcp"),
+            listOf(),
+            "Android_f47ac10b58cc4b88bc3f5e7a81e59872.local",
+            ByteArray(5) { 0x01 },
+            0,
+            OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
         )
-        val info2 = OffloadServiceInfo(
-                OffloadServiceInfo.Key("TestServiceName2", "_advertisertest._tcp"),
-                listOf(),
-                "Android_test.local",
-                byteArrayOf(0x01, 0x02, 0x03, 0x04),
-                0,
-                OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
-        )
-        val updatedInfo1 = OffloadServiceInfo(
-                OffloadServiceInfo.Key("TestServiceName", "_advertisertest._tcp"),
-                listOf(),
-                "Android_test.local",
-                byteArrayOf(),
-                0,
-                OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
-        )
-        handler.post { offloadEngine.onOffloadServiceUpdated(info1) }
-        handlerThread.waitForIdle(TIMEOUT_MS)
-        assertContentEquals(listOf(info1), apfFilter.mOffloadServiceInfos)
-        handler.post { offloadEngine.onOffloadServiceUpdated(info2) }
-        handlerThread.waitForIdle(TIMEOUT_MS)
-        assertContentEquals(listOf(info1, info2), apfFilter.mOffloadServiceInfos)
-        handler.post { offloadEngine.onOffloadServiceUpdated(updatedInfo1) }
-        handlerThread.waitForIdle(TIMEOUT_MS)
-        assertContentEquals(listOf(info2, updatedInfo1), apfFilter.mOffloadServiceInfos)
-        handler.post { offloadEngine.onOffloadServiceRemoved(updatedInfo1) }
-        handlerThread.waitForIdle(TIMEOUT_MS)
-        assertContentEquals(listOf(info2), apfFilter.mOffloadServiceInfos)
+        visibleOnHandlerThread(handler) { offloadEngine.onOffloadServiceUpdated(info) }
 
-        handler.post { apfFilter.shutdown() }
-        handlerThread.waitForIdle(TIMEOUT_MS)
-        verify(nsdManager).unregisterOffloadEngine(any())
+        verify(apfController).installPacketFilter(any())
+
+        visibleOnHandlerThread(handler) { apfFilter.shutdown() }
+        verify(nsdManager).unregisterOffloadEngine(eq(offloadEngine))
     }
 
     @Test
@@ -3024,7 +3000,7 @@ class ApfFilterTest {
         )
         doReturn(mcastAddrs).`when`(dependencies).getIPv4MulticastAddresses(any())
         val apfConfig = getDefaultConfig()
-        apfConfig.shouldHandleIgmpOffload = true
+        apfConfig.handleIgmpOffload = true
         val apfFilter = getApfFilter(apfConfig)
         consumeInstalledProgram(apfController, installCnt = 2)
         val addr = InetAddress.getByName("239.0.0.1") as Inet4Address
