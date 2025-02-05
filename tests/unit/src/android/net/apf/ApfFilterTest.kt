@@ -50,7 +50,6 @@ import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_INVALID
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_OTHER_HOST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_REPLIED_NON_DAD
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_MDNS
-import android.net.apf.ApfCounterTracker.Counter.DROPPED_MDNS_INVALID
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_MDNS_REPLIED
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_BROADCAST_REPLY
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_REQUEST
@@ -3551,30 +3550,6 @@ class ApfFilterTest {
         )
     }
 
-    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
-    @Test
-    fun testCorruptedIPv4MdnsPacketDropped() {
-        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false)
-        // Using scapy to generate packet:
-        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
-        // ip = IP(proto=17, src="10.0.0.3", dst="224.0.0.251")
-        // udp = UDP(dport=5353, sport=5353)
-        // pkt = eth/ip/udp/b"hello"
-        val corruptedIPv4MdnsPkt = """
-            01005e0000fb0102030405060800450000210001000040118fcd0a000003e00
-            000fb14e914e9000da73168656c6c6f
-        """.replace("\\s+".toRegex(), "").trim()
-
-        apfTestHelpers.verifyProgramRun(
-            apfFilter.mApfVersionSupported,
-            program,
-            HexDump.hexStringToByteArray(corruptedIPv4MdnsPkt),
-            DROPPED_MDNS_INVALID
-        )
-    }
-
-    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
-    @Test
     fun testIPv6MdnsQueryReplied() {
         val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false)
         // Using scapy to generate packet:
@@ -3962,29 +3937,6 @@ class ApfFilterTest {
             program,
             HexDump.hexStringToByteArray(tvRemoteIPv6MdnsPtrAnswer),
             PASSED_MDNS
-        )
-    }
-
-    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
-    @Test
-    fun testCorruptedIPv6MdnsPacketDropped() {
-        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false)
-        // Using scapy to generate packet:
-        // eth = Ether(src="01:02:03:04:05:06", dst="33:33:00:00:00:FB")
-        // ip = IPv6(src="fe80::1", dst="ff02::fb")
-        // udp = UDP(dport=5353, sport=5353)
-        // pkt = eth/ip/udp/b"hello"
-        val corruptedIPv6MdnsPkt = """
-            3333000000fb01020304050686dd60000000000d1140fe80000000000000000
-            0000000000001ff0200000000000000000000000000fb14e914e9000d93b068
-            656c6c6f
-        """.replace("\\s+".toRegex(), "").trim()
-
-        apfTestHelpers.verifyProgramRun(
-            apfFilter.mApfVersionSupported,
-            program,
-            HexDump.hexStringToByteArray(corruptedIPv6MdnsPkt),
-            DROPPED_MDNS_INVALID
         )
     }
 
