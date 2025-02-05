@@ -4111,4 +4111,16 @@ class ApfFilterTest {
         apfFilter.updateIPv4MulticastAddrs()
         verify(apfController, never()).installPacketFilter(any())
     }
+
+    @Test
+    fun testApfFailOpenOnLimitedRAM() {
+        val apfConfig = getDefaultConfig()
+        apfConfig.apfRamSize = 256
+        val apfFilter = getApfFilter(apfConfig)
+        val program = consumeInstalledProgram(apfController, installCnt = 2)
+        assertContentEquals(
+            ByteArray(apfConfig.apfRamSize - ApfCounterTracker.Counter.totalSize()) { 0 },
+            program
+        )
+    }
 }

@@ -486,10 +486,7 @@ public class ApfFilter {
         // in an SSID. This is limited to APFv3 devices because this large write triggers
         // a crash on some older devices (b/78905546).
         if (hasDataAccess(mApfVersionSupported)) {
-            byte[] zeroes = new byte[mApfRamSize];
-            if (!mApfController.installPacketFilter(zeroes)) {
-                sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
-            }
+            installPacketFilter(new byte[mApfRamSize]);
         }
     }
 
@@ -3154,6 +3151,12 @@ public class ApfFilter {
         gen.addCountTrampoline();
     }
 
+    private void installPacketFilter(byte[] program) {
+        if (!mApfController.installPacketFilter(program)) {
+            sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
+        }
+    }
+
     /**
      * Generate and install a new filter program.
      */
@@ -3178,6 +3181,7 @@ public class ApfFilter {
             if (gen.programLengthOverEstimate() > mMaximumApfProgramSize) {
                 Log.e(TAG, "Program exceeds maximum size " + mMaximumApfProgramSize);
                 sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_OVER_SIZE_FAILURE);
+                installPacketFilter(new byte[mMaximumApfProgramSize]);
                 return;
             }
 
@@ -3210,12 +3214,11 @@ public class ApfFilter {
         } catch (IllegalInstructionException | IllegalStateException | IllegalArgumentException e) {
             Log.wtf(TAG, "Failed to generate APF program.", e);
             sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_GENERATE_FILTER_EXCEPTION);
+            installPacketFilter(new byte[mMaximumApfProgramSize]);
             return;
         }
         if (mIsRunning) {
-            if (!mApfController.installPacketFilter(program)) {
-                sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
-            }
+            installPacketFilter(program);
         }
         mLastInstalledProgramMinLifetime = programMinLft;
         mLastInstalledProgram = program;
