@@ -510,7 +510,7 @@ public class ApfFilter {
         if (maximumApfProgramSize > mInstallableProgramSizeClamp) {
             maximumApfProgramSize = mInstallableProgramSizeClamp;
         }
-        mMaximumApfProgramSize = maximumApfProgramSize;
+        mMaximumApfProgramSize = Math.max(0, maximumApfProgramSize);
         mApfController = apfController;
         mInterfaceParams = ifParams;
         mMulticastFilter = config.multicastFilter;
