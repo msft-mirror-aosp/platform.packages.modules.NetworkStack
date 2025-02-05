@@ -16,6 +16,7 @@
 package android.net.apf
 
 import android.content.Context
+import android.net.InetAddresses
 import android.net.LinkAddress
 import android.net.LinkProperties
 import android.net.MacAddress
@@ -48,6 +49,9 @@ import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NON_ICMP_MULTICAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_INVALID
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_OTHER_HOST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_REPLIED_NON_DAD
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_MDNS
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_MDNS_INVALID
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_MDNS_REPLIED
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_BROADCAST_REPLY
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_REQUEST
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_UNICAST_REPLY
@@ -62,6 +66,7 @@ import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_DAD
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_NO_ADDRESS
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_NO_SLLA_OPTION
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_TENTATIVE
+import android.net.apf.ApfCounterTracker.Counter.PASSED_MDNS
 import android.net.apf.ApfCounterTracker.Counter.PASSED_MLD
 import android.net.apf.ApfFilter.Dependencies
 import android.net.apf.ApfTestHelpers.Companion.TIMEOUT_MS
@@ -184,6 +189,7 @@ class ApfFilterTest {
         intArrayOf(0x20, 0x01, 0, 0, 0, 0, 0, 0, 0x01, 0, 0, 0x1b, 0x44, 0x55, 0x66, 0x77)
             .map{ it.toByte() }.toByteArray()
     )
+    private val hostLinkLocalIpv6Address = InetAddresses.parseNumericAddress("fe80::3")
     private val hostIpv6TentativeAddresses = listOf(
         // 2001::200:1a:1234:5678
         intArrayOf(0x20, 0x01, 0, 0, 0, 0, 0, 0, 0x02, 0, 0, 0x1a, 0x12, 0x34, 0x56, 0x78)
@@ -207,6 +213,60 @@ class ApfFilterTest {
         // 33:33:ff:bb:cc:dd
         intArrayOf(0x33, 0x33, 0xff, 0xbb, 0xcc, 0xdd).map { it.toByte() }.toByteArray(),
     )
+
+    // Using scapy to generate payload:
+    // answers = [
+    //    DNSRR(rrname="_googlecast._tcp.local", type="PTR", ttl=120, rdata="gambit-3cb56c6253638b3641e3d289013cc0ae._googlecast._tcp.local."),
+    //    DNSRR(rrname="gambit-3cb56c6253638b3641e3d289013cc0ae._googlecast._tcp.local", type="SRV", ttl=120, rdata="0 0 8009 3cb56c62-5363-8b36-41e3-d289013cc0ae.local."),
+    //    DNSRR(rrname="gambit-3cb56c6253638b3641e3d289013cc0ae._googlecast._tcp.local", type="TXT", ttl=120, rdata=' "id=3cb56c6253638b3641e3d289013cc0ae cd=8ECC37F6755390D005DFC02F8EC0D4FA rm=4ABD579644ACFCCF ve=05 md=gambit ic=/setup/icon.png fn=gambit a=264709 st=0 bs=FA8FFD2242A7 nf=1 rs= ',),
+    //    DNSRR(rrname="Android_f47ac10b58cc4b88bc3f5e7a81e59872.local", type="A", ttl=120, rdata="100.89.85.228"),
+    //    DNSRR(rrname="Android_f47ac10b58cc4b88bc3f5e7a81e59872.local", type="AAAA", ttl=120, rdata="fe80:0000:0000:0000:0000:0000:0000:0003"),
+    //    DNSRR(rrname="Android_f47ac10b58cc4b88bc3f5e7a81e59872.local", type="AAAA", ttl=120, rdata="200a:0000:0000:0000:0000:0000:0000:0003"),
+    //    DNSRR(rrname="Android_f47ac10b58cc4b88bc3f5e7a81e59872.local", type="AAAA", ttl=120, rdata="200b:0000:0000:0000:0000:0000:0000:0003"),
+    // ]
+    // dns = dns_compress(DNS(qr=1, aa=1, rd=0, qd=None, an=answers))
+    private val castOffloadPayload = """
+            0000840000000007000000000b5f676f6f676c6563617374045f746370056c6
+            f63616c00000c000100000078002a2767616d6269742d336362353663363235
+            3336333862333634316533643238393031336363306165c00c01c0000021000
+            100000078003430203020383030392033636235366336322d353336332d3862
+            33362d343165332d6432383930313363633061652e6c6f63616c2e01c000001
+            000010000007800b3b2202269643d3363623536633632353336333862333634
+            3165336432383930313363633061652063643d3845434333374636373535333
+            93044303035444643303246384543304434464120726d3d3441424435373936
+            34344143464343462076653d3035206d643d67616d6269742069633d2f73657
+            475702f69636f6e2e706e6720666e3d67616d62697420613d32363437303920
+            73743d302062733d464138464644323234324137206e663d312072733d20284
+            16e64726f69645f663437616331306235386363346238386263336635653761
+            3831653539383732c01d00010001000000780004645955e4c157001c0001000
+            000780010fe800000000000000000000000000003c157001c00010000007800
+            10200a0000000000000000000000000003c157001c0001000000780010200b0
+            000000000000000000000000003
+        """.replace("\\s+".toRegex(), "").trim()
+
+    // Using scapy to generate payload:
+    // answers = [
+    //    DNSRR(rrname="_androidtvremote2._tcp.local", type="PTR", rdata="gambit._androidtvremote2._tcp.local", ttl=120),
+    //    DNSRR(rrname="gambit._androidtvremote2._tcp.local", type="SRV", rdata="0 0 6466 Android_2570595cc11d4af4a4b7146b946eeb9e.local", ttl=120),
+    //    DNSRR(rrname="gambit._androidtvremote2._tcp.local", type="TXT", rdata='''"bt=3C:4E:56:76:1E:E9"''', ttl=120),
+    //    DNSRR(rrname="Android_f47ac10b58cc4b88bc3f5e7a81e59872.local", type="A", ttl=120, rdata="100.89.85.228"),
+    //    DNSRR(rrname="Android_f47ac10b58cc4b88bc3f5e7a81e59872.local", type="AAAA", ttl=120, rdata="fe80:0000:0000:0000:0000:0000:0000:0003"),
+    //    DNSRR(rrname="Android_f47ac10b58cc4b88bc3f5e7a81e59872.local", type="AAAA", ttl=120, rdata="200a:0000:0000:0000:0000:0000:0000:0003"),
+    //    DNSRR(rrname="Android_f47ac10b58cc4b88bc3f5e7a81e59872.local", type="AAAA", ttl=120, rdata="200b:0000:0000:0000:0000:0000:0000:0003"),
+    // ]
+    // dns = dns_compress(DNS(qr=1, aa=1, rd=0, qd=None, an=answers))
+    val tvRemoteOffloadPayload = """
+            000084000000000700000000115f616e64726f6964747672656d6f746532045
+            f746370056c6f63616c00000c00010000007800090667616d626974c00cc034
+            00210001000000780037302030203634363620416e64726f69645f323537303
+            53935636331316434616634613462373134366239343665656239652e6c6f63
+            616cc03400100001000000780017162262743d33433a34453a35363a37363a3
+            1453a45392228416e64726f69645f6634376163313062353863633462383862
+            633366356537613831653539383732c02300010001000000780004645955e4c
+            0a3001c0001000000780010fe800000000000000000000000000003c0a3001c
+            0001000000780010200a0000000000000000000000000003c0a3001c0001000
+            000780010200b0000000000000000000000000003
+        """.replace("\\s+".toRegex(), "").trim()
 
     private val handlerThread by lazy {
         HandlerThread("$TAG handler thread").apply { start() }
@@ -268,7 +328,7 @@ class ApfFilterTest {
         shutdownApfFilters()
         handler.waitForIdle(TIMEOUT_MS)
         Mockito.framework().clearInlineMocks()
-        ApfJniUtils.resetTransmittedPacketMemory()
+        ApfTestHelpers.resetTransmittedPacketMemory()
         handlerThread.quitSafely()
         handlerThread.join()
     }
@@ -869,7 +929,7 @@ class ApfFilterTest {
             """.replace("\\s+".toRegex(), "").trim().uppercase()
         )
 
-        val transmitPackets = ApfJniUtils.getAllTransmittedPackets()
+        val transmitPackets = ApfTestHelpers.getAllTransmittedPackets()
             .map { HexDump.toHexString(it).uppercase() }.toSet()
         assertEquals(igmpv2ReportPkts, transmitPackets)
     }
@@ -1000,7 +1060,7 @@ class ApfFilterTest {
             """.replace("\\s+".toRegex(), "").trim().uppercase()
         )
 
-        val transmitPackets = ApfJniUtils.getAllTransmittedPackets()
+        val transmitPackets = ApfTestHelpers.getAllTransmittedPackets()
             .map { HexDump.toHexString(it).uppercase() }.toSet()
         assertEquals(igmpv2ReportPkts, transmitPackets)
     }
@@ -2942,6 +3002,991 @@ class ApfFilterTest {
 
         visibleOnHandlerThread(handler) { apfFilter.shutdown() }
         verify(nsdManager).unregisterOffloadEngine(eq(offloadEngine))
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testCorruptedOffloadServiceInfoUpdateNotTriggerNewProgramInstall() {
+        val apfConfig = getDefaultConfig()
+        apfConfig.handleMdnsOffload = true
+        val apfFilter = getApfFilter(apfConfig)
+        consumeInstalledProgram(apfController, installCnt = 2)
+        val captor = ArgumentCaptor.forClass(OffloadEngine::class.java)
+        verify(nsdManager).registerOffloadEngine(
+            eq(ifParams.name),
+            anyLong(),
+            anyLong(),
+            any(),
+            captor.capture()
+        )
+        val offloadEngine = captor.value
+        val castOffloadInfo = OffloadServiceInfo(
+            OffloadServiceInfo.Key("gambit", "_googlecast._tcp"),
+            listOf(),
+            "Android_f47ac10b58cc4b88bc3f5e7a81e59872.local",
+            HexDump.hexStringToByteArray(castOffloadPayload),
+            0,
+            OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
+        )
+        visibleOnHandlerThread(handler) {
+            offloadEngine.onOffloadServiceUpdated(castOffloadInfo)
+        }
+        consumeInstalledProgram(apfController, installCnt = 1)
+        val corruptedOffloadInfo = OffloadServiceInfo(
+            OffloadServiceInfo.Key("gambit", "_${"a".repeat(63)}._tcp"),
+            listOf(),
+            "Android_f47ac10b58cc4b88bc3f5e7a81e59872.local",
+            byteArrayOf(0x01, 0x02, 0x03, 0x04),
+            0,
+            OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
+        )
+        visibleOnHandlerThread(handler) {
+            offloadEngine.onOffloadServiceUpdated(corruptedOffloadInfo)
+        }
+        verify(apfController, never()).installPacketFilter(any())
+    }
+
+    private fun getApfWithMdnsOffloadEnabled(
+        mcFilter: Boolean = true,
+        v6Only: Boolean = false,
+        removeTvRemoteRecord: Boolean = false
+    ): Pair<ApfFilter, ByteArray> {
+        val apfConfig = getDefaultConfig()
+        apfConfig.handleMdnsOffload = true
+        if (mcFilter) {
+            apfConfig.multicastFilter = true
+        }
+        val apfFilter = getApfFilter(apfConfig)
+        consumeInstalledProgram(apfController, installCnt = 2)
+        val captor = ArgumentCaptor.forClass(OffloadEngine::class.java)
+        verify(nsdManager).registerOffloadEngine(
+            eq(ifParams.name),
+            anyLong(),
+            anyLong(),
+            any(),
+            captor.capture()
+        )
+        val offloadEngine = captor.value
+        val lp = LinkProperties()
+        if (v6Only) {
+            apfFilter.updateClatInterfaceState(true)
+            consumeInstalledProgram(apfController, installCnt = 1)
+        } else {
+            val ipv4LinkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
+            lp.addLinkAddress(ipv4LinkAddress)
+        }
+        val ipv6LinkAddress = LinkAddress(hostLinkLocalIpv6Address, 64)
+        lp.addLinkAddress(ipv6LinkAddress)
+        apfFilter.setLinkProperties(lp)
+        consumeInstalledProgram(apfController, installCnt = 1)
+        val castOffloadInfo = OffloadServiceInfo(
+            OffloadServiceInfo.Key("gambit-3cb56c6253638b3641e3d289013cc0ae", "_googlecast._tcp"),
+            listOf(),
+            "Android_f47ac10b58cc4b88bc3f5e7a81e59872.local",
+            HexDump.hexStringToByteArray(castOffloadPayload),
+            0,
+            OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
+        )
+        val tvRemoteOffloadInfo = OffloadServiceInfo(
+            OffloadServiceInfo.Key("gambit", "_androidtvremote2._tcp"),
+            listOf(),
+            "Android_f47ac10b58cc4b88bc3f5e7a81e59872.local",
+            HexDump.hexStringToByteArray(tvRemoteOffloadPayload),
+            0,
+            OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
+        )
+
+        visibleOnHandlerThread(handler) {
+            offloadEngine.onOffloadServiceUpdated(castOffloadInfo)
+            offloadEngine.onOffloadServiceUpdated(tvRemoteOffloadInfo)
+            if (removeTvRemoteRecord) {
+                offloadEngine.onOffloadServiceRemoved(tvRemoteOffloadInfo)
+            }
+        }
+        val program = consumeInstalledProgram(
+            apfController,
+            installCnt = if (removeTvRemoteRecord) 3 else 2
+        )
+        return Pair(apfFilter, program)
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIPv4MdnsQueryReplied() {
+        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false)
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
+        // ip = IP(src="10.0.0.3", dst="224.0.0.251")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_googlecast._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val castIPv4MdnsPtrQuery = """
+            01005e0000fb0102030405060800450000440001000040118faa0a000003e00
+            000fb14e914e900309fa50000010000010000000000000b5f676f6f676c6563
+            617374045f746370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(castIPv4MdnsPtrQuery),
+            DROPPED_MDNS_REPLIED
+        )
+
+        var transmitPkt = consumeTransmittedPackets(1)[0]
+
+        // ###[ Ethernet ]###
+        //   dst       = 01:00:5e:00:00:fb
+        //   src       = 02:03:04:05:06:07
+        //   type      = IPv4
+        // ###[ IP ]###
+        //      version   = 4
+        //      ihl       = 5
+        //      tos       = 0x0
+        //      len       = 514
+        //      id        = 0
+        //      flags     = DF
+        //      frag      = 0
+        //      ttl       = 255
+        //      proto     = udp
+        //      chksum    = 0x8eee
+        //      src       = 10.0.0.1
+        //      dst       = 224.0.0.251
+        //      \options   \
+        // ###[ UDP ]###
+        //         sport     = mdns
+        //         dport     = mdns
+        //         len       = 494
+        //         chksum    = 0x2f0d
+        // ###[ DNS ]###
+        //           id        = 0
+        //           qr        = 1
+        //           opcode    = QUERY
+        //           aa        = 1
+        //           tc        = 0
+        //           rd        = 0
+        //           ra        = 0
+        //           z         = 0
+        //           ad        = 0
+        //           cd        = 0
+        //           rcode     = ok
+        //           qdcount   = 0
+        //           ancount   = 7
+        //           nscount   = 0
+        //           arcount   = 0
+        //           \qd        \
+        //           \an        \
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'_googlecast._tcp.local.'
+        //            |  type      = PTR
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = b'gambit-3cb56c6253638b3641e3d289013cc0ae._googlecast._tcp.local.'
+        //            |###[ DNS SRV Resource Record ]###
+        //            |  rrname    = b'\xc0.'
+        //            |  type      = SRV
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  priority  = 12320
+        //            |  weight    = 12320
+        //            |  port      = 14384
+        //            |  target    = b'9 3cb56c62-5363-8b36-41e3-d289013cc0ae.local..'
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'\xc0.'
+        //            |  type      = TXT
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = [b' "id=3cb56c6253638b3641e3d289013cc0ae cd=8ECC37F6755390D005DFC02F8EC0D4FA rm=4ABD579644ACFCCF ve=05 md=gambit ic=/setup/icon.png fn=gambit a=264709 st=0 bs=FA8FFD2242A7 nf=1 rs= ']
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = A
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 100.89.85.228
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b' (Android_f47ac10b58cc4b88bc3f5e7a81e59872\xc0\x1d\x00\x01\x00\x01\x00\x00\x00x\x00\x04dYU\xe4\xc1W\x00.\x00\x01\x00\x00\x00x\x00\x10\xfe\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x03\xc1W\x00\x1c.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = fe80::3
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b' (Android_f47ac10b58cc4b88bc3f5e7a81e59872\xc0\x1d\x00\x01\x00\x01\x00\x00\x00x\x00\x04dYU\xe4\xc1W\x00.\x00\x01\x00\x00\x00x\x00\x10\xfe\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x03\xc1W\x00\x1c.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 200a::3
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b' (Android_f47ac10b58cc4b88bc3f5e7a81e59872\xc0\x1d\x00\x01\x00\x01\x00\x00\x00x\x00\x04dYU\xe4\xc1W\x00.\x00\x01\x00\x00\x00x\x00\x10\xfe\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x03\xc1W\x00\x1c.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 200b::3
+        //           \ns        \
+        //           \ar        \
+        val expectedIPv4CastMdnsReply = """
+            01005E0000FB02030405060708004500020200004000FF118EEE0A000001E00
+            000FB14E914E901EE2F0D0000840000000007000000000B5F676F6F676C6563
+            617374045F746370056C6F63616C00000C000100000078002A2767616D62697
+            42D336362353663363235333633386233363431653364323839303133636330
+            6165C00C01C0000021000100000078003430203020383030392033636235366
+            336322D353336332D386233362D343165332D6432383930313363633061652E
+            6C6F63616C2E01C000001000010000007800B3B2202269643D3363623536633
+            6323533363338623336343165336432383930313363633061652063643D3845
+            434333374636373535333930443030354446433032463845433044344641207
+            26D3D344142443537393634344143464343462076653D3035206D643D67616D
+            6269742069633D2F73657475702F69636F6E2E706E6720666E3D67616D62697
+            420613D3236343730392073743D302062733D46413846464432323432413720
+            6E663D312072733D2028416E64726F69645F663437616331306235386363346
+            2383862633366356537613831653539383732C01D0001000100000078000464
+            5955E4C157001C0001000000780010FE800000000000000000000000000003C
+            157001C0001000000780010200A0000000000000000000000000003C157001C
+            0001000000780010200B0000000000000000000000000003
+        """.replace("\\s+".toRegex(), "").trim()
+
+        assertContentEquals(
+            HexDump.hexStringToByteArray(expectedIPv4CastMdnsReply),
+            transmitPkt
+        )
+
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
+        // ip = IP(src="10.0.0.3", dst="224.0.0.251")
+        // udp = UDP(dport=5353, sport=5353)
+        // questions = [
+        //   DNSQR(qname="_airplay._tcp.local", qtype="PTR"),
+        //   DNSQR(qname="gambit-3cb56c6253638b3641e3d289013cc0ae._googlecast._tcp.local", qtype="TXT")
+        // ]
+        // dns = dns_compress(DNS(qd=questions))
+        // pkt = eth/ip/udp/dns
+        val castIPv4MdnsTxtQuery = """
+            01005e0000fb0102030405060800450000440001000040118faa0a000003e00
+            000fb14e914e900309fa50000010000010000000000000b5f676f6f676c6563
+            617374045f746370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(castIPv4MdnsTxtQuery),
+            DROPPED_MDNS_REPLIED
+        )
+
+        transmitPkt = consumeTransmittedPackets(1)[0]
+
+        assertContentEquals(
+            HexDump.hexStringToByteArray(expectedIPv4CastMdnsReply),
+            transmitPkt
+        )
+
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
+        // ip = IP(src="10.0.0.3", dst="224.0.0.251")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_androidtvremote2._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val tvRemoteIPv4MdnsPtrQuery = """
+            01005e0000fb01020304050608004500004a0001000040118fa40a000003e00
+            000fb14e914e900366966000001000001000000000000115f616e64726f6964
+            747672656d6f746532045f746370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(tvRemoteIPv4MdnsPtrQuery),
+            DROPPED_MDNS_REPLIED
+        )
+
+        transmitPkt = consumeTransmittedPackets(1)[0]
+
+        // ###[ Ethernet ]###
+        //  dst       = 01:00:5e:00:00:fb
+        //  src       = 02:03:04:05:06:07
+        //  type      = IPv4
+        // ###[ IP ]###
+        //      version   = 4
+        //      ihl       = 5
+        //      tos       = 0x0
+        //      len       = 332
+        //      id        = 0
+        //      flags     = DF
+        //      frag      = 0
+        //      ttl       = 255
+        //      proto     = udp
+        //      chksum    = 0x8fa4
+        //      src       = 10.0.0.1
+        //      dst       = 224.0.0.251
+        //      \options   \
+        // ###[ UDP ]###
+        //         sport     = mdns
+        //         dport     = mdns
+        //         len       = 312
+        //         chksum    = 0xf867
+        // ###[ DNS ]###
+        //            id        = 0
+        //           qr        = 1
+        //           opcode    = QUERY
+        //           aa        = 1
+        //           tc        = 0
+        //           rd        = 0
+        //           ra        = 0
+        //           z         = 0
+        //           ad        = 0
+        //           cd        = 0
+        //           rcode     = ok
+        //           qdcount   = 0
+        //           ancount   = 7
+        //           nscount   = 0
+        //           arcount   = 0
+        //           \qd        \
+        //           \an        \
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'_androidtvremote2._tcp.local.'
+        //            |  type      = PTR
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = b'gambit._androidtvremote2._tcp.local.'
+        //            |###[ DNS SRV Resource Record ]###
+        //            |  rrname    = b'gambit._androidtvremote2._tcp.local.'
+        //            |  type      = SRV
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  priority  = 12320
+        //            |  weight    = 12320
+        //            |  port      = 13876
+        //            |  target    = b'6 Android_2570595cc11d4af4a4b7146b946eeb9e.local.'
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'gambit._androidtvremote2._tcp.local.'
+        //            |  type      = TXT
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = [b'"bt=3C:4E:56:76:1E:E9"']
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = A
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 100.89.85.228
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = fe80::3
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 200a::3
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 200b::3
+        //           \ns        \
+        //           \ar        \
+        val expectedIPv4tvRemoteMdnsReply = """
+            01005E0000FB02030405060708004500014C00004000FF118FA40A000001E00
+            000FB14E914E90138F867000084000000000700000000115F616E64726F6964
+            747672656D6F746532045F746370056C6F63616C00000C00010000007800090
+            667616D626974C00CC03400210001000000780037302030203634363620416E
+            64726F69645F323537303539356363313164346166346134623731343662393
+            43665656239652E6C6F63616CC03400100001000000780017162262743D3343
+            3A34453A35363A37363A31453A45392228416E64726F69645F6634376163313
+            062353863633462383862633366356537613831653539383732C02300010001
+            000000780004645955E4C0A3001C0001000000780010FE80000000000000000
+            0000000000003C0A3001C0001000000780010200A0000000000000000000000
+            000003C0A3001C0001000000780010200B0000000000000000000000000003
+        """.replace("\\s+".toRegex(), "").trim()
+
+        assertContentEquals(
+            HexDump.hexStringToByteArray(expectedIPv4tvRemoteMdnsReply),
+            transmitPkt
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIPv4MdnsQueryDropped() {
+        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(removeTvRemoteRecord = true)
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
+        // ip = IP(src="10.0.0.3", dst="224.0.0.251")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_airplay._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val airplayIPv4MdnsPtrQuery = """
+            01005e0000fb0102030405060800450000410001000040118fad0a000003e00
+            000fb14e914e9002d8203000001000001000000000000085f616972706c6179
+            045f746370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(airplayIPv4MdnsPtrQuery),
+            DROPPED_MDNS
+        )
+
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
+        // ip = IP(src="10.0.0.3", dst="224.0.0.251")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_androidtvremote2._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val tvRemoteIPv4MdnsPtrQuery = """
+            01005e0000fb01020304050608004500004a0001000040118fa40a000003e00
+            000fb14e914e900366966000001000001000000000000115f616e64726f6964
+            747672656d6f746532045f746370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(tvRemoteIPv4MdnsPtrQuery),
+            DROPPED_MDNS
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIPv4MdnsQueryWithOptionPassed() {
+        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false)
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
+        // ip = IP(src="10.0.0.3", dst="224.0.0.251", options=IPOption(b'\x94\x04\x00\x00'))
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_googlecast._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val castIPv4MdnsPtrQueryWithOption = """
+            01005e0000fb010203040506080046000048000100004011faa10a000003e00
+            000fb9404000014e914e900309fa50000010000010000000000000b5f676f6f
+            676c6563617374045f746370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(castIPv4MdnsPtrQueryWithOption),
+            PASSED_IPV4
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIPv4MdnsQueryDroppedOnV6OnlyNetwork() {
+        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false, v6Only = true)
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
+        // ip = IP(src="10.0.0.3", dst="224.0.0.251")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_googlecast._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val castIPv4MdnsPtrQuery = """
+            01005e0000fb0102030405060800450000440001000040118faa0a000003e00
+            000fb14e914e900309fa50000010000010000000000000b5f676f6f676c6563
+            617374045f746370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(castIPv4MdnsPtrQuery),
+            DROPPED_IPV4_NON_DHCP4
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIPv4MdnsReplyPassed() {
+        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false)
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
+        // ip = IP(src="10.0.0.3", dst="224.0.0.251")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qr=1, aa=1, rd=0, qd=None, an=DNSRR(rrname="_androidtvremote2._tcp.local", type="PTR", rdata="gambit._androidtvremote2._tcp.local", ttl=120))
+        // pkt = eth/ip/udp/dns
+        val tvRemoteIPv4MdnsPtrAnswer = """
+            01005e0000fb0102030405060800450000750001000040118f790a000003e00
+            000fb14e914e9006169b4000084000000000100000000115f616e64726f6964
+            747672656d6f746532045f746370056c6f63616c00000c00010000007800250
+            667616d626974115f616e64726f6964747672656d6f746532045f746370056c
+            6f63616c00
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(tvRemoteIPv4MdnsPtrAnswer),
+            PASSED_MDNS
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testCorruptedIPv4MdnsPacketDropped() {
+        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false)
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
+        // ip = IP(proto=17, src="10.0.0.3", dst="224.0.0.251")
+        // udp = UDP(dport=5353, sport=5353)
+        // pkt = eth/ip/udp/b"hello"
+        val corruptedIPv4MdnsPkt = """
+            01005e0000fb0102030405060800450000210001000040118fcd0a000003e00
+            000fb14e914e9000da73168656c6c6f
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(corruptedIPv4MdnsPkt),
+            DROPPED_MDNS_INVALID
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIPv6MdnsQueryReplied() {
+        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false)
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="33:33:00:00:00:FB")
+        // ip = IPv6(src="fe80::1", dst="ff02::fb")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_googlecast._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val castIPv6MdnsPtrQuery = """
+            3333000000fb01020304050686dd6000000000301140fe80000000000000000
+            0000000000001ff0200000000000000000000000000fb14e914e900308c2400
+            00010000010000000000000b5f676f6f676c6563617374045f746370056c6f6
+            3616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(castIPv6MdnsPtrQuery),
+            DROPPED_MDNS_REPLIED
+        )
+
+        var transmitPkt = consumeTransmittedPackets(1)[0]
+
+        // ###[ Ethernet ]###
+        //  dst       = 33:33:00:00:00:fb
+        //  src       = 02:03:04:05:06:07
+        //  type      = IPv6
+        // ###[ IPv6 ]###
+        //      version   = 6
+        //      tc        = 0
+        //      fl        = 0
+        //      plen      = 494
+        //      nh        = UDP
+        //      hlim      = 255
+        //      src       = fe80::3
+        //      dst       = ff02::fb
+        // ###[ UDP ]###
+        //         sport     = mdns
+        //         dport     = mdns
+        //         len       = 494
+        //         chksum    = 0x1b88
+        // ###[ DNS ]###
+        //           id        = 0
+        //           qr        = 1
+        //           opcode    = QUERY
+        //           aa        = 1
+        //           tc        = 0
+        //           rd        = 0
+        //           ra        = 0
+        //           z         = 0
+        //           ad        = 0
+        //           cd        = 0
+        //           rcode     = ok
+        //           qdcount   = 0
+        //           ancount   = 7
+        //           nscount   = 0
+        //           arcount   = 0
+        //           \qd        \
+        //           \an        \
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'_googlecast._tcp.local.'
+        //            |  type      = PTR
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = b'gambit-3cb56c6253638b3641e3d289013cc0ae._googlecast._tcp.local.'
+        //            |###[ DNS SRV Resource Record ]###
+        //            |  rrname    = b'\xc0.'
+        //            |  type      = SRV
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  priority  = 12320
+        //            |  weight    = 12320
+        //            |  port      = 14384
+        //            |  target    = b'9 3cb56c62-5363-8b36-41e3-d289013cc0ae.local..'
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'\xc0.'
+        //            |  type      = TXT
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = [b' "id=3cb56c6253638b3641e3d289013cc0ae cd=8ECC37F6755390D005DFC02F8EC0D4FA rm=4ABD579644ACFCCF ve=05 md=gambit ic=/setup/icon.png fn=gambit a=264709 st=0 bs=FA8FFD2242A7 nf=1 rs= ']
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = A
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 100.89.85.228
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b' (Android_f47ac10b58cc4b88bc3f5e7a81e59872\xc0\x1d\x00\x01\x00\x01\x00\x00\x00x\x00\x04dYU\xe4\xc1W\x00.\x00\x01\x00\x00\x00x\x00\x10\xfe\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x03\xc1W\x00\x1c.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = fe80::3
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b' (Android_f47ac10b58cc4b88bc3f5e7a81e59872\xc0\x1d\x00\x01\x00\x01\x00\x00\x00x\x00\x04dYU\xe4\xc1W\x00.\x00\x01\x00\x00\x00x\x00\x10\xfe\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x03\xc1W\x00\x1c.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 200a::3
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b' (Android_f47ac10b58cc4b88bc3f5e7a81e59872\xc0\x1d\x00\x01\x00\x01\x00\x00\x00x\x00\x04dYU\xe4\xc1W\x00.\x00\x01\x00\x00\x00x\x00\x10\xfe\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x03\xc1W\x00\x1c.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 200b::3
+        //           \ns        \
+        //           \ar        \
+        val expectedIPv6CastMdnsReply = """
+            3333000000FB02030405060786DD6000000001EE11FFFE80000000000000000
+            0000000000003FF0200000000000000000000000000FB14E914E901EE1B8800
+            00840000000007000000000B5F676F6F676C6563617374045F746370056C6F6
+            3616C00000C000100000078002A2767616D6269742D33636235366336323533
+            36333862333634316533643238393031336363306165C00C01C000002100010
+            0000078003430203020383030392033636235366336322D353336332D386233
+            362D343165332D6432383930313363633061652E6C6F63616C2E01C00000100
+            0010000007800B3B2202269643D336362353663363235333633386233363431
+            65336432383930313363633061652063643D384543433337463637353533393
+            044303035444643303246384543304434464120726D3D344142443537393634
+            344143464343462076653D3035206D643D67616D6269742069633D2F7365747
+            5702F69636F6E2E706E6720666E3D67616D62697420613D3236343730392073
+            743D302062733D464138464644323234324137206E663D312072733D2028416
+            E64726F69645F66343761633130623538636334623838626333663565376138
+            31653539383732C01D00010001000000780004645955E4C157001C000100000
+            0780010FE800000000000000000000000000003C157001C0001000000780010
+            200A0000000000000000000000000003C157001C0001000000780010200B000
+            0000000000000000000000003
+        """.replace("\\s+".toRegex(), "").trim()
+
+        assertContentEquals(
+            HexDump.hexStringToByteArray(expectedIPv6CastMdnsReply),
+            transmitPkt
+        )
+
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="33:33:00:00:00:FB")
+        // ip = IPv6(src="fe80::1", dst="ff02::fb")
+        // udp = UDP(dport=5353, sport=5353)
+        // questions = [
+        //   DNSQR(qname="_airplay._tcp.local", qtype="PTR"),
+        //   DNSQR(qname="gambit-3cb56c6253638b3641e3d289013cc0ae._googlecast._tcp.local", qtype="TXT")
+        // ]
+        // dns = dns_compress(DNS(qd=questions))
+        // pkt = eth/ip/udp/dns
+        val castIPv6MdnsTxtQuery = """
+            3333000000fb01020304050686dd6000000000671140fe80000000000000000
+            0000000000001ff0200000000000000000000000000fb14e914e90067439100
+            0001000002000000000000085f616972706c6179045f746370056c6f63616c0
+            0000c00012767616d6269742d33636235366336323533363338623336343165
+            336432383930313363633061650b5f676f6f676c6563617374c01500100001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(castIPv6MdnsTxtQuery),
+            DROPPED_MDNS_REPLIED
+        )
+
+        transmitPkt = consumeTransmittedPackets(1)[0]
+
+        assertContentEquals(
+            HexDump.hexStringToByteArray(expectedIPv6CastMdnsReply),
+            transmitPkt
+        )
+
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="33:33:00:00:00:FB")
+        // ip = IPv6(src="fe80::1", dst="ff02::fb")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_androidtvremote2._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val tvRemoteIPv6MdnsPtrQuery = """
+            3333000000fb01020304050686dd6000000000361140fe80000000000000000
+            0000000000001ff0200000000000000000000000000fb14e914e9003655e500
+            0001000001000000000000115f616e64726f6964747672656d6f746532045f7
+            46370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(tvRemoteIPv6MdnsPtrQuery),
+            DROPPED_MDNS_REPLIED
+        )
+
+        transmitPkt = consumeTransmittedPackets(1)[0]
+
+        // ###[ Ethernet ]###
+        // dst       = 33:33:00:00:00:fb
+        // src       = 02:03:04:05:06:07
+        // type      = IPv6
+        // ###[ IPv6 ]###
+        // version   = 6
+        // tc        = 0
+        // fl        = 0
+        // plen      = 312
+        // nh        = UDP
+        // hlim      = 255
+        // src       = fe80::3
+        // dst       = ff02::fb
+        // ###[ UDP ]###
+        //         sport     = mdns
+        //         dport     = mdns
+        //         len       = 312
+        //         chksum    = 0xf867
+        // ###[ DNS ]###
+        //            id        = 0
+        //           qr        = 1
+        //           opcode    = QUERY
+        //           aa        = 1
+        //           tc        = 0
+        //           rd        = 0
+        //           ra        = 0
+        //           z         = 0
+        //           ad        = 0
+        //           cd        = 0
+        //           rcode     = ok
+        //           qdcount   = 0
+        //           ancount   = 7
+        //           nscount   = 0
+        //           arcount   = 0
+        //           \qd        \
+        //           \an        \
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'_androidtvremote2._tcp.local.'
+        //            |  type      = PTR
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = b'gambit._androidtvremote2._tcp.local.'
+        //            |###[ DNS SRV Resource Record ]###
+        //            |  rrname    = b'gambit._androidtvremote2._tcp.local.'
+        //            |  type      = SRV
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  priority  = 12320
+        //            |  weight    = 12320
+        //            |  port      = 13876
+        //            |  target    = b'6 Android_2570595cc11d4af4a4b7146b946eeb9e.local.'
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'gambit._androidtvremote2._tcp.local.'
+        //            |  type      = TXT
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = [b'"bt=3C:4E:56:76:1E:E9"']
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = A
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 100.89.85.228
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = fe80::3
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 200a::3
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 200b::3
+        //           \ns        \
+        //           \ar        \
+        val expectedIPv6tvRemoteMdnsReply = """
+            3333000000FB02030405060786DD60000000013811FFFE80000000000000000
+            0000000000003FF0200000000000000000000000000FB14E914E90138E4E200
+            0084000000000700000000115F616E64726F6964747672656D6F746532045F7
+            46370056C6F63616C00000C00010000007800090667616D626974C00CC03400
+            210001000000780037302030203634363620416E64726F69645F32353730353
+            935636331316434616634613462373134366239343665656239652E6C6F6361
+            6CC03400100001000000780017162262743D33433A34453A35363A37363A314
+            53A45392228416E64726F69645F663437616331306235386363346238386263
+            3366356537613831653539383732C02300010001000000780004645955E4C0A
+            3001C0001000000780010FE800000000000000000000000000003C0A3001C00
+            01000000780010200A0000000000000000000000000003C0A3001C000100000
+            0780010200B0000000000000000000000000003
+        """.replace("\\s+".toRegex(), "").trim()
+
+        assertContentEquals(
+            HexDump.hexStringToByteArray(expectedIPv6tvRemoteMdnsReply),
+            transmitPkt
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIPv6MdnsQueryDropped() {
+        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(removeTvRemoteRecord = true)
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="33:33:00:00:00:FB")
+        // ip = IPv6(src="fe80::1", dst="ff02::fb")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_airplay._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val airplayIPv6MdnsPtrQuery = """
+            3333000000fb01020304050686dd60000000002d1140fe80000000000000000
+            0000000000001ff0200000000000000000000000000fb14e914e9002d6e8200
+            0001000001000000000000085f616972706c6179045f746370056c6f63616c0
+            0000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(airplayIPv6MdnsPtrQuery),
+            DROPPED_MDNS
+        )
+
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="33:33:00:00:00:FB")
+        // ip = IPv6(src="fe80::1", dst="ff02::fb")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_androidtvremote2._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val tvRemoteIPv6MdnsPtrQuery = """
+            3333000000fb01020304050686dd6000000000361140fe80000000000000000
+            0000000000001ff0200000000000000000000000000fb14e914e9003655e500
+            0001000001000000000000115f616e64726f6964747672656d6f746532045f7
+            46370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(tvRemoteIPv6MdnsPtrQuery),
+            DROPPED_MDNS
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIPv6MdnsReplyPassed() {
+        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false)
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="33:33:00:00:00:FB")
+        // ip = IPv6(src="fe80::1", dst="ff02::fb")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qr=1, aa=1, rd=0, qd=None, an=DNSRR(rrname="_androidtvremote2._tcp.local", type="PTR", rdata="gambit._androidtvremote2._tcp.local", ttl=120))
+        // pkt = eth/ip/udp/dns
+        val tvRemoteIPv6MdnsPtrAnswer = """
+            3333000000fb01020304050686dd6000000000611140fe80000000000000000
+            0000000000001ff0200000000000000000000000000fb14e914e90061563300
+            0084000000000100000000115f616e64726f6964747672656d6f746532045f7
+            46370056c6f63616c00000c00010000007800250667616d626974115f616e64
+            726f6964747672656d6f746532045f746370056c6f63616c00
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(tvRemoteIPv6MdnsPtrAnswer),
+            PASSED_MDNS
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testCorruptedIPv6MdnsPacketDropped() {
+        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false)
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="33:33:00:00:00:FB")
+        // ip = IPv6(src="fe80::1", dst="ff02::fb")
+        // udp = UDP(dport=5353, sport=5353)
+        // pkt = eth/ip/udp/b"hello"
+        val corruptedIPv6MdnsPkt = """
+            3333000000fb01020304050686dd60000000000d1140fe80000000000000000
+            0000000000001ff0200000000000000000000000000fb14e914e9000d93b068
+            656c6c6f
+        """.replace("\\s+".toRegex(), "").trim()
+
+        verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(corruptedIPv6MdnsPkt),
+            DROPPED_MDNS_INVALID
+        )
     }
 
     @Test
