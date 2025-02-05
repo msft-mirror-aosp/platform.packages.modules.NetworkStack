@@ -1915,6 +1915,9 @@ public class ApfFilter {
 
         // Skip filtering if the IPv4 destination address is not 224.0.0.251 (the mDNS multicast
         // address).
+        // Some devices can use unicast queries for mDNS to improve performance and reliability.
+        // These packets are not currently offloaded and will be passed by APF and handled
+        // by NsdService.
         gen.addLoad32(R0, IPV4_DEST_ADDR_OFFSET)
                 .addJumpIfR0NotEquals(MDNS_IPV4_ADDR_IN_LONG, skipMdnsFilter);
 
@@ -2373,6 +2376,9 @@ public class ApfFilter {
 
         // Skip filtering if the IPv6 destination address is not ff02::fb (the mDNS multicast
         // IPv6 address).
+        // Some devices can use unicast queries for mDNS to improve performance and reliability.
+        // These packets are not currently offloaded and will be passed by APF and handled
+        // by NsdService.
         gen.addLoadImmediate(R0, IPV6_DEST_ADDR_OFFSET)
                 .addJumpIfBytesAtR0NotEqual(MDNS_IPV6_ADDR, skipMdnsFilter);
 
