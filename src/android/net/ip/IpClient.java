@@ -453,8 +453,9 @@ public class IpClient extends StateMachine {
         /**
          * Called to indicate that a new APF program must be installed to filter incoming packets.
          */
-        public boolean installPacketFilter(byte[] filter) {
-            log("installPacketFilter(byte[" + filter.length + "])");
+        public boolean installPacketFilter(byte[] filter, @NonNull String filterConfig) {
+            log("installPacketFilter(byte[" + filter.length + "])" + " config: "
+                    + filterConfig);
             try {
                 if (mApfDebug) {
                     mApfLog.log("updated APF program: " + HexDump.toHexString(filter));
@@ -1060,8 +1061,8 @@ public class IpClient extends StateMachine {
         mCallback = new IpClientCallbacksWrapper(callback, mLog, mApfLog, mShim, mApfDebug);
         mIpClientApfController = new ApfFilter.IApfController() {
             @Override
-            public boolean installPacketFilter(byte[] filter) {
-                return mCallback.installPacketFilter(filter);
+            public boolean installPacketFilter(byte[] filter, String filterConfig) {
+                return mCallback.installPacketFilter(filter, filterConfig);
             }
 
             @Override
@@ -1630,7 +1631,7 @@ public class IpClient extends StateMachine {
                             throw new IllegalStateException("APF filter must first be paused");
                         }
                         mApfFilter.getApfController().installPacketFilter(
-                                HexDump.hexStringToByteArray(optarg));
+                                HexDump.hexStringToByteArray(optarg), "program from shell command");
                         result.complete("success");
                         break;
                     case "capabilities":
