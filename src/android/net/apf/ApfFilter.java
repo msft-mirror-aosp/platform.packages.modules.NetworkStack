@@ -3706,6 +3706,15 @@ public class ApfFilter {
             }
         }
         pw.println();
+        pw.println("Mdns filters:");
+        pw.increaseIndent();
+        for (MdnsOffloadRule rule : mOffloadRules) {
+            pw.println(
+                    String.format("offloaded service: %s, payloadSize: %d", rule.mFullServiceName,
+                            rule.mOffloadPayload == null ? 0 : rule.mOffloadPayload.length));
+        }
+        pw.decreaseIndent();
+        pw.println();
         pw.println("RA filters:");
         pw.increaseIndent();
         for (Ra ra: mRas) {
