@@ -486,10 +486,7 @@ public class ApfFilter {
         // in an SSID. This is limited to APFv3 devices because this large write triggers
         // a crash on some older devices (b/78905546).
         if (hasDataAccess(mApfVersionSupported)) {
-            byte[] zeroes = new byte[mApfRamSize];
-            if (!mApfController.installPacketFilter(zeroes)) {
-                sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
-            }
+            installPacketFilter(new byte[mApfRamSize]);
         }
     }
 
@@ -510,7 +507,7 @@ public class ApfFilter {
         if (maximumApfProgramSize > mInstallableProgramSizeClamp) {
             maximumApfProgramSize = mInstallableProgramSizeClamp;
         }
-        mMaximumApfProgramSize = maximumApfProgramSize;
+        mMaximumApfProgramSize = Math.max(0, maximumApfProgramSize);
         mApfController = apfController;
         mInterfaceParams = ifParams;
         mMulticastFilter = config.multicastFilter;
@@ -1915,6 +1912,9 @@ public class ApfFilter {
 
         // Skip filtering if the IPv4 destination address is not 224.0.0.251 (the mDNS multicast
         // address).
+        // Some devices can use unicast queries for mDNS to improve performance and reliability.
+        // These packets are not currently offloaded and will be passed by APF and handled
+        // by NsdService.
         gen.addLoad32(R0, IPV4_DEST_ADDR_OFFSET)
                 .addJumpIfR0NotEquals(MDNS_IPV4_ADDR_IN_LONG, skipMdnsFilter);
 
@@ -2373,6 +2373,9 @@ public class ApfFilter {
 
         // Skip filtering if the IPv6 destination address is not ff02::fb (the mDNS multicast
         // IPv6 address).
+        // Some devices can use unicast queries for mDNS to improve performance and reliability.
+        // These packets are not currently offloaded and will be passed by APF and handled
+        // by NsdService.
         gen.addLoadImmediate(R0, IPV6_DEST_ADDR_OFFSET)
                 .addJumpIfBytesAtR0NotEqual(MDNS_IPV6_ADDR, skipMdnsFilter);
 
@@ -3154,6 +3157,12 @@ public class ApfFilter {
         gen.addCountTrampoline();
     }
 
+    private void installPacketFilter(byte[] program) {
+        if (!mApfController.installPacketFilter(program)) {
+            sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
+        }
+    }
+
     /**
      * Generate and install a new filter program.
      */
@@ -3178,6 +3187,7 @@ public class ApfFilter {
             if (gen.programLengthOverEstimate() > mMaximumApfProgramSize) {
                 Log.e(TAG, "Program exceeds maximum size " + mMaximumApfProgramSize);
                 sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_OVER_SIZE_FAILURE);
+                installPacketFilter(new byte[mMaximumApfProgramSize]);
                 return;
             }
 
@@ -3210,12 +3220,11 @@ public class ApfFilter {
         } catch (IllegalInstructionException | IllegalStateException | IllegalArgumentException e) {
             Log.wtf(TAG, "Failed to generate APF program.", e);
             sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_GENERATE_FILTER_EXCEPTION);
+            installPacketFilter(new byte[mMaximumApfProgramSize]);
             return;
         }
         if (mIsRunning) {
-            if (!mApfController.installPacketFilter(program)) {
-                sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
-            }
+            installPacketFilter(program);
         }
         mLastInstalledProgramMinLifetime = programMinLft;
         mLastInstalledProgram = program;
