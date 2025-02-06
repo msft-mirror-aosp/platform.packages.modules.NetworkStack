@@ -143,19 +143,21 @@ class ApfFilterTest {
         private const val THREAD_QUIT_MAX_RETRY_COUNT = 3
         private const val NO_CALLBACK_TIMEOUT_MS: Long = 500
         private const val TAG = "ApfFilterTest"
+
+        @Parameterized.Parameters
+        @JvmStatic
+        fun data(): Iterable<Any?> {
+            return mutableListOf<Int?>(6, 7)
+        }
     }
 
     @get:Rule
     val ignoreRule = DevSdkIgnoreRule()
 
     // Indicates which apfInterpreter to load.
-    @Parameterized.Parameter
+    @Parameterized.Parameter(0)
+    @JvmField
     var apfInterpreterVersion: Int = 7
-
-    @Parameterized.Parameters
-    fun data(): Iterable<Any?> {
-        return mutableListOf<Int?>(6, 7)
-    }
 
     @Mock
     private lateinit var context: Context

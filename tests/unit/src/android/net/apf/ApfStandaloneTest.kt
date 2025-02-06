@@ -56,13 +56,9 @@ import org.junit.runners.Parameterized
 class ApfStandaloneTest {
 
     // Indicates which apfInterpreter to load.
-    @Parameterized.Parameter
+    @Parameterized.Parameter(0)
+    @JvmField
     var apfInterpreterVersion: Int = 7
-
-    @Parameterized.Parameters
-    fun data(): Iterable<Any?> {
-        return mutableListOf<Int?>(6, 7)
-    }
 
     private val etherTypeDenyList = listOf(0x88A2, 0x88A4, 0x88B8, 0x88CD, 0x88E1, 0x88E3)
     private val ramSize = 1024
@@ -455,5 +451,10 @@ class ApfStandaloneTest {
 
     companion object {
         const val TAG = "ApfStandaloneTest"
+        @Parameterized.Parameters
+        @JvmStatic
+        fun data(): Iterable<Any?> {
+            return mutableListOf<Int?>(6, 7)
+        }
     }
 }
