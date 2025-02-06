@@ -27,8 +27,8 @@ import org.mockito.Mockito.clearInvocations
 import org.mockito.Mockito.timeout
 import org.mockito.Mockito.verify
 
-class ApfTestHelpers {
-    private val apfJniUtils = ApfJniUtils()
+class ApfTestHelpers(apfInterpreterVersion: Int){
+    private val apfJniUtils = ApfJniUtils(apfInterpreterVersion)
     companion object {
         const val TIMEOUT_MS: Long = 1000
         const val PASS: Int = 1
