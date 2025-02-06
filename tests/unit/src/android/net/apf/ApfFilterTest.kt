@@ -3007,7 +3007,7 @@ class ApfFilterTest {
         )
         visibleOnHandlerThread(handler) { offloadEngine.onOffloadServiceUpdated(info) }
 
-        verify(apfController).installPacketFilter(any())
+        verify(apfController).installPacketFilter(any(), any())
 
         visibleOnHandlerThread(handler) { apfFilter.shutdown() }
         verify(nsdManager).unregisterOffloadEngine(eq(offloadEngine))
@@ -3052,7 +3052,7 @@ class ApfFilterTest {
         visibleOnHandlerThread(handler) {
             offloadEngine.onOffloadServiceUpdated(corruptedOffloadInfo)
         }
-        verify(apfController, never()).installPacketFilter(any())
+        verify(apfController, never()).installPacketFilter(any(), any())
     }
 
     private fun getApfWithMdnsOffloadEnabled(
@@ -4011,7 +4011,7 @@ class ApfFilterTest {
 
         // add the same IPv4 address, expect to have no apf program update
         apfFilter.setLinkProperties(lp)
-        verify(apfController, never()).installPacketFilter(any())
+        verify(apfController, never()).installPacketFilter(any(), any())
 
         // add IPv6 addresses, expect to have apf program update
         for (addr in hostIpv6Addresses) {
@@ -4023,7 +4023,7 @@ class ApfFilterTest {
 
         // add the same IPv6 addresses, expect to have no apf program update
         apfFilter.setLinkProperties(lp)
-        verify(apfController, never()).installPacketFilter(any())
+        verify(apfController, never()).installPacketFilter(any(), any())
 
         // add more tentative IPv6 addresses, expect to have apf program update
         for (addr in hostIpv6TentativeAddresses) {
@@ -4042,7 +4042,7 @@ class ApfFilterTest {
 
         // add the same IPv6 addresses, expect to have no apf program update
         apfFilter.setLinkProperties(lp)
-        verify(apfController, never()).installPacketFilter(any())
+        verify(apfController, never()).installPacketFilter(any(), any())
     }
 
     // The APFv6 code path is only turned on in V+
@@ -4066,7 +4066,7 @@ class ApfFilterTest {
 
         Os.write(igmpWriteSocket, testPacket, 0, testPacket.size)
         Thread.sleep(NO_CALLBACK_TIMEOUT_MS)
-        verify(apfController, never()).installPacketFilter(any())
+        verify(apfController, never()).installPacketFilter(any(), any())
 
         mcastAddrs.remove(addr)
         doReturn(mcastAddrs).`when`(dependencies).getIPv4MulticastAddresses(any())
@@ -4078,7 +4078,8 @@ class ApfFilterTest {
     fun testApfFilterInitializationCleanUpTheApfMemoryRegion() {
         val apfFilter = getApfFilter()
         val programCaptor = ArgumentCaptor.forClass(ByteArray::class.java)
-        verify(apfController, times(2)).installPacketFilter(programCaptor.capture())
+        verify(apfController, times(2))
+            .installPacketFilter(programCaptor.capture(), any())
         val program = programCaptor.allValues.first()
         assertContentEquals(ByteArray(4096) { 0 }, program)
     }
@@ -4118,7 +4119,7 @@ class ApfFilterTest {
         assertEquals(mcastAddrsExcludeAllHost.toSet(), apfFilter.mIPv4McastAddrsExcludeAllHost)
 
         apfFilter.updateIPv4MulticastAddrs()
-        verify(apfController, never()).installPacketFilter(any())
+        verify(apfController, never()).installPacketFilter(any(), any())
     }
 
     @Test
