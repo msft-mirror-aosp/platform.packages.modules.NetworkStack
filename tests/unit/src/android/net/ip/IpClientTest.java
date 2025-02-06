@@ -65,6 +65,7 @@ import android.annotation.SuppressLint;
 import android.app.AlarmManager;
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.content.res.Resources;
 import android.net.ConnectivityManager;
 import android.net.INetd;
@@ -190,6 +191,7 @@ public class IpClientTest {
     @Mock private FileDescriptor mFd;
     @Mock private PrintWriter mWriter;
     @Mock private IpClientNetlinkMonitor mNetlinkMonitor;
+    @Mock private PackageManager mPackageManager;
     @Mock private ApfFilter mApfFilter;
 
     private InterfaceParams mIfParams;
@@ -214,8 +216,9 @@ public class IpClientTest {
         when(mDependencies.getDeviceConfigPropertyInt(eq(CONFIG_SOCKET_RECV_BUFSIZE), anyInt()))
                 .thenReturn(SOCKET_RECV_BUFSIZE);
         when(mDependencies.makeIpClientNetlinkMonitor(
-                any(), any(), any(), anyInt(), any())).thenReturn(mNetlinkMonitor);
+                any(), any(), any(), anyInt(), anyBoolean(), any())).thenReturn(mNetlinkMonitor);
         when(mNetlinkMonitor.start()).thenReturn(true);
+        doReturn(mPackageManager).when(mContext).getPackageManager();
 
         mIfParams = null;
     }
@@ -236,7 +239,7 @@ public class IpClientTest {
         final ArgumentCaptor<INetlinkMessageProcessor> processorCaptor =
                 ArgumentCaptor.forClass(INetlinkMessageProcessor.class);
         verify(mDependencies).makeIpClientNetlinkMonitor(any(), any(), any(), anyInt(),
-                processorCaptor.capture());
+                anyBoolean(), processorCaptor.capture());
         mNetlinkMessageProcessor = processorCaptor.getValue();
         reset(mNetd);
         // Verify IpClient doesn't call onLinkPropertiesChange() when it starts.
@@ -932,6 +935,28 @@ public class IpClientTest {
     }
 
     @Test
+    public void testForceApfV2OnLowRam() throws Exception {
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
+        ProvisioningConfiguration.Builder config = new ProvisioningConfiguration.Builder()
+                .withoutIPv4()
+                .withoutIpReachabilityMonitor()
+                .withInitialConfiguration(
+                        conf(links(TEST_LOCAL_ADDRESSES), prefixes(TEST_PREFIXES), ips()))
+                .withApfCapabilities(
+                        new ApfCapabilities(3 /* version */, 512 /* maxProgramSize */,
+                                ARPHRD_ETHER));
+        ipc.startProvisioning(config.build());
+        final ArgumentCaptor<ApfConfiguration> configCaptor = ArgumentCaptor.forClass(
+                ApfConfiguration.class);
+        verify(mDependencies, timeout(TEST_TIMEOUT_MS)).maybeCreateApfFilter(
+                any(), any(), configCaptor.capture(), any(), any(), any());
+
+        final ApfConfiguration apfConfig = configCaptor.getValue();
+        assertEquals(2, apfConfig.apfVersionSupported);
+        verifyShutdown(ipc);
+    }
+
+    @Test
     public void testDumpApfFilter_withNoException() throws Exception {
         final IpClient ipc = makeIpClient(TEST_IFNAME);
         final ApfConfiguration config = verifyApfFilterCreatedOnStart(ipc,
@@ -1020,7 +1045,7 @@ public class IpClientTest {
     public void testVendorNdOffloadDisabledWhenApfV6Supported() throws Exception {
         when(mDependencies.maybeCreateApfFilter(any(), any(), any(), any(), any(),
                 any())).thenReturn(mApfFilter);
-        when(mApfFilter.supportNdOffload()).thenReturn(true);
+        when(mApfFilter.enableNdOffload()).thenReturn(true);
         final IpClient ipc = makeIpClient(TEST_IFNAME);
         ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
                 .withoutIPv4()
@@ -1046,7 +1071,7 @@ public class IpClientTest {
     public void testVendorNdOffloadEnabledWhenApfV6NotSupported() throws Exception {
         when(mDependencies.maybeCreateApfFilter(any(), any(), any(), any(), any(),
                 any())).thenReturn(mApfFilter);
-        when(mApfFilter.supportNdOffload()).thenReturn(false);
+        when(mApfFilter.enableNdOffload()).thenReturn(false);
         final IpClient ipc = makeIpClient(TEST_IFNAME);
         ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
                 .withoutIPv4()
@@ -1070,7 +1095,7 @@ public class IpClientTest {
     public void testVendorNdOffloadDisabledWhenApfCapabilitiesUpdated() throws Exception {
         when(mDependencies.maybeCreateApfFilter(any(), any(), any(), any(), any(),
                 any())).thenReturn(mApfFilter);
-        when(mApfFilter.supportNdOffload()).thenReturn(true);
+        when(mApfFilter.enableNdOffload()).thenReturn(true);
         final IpClient ipc = makeIpClient(TEST_IFNAME);
         ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
                 .withoutIPv4()

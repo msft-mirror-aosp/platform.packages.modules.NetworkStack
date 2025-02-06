@@ -16,6 +16,7 @@
 
 package android.net.ip;
 
+import static android.content.pm.PackageManager.FEATURE_LEANBACK;
 import static android.net.IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ROAM;
 import static android.net.IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_CONFIRM;
 import static android.net.IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ORGANIC;
@@ -82,15 +83,19 @@ import static com.android.net.module.util.NetworkStackConstants.VENDOR_SPECIFIC_
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_MANAGETEMPADDR;
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_NOPREFIXROUTE;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ARP_OFFLOAD;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_IGMP_OFFLOAD_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ND_OFFLOAD;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_PING4_OFFLOAD_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.APF_POLLING_COUNTERS_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PD_PREFERRED_FLAG_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_REPLACE_NETD_WITH_NETLINK_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.createInet6AddressFromEui64;
+import static com.android.networkstack.util.NetworkStackUtils.isAtLeast25Q2;
 import static com.android.networkstack.util.NetworkStackUtils.macAddressToEui64;
 import static com.android.server.util.PermissionUtil.enforceNetworkStackCallingPermission;
 
@@ -448,8 +453,9 @@ public class IpClient extends StateMachine {
         /**
          * Called to indicate that a new APF program must be installed to filter incoming packets.
          */
-        public boolean installPacketFilter(byte[] filter) {
-            log("installPacketFilter(byte[" + filter.length + "])");
+        public boolean installPacketFilter(byte[] filter, @NonNull String filterConfig) {
+            log("installPacketFilter(byte[" + filter.length + "])" + " config: "
+                    + filterConfig);
             try {
                 if (mApfDebug) {
                     mApfLog.log("updated APF program: " + HexDump.toHexString(filter));
@@ -770,6 +776,7 @@ public class IpClient extends StateMachine {
     private final String mInterfaceName;
     @VisibleForTesting
     protected final IpClientCallbacksWrapper mCallback;
+    private final ApfFilter.IApfController mIpClientApfController;
     private final Dependencies mDependencies;
     private final ConnectivityManager mCm;
     private final INetd mNetd;
@@ -800,17 +807,19 @@ public class IpClient extends StateMachine {
     private final int mNudFailureCountDailyThreshold;
     private final int mNudFailureCountWeeklyThreshold;
 
-    // Experiment flag read from device config.
+    // Experiment flags read from device config.
     private final boolean mDhcp6PrefixDelegationEnabled;
     private final boolean mIsAcceptRaMinLftEnabled;
     private final boolean mEnableApfPollingCounters;
     private final boolean mPopulateLinkAddressLifetime;
-    private final boolean mApfShouldHandleArpOffload;
-    private final boolean mApfShouldHandleNdOffload;
-    private final boolean mApfShouldHandleMdnsOffload;
-    private final boolean mApfShouldHandleIgmpOffload;
+    private final boolean mApfHandleArpOffload;
+    private final boolean mApfHandleNdOffload;
+    private final boolean mApfHandleMdnsOffload;
+    private final boolean mApfHandleIgmpOffload;
+    private final boolean mApfHandleIpv4PingOffload;
     private final boolean mIgnoreNudFailureEnabled;
     private final boolean mDhcp6PdPreferredFlagEnabled;
+    private final boolean mReplaceNetdWithNetlinkEnabled;
 
     private InterfaceParams mInterfaceParams;
 
@@ -983,8 +992,9 @@ public class IpClient extends StateMachine {
          */
         public ApfFilter maybeCreateApfFilter(Handler handler, Context context,
                 ApfFilter.ApfConfiguration config, InterfaceParams ifParams,
-                IpClientCallbacksWrapper cb, NetworkQuirkMetrics networkQuirkMetrics) {
-            return ApfFilter.maybeCreate(handler, context, config, ifParams, cb,
+                ApfFilter.IApfController apfController,
+                NetworkQuirkMetrics networkQuirkMetrics) {
+            return ApfFilter.maybeCreate(handler, context, config, ifParams, apfController,
                     networkQuirkMetrics);
         }
 
@@ -1009,8 +1019,10 @@ public class IpClient extends StateMachine {
          * Create an IpClientNetlinkMonitor instance.
          */
         public IpClientNetlinkMonitor makeIpClientNetlinkMonitor(Handler h, SharedLog log,
-                String tag, int sockRcvbufSize, INetlinkMessageProcessor p) {
-            return new IpClientNetlinkMonitor(h, log, tag, sockRcvbufSize, p);
+                String tag, int sockRcvbufSize, boolean isDhcp6PdPreferredFlagEnabled,
+                INetlinkMessageProcessor p) {
+            return new IpClientNetlinkMonitor(h, log, tag, sockRcvbufSize,
+                    isDhcp6PdPreferredFlagEnabled, p);
         }
     }
 
@@ -1047,6 +1059,17 @@ public class IpClient extends StateMachine {
         mApfDebug = Log.isLoggable(ApfFilter.class.getSimpleName(), Log.DEBUG);
         mMsgStateLogger = new MessageHandlingLogger();
         mCallback = new IpClientCallbacksWrapper(callback, mLog, mApfLog, mShim, mApfDebug);
+        mIpClientApfController = new ApfFilter.IApfController() {
+            @Override
+            public boolean installPacketFilter(byte[] filter, String filterConfig) {
+                return mCallback.installPacketFilter(filter, filterConfig);
+            }
+
+            @Override
+            public void readPacketFilterRam(String event) {
+                mCallback.startReadPacketFilter(event);
+            }
+        };
 
         // TODO: Consider creating, constructing, and passing in some kind of
         // InterfaceController.Dependencies class.
@@ -1066,14 +1089,19 @@ public class IpClient extends StateMachine {
         mIsAcceptRaMinLftEnabled =
                 SdkLevel.isAtLeastV() || mDependencies.isFeatureEnabled(context,
                         IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION);
-        mApfShouldHandleArpOffload = mDependencies.isFeatureNotChickenedOut(
+        mApfHandleArpOffload = mDependencies.isFeatureNotChickenedOut(
                 mContext, APF_HANDLE_ARP_OFFLOAD);
-        mApfShouldHandleNdOffload = mDependencies.isFeatureNotChickenedOut(
+        mApfHandleNdOffload = mDependencies.isFeatureNotChickenedOut(
                 mContext, APF_HANDLE_ND_OFFLOAD);
-        // TODO: turn on APF mDNS offload.
-        mApfShouldHandleMdnsOffload = false;
-        // TODO: turn on APF IGMP offload.
-        mApfShouldHandleIgmpOffload = false;
+        // TODO: turn on APF mDNS offload on handhelds.
+        mApfHandleMdnsOffload = isAtLeast25Q2() && context.getPackageManager().hasSystemFeature(
+                FEATURE_LEANBACK);
+        mApfHandleIgmpOffload =
+                isAtLeast25Q2() || mDependencies.isFeatureEnabled(context,
+                        APF_HANDLE_IGMP_OFFLOAD_VERSION);
+        mApfHandleIpv4PingOffload =
+                isAtLeast25Q2() || mDependencies.isFeatureEnabled(context,
+                        APF_HANDLE_PING4_OFFLOAD_VERSION);
         mPopulateLinkAddressLifetime = mDependencies.isFeatureEnabled(context,
                 IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION);
         mIgnoreNudFailureEnabled = mDependencies.isFeatureEnabled(mContext,
@@ -1086,9 +1114,10 @@ public class IpClient extends StateMachine {
                 DEFAULT_NUD_FAILURE_COUNT_WEEKLY_THRESHOLD);
         mDhcp6PdPreferredFlagEnabled =
                 mDependencies.isFeatureEnabled(mContext, IPCLIENT_DHCPV6_PD_PREFERRED_FLAG_VERSION);
-
+        mReplaceNetdWithNetlinkEnabled = mDependencies.isFeatureEnabled(mContext,
+                IPCLIENT_REPLACE_NETD_WITH_NETLINK_VERSION);
         IpClientLinkObserver.Configuration config = new IpClientLinkObserver.Configuration(
-                mAcceptRaMinLft, mPopulateLinkAddressLifetime);
+                mAcceptRaMinLft, mPopulateLinkAddressLifetime, mDhcp6PdPreferredFlagEnabled);
 
         mLinkObserver = new IpClientLinkObserver(
                 mContext, getHandler(),
@@ -1123,7 +1152,7 @@ public class IpClient extends StateMachine {
                             // If Apf is not supported or Apf doesn't support ND offload, then
                             // configure the vendor ND offload feature based on the Clat
                             // interface state.
-                            if (mApfFilter == null || !mApfFilter.supportNdOffload()) {
+                            if (mApfFilter == null || !mApfFilter.enableNdOffload()) {
                                 // Clat interface information is spliced into LinkProperties by
                                 // ConnectivityService, so it cannot be added to the LinkProperties
                                 // here as those propagate back to ConnectivityService.
@@ -1484,7 +1513,12 @@ public class IpClient extends StateMachine {
                     apfCapabilities.apfVersionSupported)) {
                 // Request a new snapshot, then wait for it.
                 mApfDataSnapshotComplete.close();
-                mCallback.startReadPacketFilter("dumpsys");
+                // To ensure long-term flexibility and support for different APF controller
+                // implementations (e.g., Ethtool-based), we use apfFilter.getApfController()
+                // instead of directly accessing mIpClientApfController. This approach makes
+                // code reusable and simplifies future transitions to alternative APF
+                // controllers.
+                apfFilter.getApfController().readPacketFilterRam("dumpsys");
                 if (!mApfDataSnapshotComplete.block(1000)) {
                     pw.print("TIMEOUT: DUMPING STALE APF SNAPSHOT");
                 }
@@ -1565,7 +1599,7 @@ public class IpClient extends StateMachine {
             }
             // Request a new snapshot, then wait for it.
             mApfDataSnapshotComplete.close();
-            mCallback.startReadPacketFilter("shell command");
+            mApfFilter.getApfController().readPacketFilterRam("shell command");
             if (!mApfDataSnapshotComplete.block(5000 /* ms */)) {
                 throw new RuntimeException("Error: Failed to read APF program");
             }
@@ -1596,7 +1630,8 @@ public class IpClient extends StateMachine {
                         if (mApfFilter.isRunning()) {
                             throw new IllegalStateException("APF filter must first be paused");
                         }
-                        mCallback.installPacketFilter(HexDump.hexStringToByteArray(optarg));
+                        mApfFilter.getApfController().installPacketFilter(
+                                HexDump.hexStringToByteArray(optarg), "program from shell command");
                         result.complete("success");
                         break;
                     case "capabilities":
@@ -2724,7 +2759,12 @@ public class IpClient extends StateMachine {
         // For now only support generating programs for Ethernet frames. If this restriction is
         // lifted the program generator will need its offsets adjusted.
         if (apfCaps.apfPacketFormat != ARPHRD_ETHER) return null;
-        if (SdkLevel.isAtLeastS()) {
+        // For devices declare APFv3+ support but have less than 1024 bytes of RAM available for
+        // the APF, set the APF version to v2. The counter region will use a few hundred bytes of
+        // RAM. If the RAM size is too small, we should reserve that region for program use.
+        if (apfCaps.apfVersionSupported >= 3 && apfCaps.maximumApfProgramSize < 1024) {
+            apfConfig.apfVersionSupported = 2;
+        } else if (SdkLevel.isAtLeastS()) {
             apfConfig.apfVersionSupported = apfCaps.apfVersionSupported;
         } else {
             // In Android R, ApfCapabilities#hasDataAccess() can be modified by OEMs. The
@@ -2764,14 +2804,15 @@ public class IpClient extends StateMachine {
         } else {
             apfConfig.acceptRaMinLft = 0;
         }
-        apfConfig.shouldHandleArpOffload = mApfShouldHandleArpOffload;
-        apfConfig.shouldHandleNdOffload = mApfShouldHandleNdOffload;
-        apfConfig.shouldHandleMdnsOffload = mApfShouldHandleMdnsOffload;
-        apfConfig.shouldHandleIgmpOffload = mApfShouldHandleIgmpOffload;
+        apfConfig.handleArpOffload = mApfHandleArpOffload;
+        apfConfig.handleNdOffload = mApfHandleNdOffload;
+        apfConfig.handleMdnsOffload = mApfHandleMdnsOffload;
+        apfConfig.handleIgmpOffload = mApfHandleIgmpOffload;
+        apfConfig.handleIpv4PingOffload = mApfHandleIpv4PingOffload;
         apfConfig.minMetricsSessionDurationMs = mApfCounterPollingIntervalMs;
         apfConfig.hasClatInterface = mHasSeenClatInterface;
         return mDependencies.maybeCreateApfFilter(getHandler(), mContext, apfConfig,
-                mInterfaceParams, mCallback, mNetworkQuirkMetrics);
+                mInterfaceParams, mIpClientApfController, mNetworkQuirkMetrics);
     }
 
     private boolean handleUpdateApfCapabilities(@NonNull final ApfCapabilities apfCapabilities) {
@@ -3336,7 +3377,7 @@ public class IpClient extends StateMachine {
             mHasSeenClatInterface = false;
             mApfFilter = maybeCreateApfFilter(mCurrentApfCapabilities);
             // If Apf supports ND offload, then turn off the vendor ND offload feature.
-            if (mApfFilter != null && mApfFilter.supportNdOffload()) {
+            if (mApfFilter != null && mApfFilter.enableNdOffload()) {
                 mCallback.setNeighborDiscoveryOffload(false);
             }
             // TODO: investigate the effects of any multicast filtering racing/interfering with the
@@ -3797,14 +3838,23 @@ public class IpClient extends StateMachine {
                     if (handleUpdateApfCapabilities(apfCapabilities)) {
                         mApfFilter = maybeCreateApfFilter(apfCapabilities);
                         // If Apf supports ND offload, then turn off the vendor ND offload feature.
-                        if (mApfFilter != null && mApfFilter.supportNdOffload()) {
+                        if (mApfFilter != null && mApfFilter.enableNdOffload()) {
                             mCallback.setNeighborDiscoveryOffload(false);
                         }
                     }
                     break;
 
                 case CMD_UPDATE_APF_DATA_SNAPSHOT:
-                    mCallback.startReadPacketFilter("polling");
+                    if (mApfFilter != null) {
+                        // We prevents calls to readPacketFilterRam() when  mApfFilter is null.
+                        // This is correct because any data read would be discarded when
+                        // processing the EVENT_READ_PACKET_FILTER_COMPLETE event if no
+                        // ApfFilter exists.
+                        mApfFilter.getApfController().readPacketFilterRam("polling");
+                    }
+                    // Even if mApfFilter is currently null, periodic checks are necessary to
+                    // read APF RAM when an ApfFilter becomes available, as APF capabilities can
+                    // be updated which result in mApfFilter being created.
                     sendMessageDelayed(CMD_UPDATE_APF_DATA_SNAPSHOT, mApfCounterPollingIntervalMs);
                     break;
 
@@ -3936,7 +3986,11 @@ public class IpClient extends StateMachine {
         return coll.stream().map(Object::toString).collect(Collectors.joining(delimiter));
     }
 
-    static <T> T find(Iterable<T> coll, Predicate<T> fn) {
+    /**
+     * Find a specific element which satisfies the predicate in a collection.
+     */
+    @VisibleForTesting
+    public static <T> T find(Iterable<T> coll, Predicate<T> fn) {
         for (T t: coll) {
             if (fn.test(t)) {
                 return t;

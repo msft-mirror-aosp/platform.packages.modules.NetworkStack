@@ -16,13 +16,20 @@
 
 package com.android.networkstack.util;
 
+import static android.os.Build.VERSION.CODENAME;
+import static android.os.Build.VERSION.SDK_INT;
+import static android.system.OsConstants.IFA_F_DEPRECATED;
+import static android.system.OsConstants.IFA_F_TENTATIVE;
+
 import android.content.Context;
 import android.net.IpPrefix;
 import android.net.LinkAddress;
+import android.net.LinkProperties;
 import android.net.MacAddress;
 import android.system.ErrnoException;
 import android.util.Log;
 
+import androidx.annotation.ChecksSdkIntAtLeast;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
@@ -64,7 +71,7 @@ public class NetworkStackUtils {
     public static final String CAPTIVE_PORTAL_OTHER_HTTP_URLS = "captive_portal_other_http_urls";
 
     /**
-     * A comma separated list of URLs used for network validation. in addition to the HTTPS url
+     * A comma separated list of URLs used for network validation in addition to the HTTPS url
      * associated with the CAPTIVE_PORTAL_HTTPS_URL settings.
      */
     public static final String CAPTIVE_PORTAL_OTHER_HTTPS_URLS = "captive_portal_other_https_urls";
@@ -275,6 +282,12 @@ public class NetworkStackUtils {
             "ipclient_dhcpv6_pd_preferred_flag_version";
 
     /**
+     * Experiment flag to replace INetd usage with netlink in IpClient.
+     */
+    public static final String IPCLIENT_REPLACE_NETD_WITH_NETLINK_VERSION =
+            "ipclient_replace_netd_with_netlink_version";
+
+    /**
      * Experiment flag to enable Discovery of Designated Resolvers (DDR).
      * This flag requires networkmonitor_async_privdns_resolution flag.
      */
@@ -285,6 +298,18 @@ public class NetworkStackUtils {
      */
     public static final String IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION =
             "ip_reachability_ignore_nud_failure_version";
+
+    /**
+     * Experiment flag to enable the feature of handle IPv4 ping offload in Apf.
+     */
+    public static final String APF_HANDLE_PING4_OFFLOAD_VERSION =
+            "apf_handle_ping_offload_version";
+
+    /**
+     * Experiment flag to enable the feature of handle IGMP offload in Apf.
+     */
+    public static final String APF_HANDLE_IGMP_OFFLOAD_VERSION =
+            "apf_handle_igmp_offload_version";
 
     /**** BEGIN Feature Kill Switch Flags ****/
 
@@ -422,6 +447,58 @@ public class NetworkStackUtils {
             Log.e(TAG, "Invalid IPv6 address " + HexDump.toHexString(address), e);
             return null;
         }
+    }
+
+    /** Checks if the device is running on a release version of Android Baklava or newer */
+    @ChecksSdkIntAtLeast(api = 36 /* BUILD_VERSION_CODES.Baklava */)
+    public static boolean isAtLeast25Q2() {
+        return SDK_INT >= 36 || (SDK_INT == 35 && isAtLeastPreReleaseCodename("Baklava"));
+    }
+
+    private static boolean isAtLeastPreReleaseCodename(@NonNull String codename) {
+        // Special case "REL", which means the build is not a pre-release build.
+        if ("REL".equals(CODENAME)) {
+            return false;
+        }
+
+        // Otherwise lexically compare them. Return true if the build codename is equal to or
+        // greater than the requested codename.
+        return CODENAME.compareTo(codename) >= 0;
+    }
+
+    /**
+     * Select the preferred IPv6 link-local address based on the rules defined in rfc3484,
+     * Section 5.
+     * <p>
+     * The address selection criteria are as follows:
+     * 1. Select a non-tentative, non-deprecated address, if available.
+     * 2. If no such address exists, select any non-tentative address.
+     */
+    public static Inet6Address selectPreferredIPv6LinkLocalAddress(@NonNull LinkProperties lp) {
+        Inet6Address preferredAddress = null;
+        for (LinkAddress linkAddress : lp.getLinkAddresses()) {
+            final InetAddress inetAddress = linkAddress.getAddress();
+            final int flags = linkAddress.getFlags();
+
+            if (!(inetAddress instanceof Inet6Address)) {
+                continue;
+            }
+
+            if (!inetAddress.isLinkLocalAddress()) {
+                continue;
+            }
+
+            if ((flags & IFA_F_TENTATIVE) != 0) {
+                continue;
+            }
+
+            preferredAddress = (Inet6Address) inetAddress;
+            if ((flags & IFA_F_DEPRECATED) == 0L) {
+                return preferredAddress;
+            }
+        }
+
+        return preferredAddress;
     }
 
     /**

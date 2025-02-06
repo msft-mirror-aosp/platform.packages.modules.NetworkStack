@@ -76,14 +76,10 @@ public class ApfMdnsUtils {
         final List<MdnsOffloadRule> rules = new ArrayList<>();
         final Set<MdnsOffloadRule.Matcher> allMatchers = new ArraySet<>();
         for (OffloadServiceInfo info : sortedOffloadServiceInfos) {
-            // Don't offload the records if the priority is not configured.
-            int priority = info.getPriority();
-            if (priority == Integer.MAX_VALUE) {
-                continue;
-            }
             List<MdnsOffloadRule.Matcher> matcherGroup = new ArrayList<>();
             final OffloadServiceInfo.Key key = info.getKey();
-            final String[] serviceTypeLabels = key.getServiceType().split("\\.", 0);
+            final String[] serviceTypeLabels = CollectionUtils.appendArray(String.class,
+                    key.getServiceType().split("\\.", 0), "local");
             final String[] fullQualifiedName = CollectionUtils.prependArray(String.class,
                     serviceTypeLabels, key.getServiceName());
             final byte[] replyPayload = info.getOffloadPayload();
@@ -136,7 +132,9 @@ public class ApfMdnsUtils {
             addMatcherIfNotExist(allMatchers, matcherGroup,
                     new MdnsOffloadRule.Matcher(encodedHostName, TYPE_AAAA));
             if (!matcherGroup.isEmpty()) {
-                rules.add(new MdnsOffloadRule(matcherGroup, tooManySubtypes ? null : replyPayload));
+                rules.add(new MdnsOffloadRule(
+                        key.getServiceName() + "." + key.getServiceType(),
+                        matcherGroup, tooManySubtypes ? null : replyPayload));
             }
         }
         return rules;

@@ -16,6 +16,7 @@
 package android.net.apf
 
 import android.content.Context
+import android.net.InetAddresses
 import android.net.LinkAddress
 import android.net.LinkProperties
 import android.net.MacAddress
@@ -29,19 +30,27 @@ import android.net.apf.ApfCounterTracker.Counter.DROPPED_ARP_UNKNOWN
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_ARP_V6_ONLY
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_ETHERTYPE_NOT_ALLOWED
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_GARP_REPLY
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IGMP_INVALID
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IGMP_REPORT
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IGMP_V2_GENERAL_QUERY_REPLIED
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IGMP_V3_GENERAL_QUERY_REPLIED
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_BROADCAST_ADDR
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_BROADCAST_NET
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_ICMP_INVALID
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_KEEPALIVE_ACK
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_L2_BROADCAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_MULTICAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_NATT_KEEPALIVE
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_NON_DHCP4
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_PING_REQUEST_REPLIED
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_TCP_PORT7_UNICAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_MULTICAST_NA
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NON_ICMP_MULTICAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_INVALID
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_OTHER_HOST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_REPLIED_NON_DAD
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_MDNS
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_MDNS_REPLIED
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_BROADCAST_REPLY
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_REQUEST
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_UNICAST_REPLY
@@ -56,15 +65,12 @@ import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_DAD
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_NO_ADDRESS
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_NO_SLLA_OPTION
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_TENTATIVE
+import android.net.apf.ApfCounterTracker.Counter.PASSED_MDNS
 import android.net.apf.ApfCounterTracker.Counter.PASSED_MLD
 import android.net.apf.ApfFilter.Dependencies
 import android.net.apf.ApfTestHelpers.Companion.TIMEOUT_MS
-import android.net.apf.ApfTestHelpers.Companion.consumeInstalledProgram
-import android.net.apf.ApfTestHelpers.Companion.consumeTransmittedPackets
-import android.net.apf.ApfTestHelpers.Companion.verifyProgramRun
 import android.net.apf.BaseApfGenerator.APF_VERSION_3
 import android.net.apf.BaseApfGenerator.APF_VERSION_6
-import android.net.ip.IpClient.IpClientCallbacksWrapper
 import android.net.nsd.NsdManager
 import android.net.nsd.OffloadEngine
 import android.net.nsd.OffloadServiceInfo
@@ -96,6 +102,7 @@ import com.android.testutils.DevSdkIgnoreRule
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo
 import com.android.testutils.DevSdkIgnoreRunner
 import com.android.testutils.quitResources
+import com.android.testutils.visibleOnHandlerThread
 import com.android.testutils.waitForIdle
 import java.io.FileDescriptor
 import java.net.Inet4Address
@@ -109,6 +116,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.junit.runners.Parameterized
 import org.mockito.ArgumentCaptor
 import org.mockito.ArgumentMatchers.any
 import org.mockito.ArgumentMatchers.anyInt
@@ -135,10 +143,21 @@ class ApfFilterTest {
         private const val THREAD_QUIT_MAX_RETRY_COUNT = 3
         private const val NO_CALLBACK_TIMEOUT_MS: Long = 500
         private const val TAG = "ApfFilterTest"
+
+        @Parameterized.Parameters
+        @JvmStatic
+        fun data(): Iterable<Any?> {
+            return mutableListOf<Int?>(6, 7)
+        }
     }
 
     @get:Rule
     val ignoreRule = DevSdkIgnoreRule()
+
+    // Indicates which apfInterpreter to load.
+    @Parameterized.Parameter(0)
+    @JvmField
+    var apfInterpreterVersion: Int = 7
 
     @Mock
     private lateinit var context: Context
@@ -147,7 +166,7 @@ class ApfFilterTest {
 
     @Mock private lateinit var dependencies: Dependencies
 
-    @Mock private lateinit var ipClientCallback: IpClientCallbacksWrapper
+    @Mock private lateinit var apfController: ApfFilter.IApfController
     @Mock private lateinit var nsdManager: NsdManager
 
     @GuardedBy("mApfFilterCreated")
@@ -178,6 +197,7 @@ class ApfFilterTest {
         intArrayOf(0x20, 0x01, 0, 0, 0, 0, 0, 0, 0x01, 0, 0, 0x1b, 0x44, 0x55, 0x66, 0x77)
             .map{ it.toByte() }.toByteArray()
     )
+    private val hostLinkLocalIpv6Address = InetAddresses.parseNumericAddress("fe80::3")
     private val hostIpv6TentativeAddresses = listOf(
         // 2001::200:1a:1234:5678
         intArrayOf(0x20, 0x01, 0, 0, 0, 0, 0, 0, 0x02, 0, 0, 0x1a, 0x12, 0x34, 0x56, 0x78)
@@ -202,15 +222,71 @@ class ApfFilterTest {
         intArrayOf(0x33, 0x33, 0xff, 0xbb, 0xcc, 0xdd).map { it.toByte() }.toByteArray(),
     )
 
+    // Using scapy to generate payload:
+    // answers = [
+    //    DNSRR(rrname="_googlecast._tcp.local", type="PTR", ttl=120, rdata="gambit-3cb56c6253638b3641e3d289013cc0ae._googlecast._tcp.local."),
+    //    DNSRR(rrname="gambit-3cb56c6253638b3641e3d289013cc0ae._googlecast._tcp.local", type="SRV", ttl=120, rdata="0 0 8009 3cb56c62-5363-8b36-41e3-d289013cc0ae.local."),
+    //    DNSRR(rrname="gambit-3cb56c6253638b3641e3d289013cc0ae._googlecast._tcp.local", type="TXT", ttl=120, rdata=' "id=3cb56c6253638b3641e3d289013cc0ae cd=8ECC37F6755390D005DFC02F8EC0D4FA rm=4ABD579644ACFCCF ve=05 md=gambit ic=/setup/icon.png fn=gambit a=264709 st=0 bs=FA8FFD2242A7 nf=1 rs= ',),
+    //    DNSRR(rrname="Android_f47ac10b58cc4b88bc3f5e7a81e59872.local", type="A", ttl=120, rdata="100.89.85.228"),
+    //    DNSRR(rrname="Android_f47ac10b58cc4b88bc3f5e7a81e59872.local", type="AAAA", ttl=120, rdata="fe80:0000:0000:0000:0000:0000:0000:0003"),
+    //    DNSRR(rrname="Android_f47ac10b58cc4b88bc3f5e7a81e59872.local", type="AAAA", ttl=120, rdata="200a:0000:0000:0000:0000:0000:0000:0003"),
+    //    DNSRR(rrname="Android_f47ac10b58cc4b88bc3f5e7a81e59872.local", type="AAAA", ttl=120, rdata="200b:0000:0000:0000:0000:0000:0000:0003"),
+    // ]
+    // dns = dns_compress(DNS(qr=1, aa=1, rd=0, qd=None, an=answers))
+    private val castOffloadPayload = """
+            0000840000000007000000000b5f676f6f676c6563617374045f746370056c6
+            f63616c00000c000100000078002a2767616d6269742d336362353663363235
+            3336333862333634316533643238393031336363306165c00c01c0000021000
+            100000078003430203020383030392033636235366336322d353336332d3862
+            33362d343165332d6432383930313363633061652e6c6f63616c2e01c000001
+            000010000007800b3b2202269643d3363623536633632353336333862333634
+            3165336432383930313363633061652063643d3845434333374636373535333
+            93044303035444643303246384543304434464120726d3d3441424435373936
+            34344143464343462076653d3035206d643d67616d6269742069633d2f73657
+            475702f69636f6e2e706e6720666e3d67616d62697420613d32363437303920
+            73743d302062733d464138464644323234324137206e663d312072733d20284
+            16e64726f69645f663437616331306235386363346238386263336635653761
+            3831653539383732c01d00010001000000780004645955e4c157001c0001000
+            000780010fe800000000000000000000000000003c157001c00010000007800
+            10200a0000000000000000000000000003c157001c0001000000780010200b0
+            000000000000000000000000003
+        """.replace("\\s+".toRegex(), "").trim()
+
+    // Using scapy to generate payload:
+    // answers = [
+    //    DNSRR(rrname="_androidtvremote2._tcp.local", type="PTR", rdata="gambit._androidtvremote2._tcp.local", ttl=120),
+    //    DNSRR(rrname="gambit._androidtvremote2._tcp.local", type="SRV", rdata="0 0 6466 Android_2570595cc11d4af4a4b7146b946eeb9e.local", ttl=120),
+    //    DNSRR(rrname="gambit._androidtvremote2._tcp.local", type="TXT", rdata='''"bt=3C:4E:56:76:1E:E9"''', ttl=120),
+    //    DNSRR(rrname="Android_f47ac10b58cc4b88bc3f5e7a81e59872.local", type="A", ttl=120, rdata="100.89.85.228"),
+    //    DNSRR(rrname="Android_f47ac10b58cc4b88bc3f5e7a81e59872.local", type="AAAA", ttl=120, rdata="fe80:0000:0000:0000:0000:0000:0000:0003"),
+    //    DNSRR(rrname="Android_f47ac10b58cc4b88bc3f5e7a81e59872.local", type="AAAA", ttl=120, rdata="200a:0000:0000:0000:0000:0000:0000:0003"),
+    //    DNSRR(rrname="Android_f47ac10b58cc4b88bc3f5e7a81e59872.local", type="AAAA", ttl=120, rdata="200b:0000:0000:0000:0000:0000:0000:0003"),
+    // ]
+    // dns = dns_compress(DNS(qr=1, aa=1, rd=0, qd=None, an=answers))
+    val tvRemoteOffloadPayload = """
+            000084000000000700000000115f616e64726f6964747672656d6f746532045
+            f746370056c6f63616c00000c00010000007800090667616d626974c00cc034
+            00210001000000780037302030203634363620416e64726f69645f323537303
+            53935636331316434616634613462373134366239343665656239652e6c6f63
+            616cc03400100001000000780017162262743d33433a34453a35363a37363a3
+            1453a45392228416e64726f69645f6634376163313062353863633462383862
+            633366356537613831653539383732c02300010001000000780004645955e4c
+            0a3001c0001000000780010fe800000000000000000000000000003c0a3001c
+            0001000000780010200a0000000000000000000000000003c0a3001c0001000
+            000780010200b0000000000000000000000000003
+        """.replace("\\s+".toRegex(), "").trim()
+
     private val handlerThread by lazy {
         HandlerThread("$TAG handler thread").apply { start() }
     }
     private val handler by lazy { Handler(handlerThread.looper) }
     private var writerSocket = FileDescriptor()
     private var igmpWriteSocket = FileDescriptor()
+    private lateinit var apfTestHelpers: ApfTestHelpers
 
     @Before
     fun setUp() {
+        apfTestHelpers = ApfTestHelpers(apfInterpreterVersion)
         MockitoAnnotations.initMocks(this)
         // mock anycast6 address from /proc/net/anycast6
         doReturn(hostAnycast6Addresses).`when`(dependencies).getAnycast6Addresses(any())
@@ -262,7 +338,7 @@ class ApfFilterTest {
         shutdownApfFilters()
         handler.waitForIdle(TIMEOUT_MS)
         Mockito.framework().clearInlineMocks()
-        ApfJniUtils.resetTransmittedPacketMemory()
+        apfTestHelpers.resetTransmittedPacketMemory()
         handlerThread.quitSafely()
         handlerThread.join()
     }
@@ -275,8 +351,8 @@ class ApfFilterTest {
         config.multicastFilter = false
         config.ieee802_3Filter = false
         config.ethTypeBlackList = IntArray(0)
-        config.shouldHandleArpOffload = true
-        config.shouldHandleNdOffload = true
+        config.handleArpOffload = true
+        config.handleNdOffload = true
         return config
     }
 
@@ -290,7 +366,7 @@ class ApfFilterTest {
                     context,
                     apfCfg,
                     ifParams,
-                    ipClientCallback,
+                    apfController,
                     metrics,
                     dependencies
             )
@@ -299,8 +375,28 @@ class ApfFilterTest {
         return apfFilter
     }
 
+    private fun getIgmpApfFilter(): ApfFilter {
+        val mcastAddrs = listOf(
+            InetAddress.getByName("224.0.0.1") as Inet4Address,
+            InetAddress.getByName("239.0.0.1") as Inet4Address,
+            InetAddress.getByName("239.0.0.2") as Inet4Address,
+            InetAddress.getByName("239.0.0.3") as Inet4Address
+        )
+        val apfConfig = getDefaultConfig()
+        apfConfig.handleIgmpOffload = true
+
+        // mock IPv4 multicast address from /proc/net/igmp
+        doReturn(mcastAddrs).`when`(dependencies).getIPv4MulticastAddresses(any())
+        val apfFilter = getApfFilter(apfConfig)
+        val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
+        val lp = LinkProperties()
+        lp.addLinkAddress(linkAddress)
+        apfFilter.setLinkProperties(lp)
+        return apfFilter
+    }
+
     private fun doTestEtherTypeAllowListFilter(apfFilter: ApfFilter) {
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
 
         // Using scapy to generate IPv4 mDNS packet:
         //   eth = Ether(src="E8:9F:80:66:60:BB", dst="01:00:5E:00:00:FB")
@@ -312,7 +408,7 @@ class ApfFilterTest {
             01005e0000fbe89f806660bb080045000035000100004011d812c0a80101e00000f
             b14e914e900214d970000010000010000000000000161056c6f63616c00000c0001
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(mdnsPkt),
@@ -328,7 +424,7 @@ class ApfFilterTest {
             333300000001e89f806660bb86dd6000000000103afffe800000000000000000000000
             000001ff0200000000000000000000000000018600600700080e100000000000000e10
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(raPkt),
@@ -338,7 +434,7 @@ class ApfFilterTest {
         // Using scapy to generate ethernet packet with type 0x88A2:
         //  p = Ether(type=0x88A2)/Raw(load="01")
         val ethPkt = "ffffffffffff047bcb463fb588a23031"
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(ethPkt),
@@ -410,7 +506,7 @@ class ApfFilterTest {
     fun testIPv4PacketFilterOnV6OnlyNetwork() {
         val apfFilter = getApfFilter()
         apfFilter.updateClatInterfaceState(true)
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 3)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
 
         // Using scapy to generate IPv4 mDNS packet:
         //   eth = Ether(src="E8:9F:80:66:60:BB", dst="01:00:5E:00:00:FB")
@@ -422,7 +518,7 @@ class ApfFilterTest {
             01005e0000fbe89f806660bb080045000035000100004011d812c0a80101e00000f
             b14e914e900214d970000010000010000000000000161056c6f63616c00000c0001
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(mdnsPkt),
@@ -436,7 +532,7 @@ class ApfFilterTest {
         val nonUdpPkt = """
             ffffffffffff00112233445508004500001400010000400cb934c0a80101ffffffff
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nonUdpPkt),
@@ -450,7 +546,7 @@ class ApfFilterTest {
         val fragmentUdpPkt = """
             ffffffffffff0011223344550800450000140001200a40119925c0a80101ffffffff
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(fragmentUdpPkt),
@@ -465,7 +561,7 @@ class ApfFilterTest {
         val nonDhcpServerPkt = """
             ffffffffffff00112233445508004500001c000100004011b927c0a80101ffffffff0035004600083dba
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nonDhcpServerPkt),
@@ -500,7 +596,7 @@ class ApfFilterTest {
             0000000000000000000000000000000000000000000000000000638253633501023604c0
             a801010104ffffff000304c0a80101330400015180060408080808ff
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(dhcp4Pkt),
@@ -519,7 +615,7 @@ class ApfFilterTest {
             0000000000000000000000000000000000000000000000000000638253633501023604c0
             a801010104ffffff000304c0a80101330400015180060408080808ff
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(dhcp4PktDf),
@@ -538,7 +634,7 @@ class ApfFilterTest {
             01005e0000fbe89f806660bb08004500001d000100034011f75dc0a8010ac0a8
             01146f63616c00000c0001
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(fragmentedUdpPkt),
@@ -550,7 +646,7 @@ class ApfFilterTest {
     fun testLoopbackFilter() {
         val apfConfig = getDefaultConfig()
         val apfFilter = getApfFilter(apfConfig)
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         // Using scapy to generate echo-ed broadcast packet:
         //   ether = Ether(src=${ifParams.macAddr}, dst='ff:ff:ff:ff:ff:ff')
         //   ip = IP(src='192.168.1.1', dst='255.255.255.255', proto=21)
@@ -558,11 +654,685 @@ class ApfFilterTest {
         val nonDhcpBcastPkt = """
             ffffffffffff020304050607080045000014000100004015b92bc0a80101ffffffff
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
                 apfFilter.mApfVersionSupported,
                 program,
                 HexDump.hexStringToByteArray(nonDhcpBcastPkt),
                 PASSED_ETHER_OUR_SRC_MAC
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testInvalidIgmpPacketDropped() {
+        val apfFilter = getIgmpApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate invalid length IGMPv1 general query packet:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:01')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.1', len=24, proto=2)
+        //   payload = Raw(b'\x11\x00\xee\xff\x01\x02\x03\x04\x05\x06')
+        //   pkt = ether/ip/payload
+        val payloadLen10Pkt = """
+            01005e00000100112233445508004500001800010000400290e00a000002e00000011100eeff010203040506
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(payloadLen10Pkt),
+            DROPPED_IGMP_INVALID
+        )
+
+        // Using scapy to generate invalid length IGMPv1 general query packet:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:01')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.1', len=20, proto=2)
+        //   payload = Raw(b'\x11\x00\xee\xff\x01\x02')
+        //   pkt = ether/ip/payload
+        val payloadLen7Pkt = """
+            01005e00000100112233445508004500001400010000400290e40a000002e00000011100eeff010203
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(payloadLen7Pkt),
+            DROPPED_IGMP_INVALID
+        )
+
+        // Using scapy to generate invalid length IGMP general query which the destination IP is
+        // not 224.0.0.1:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:05')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.5')
+        //   igmp = IGMP(type=0x11, mrcode=0)
+        //   pkt = ether/ip/igmp
+        val pktWithWrongDst = """
+            01005e00000300112233445508004500001c000100000102cfda0a000002e00000031100eeff00000000
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pktWithWrongDst),
+            DROPPED_IGMP_INVALID
+        )
+
+        // Using scapy to generate invalid IGMP general query with wrong type:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:01')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.1')
+        //   igmp = IGMP(type=0x51, mrcode=0)
+        //   pkt = ether/ip/igmp
+        val pktWithWrongType = """
+            01005e00000100112233445508004500001c000100000102cfdc0a000002e00000015100aeff00000000
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pktWithWrongType),
+            DROPPED_IGMP_INVALID
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV1ReportDropped() {
+        val apfFilter = getIgmpApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv1 report packet:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:7f:00:01')
+        //   ip = IP(src='10.0.0.2', dst='239.0.0.1')
+        //   igmp = IGMP(type=0x12, mrcode=0, gaddr='239.0.0.1')
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e7f000100112233445508004500001c000100000102c0dc0a000002ef0000011200fefdef000001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            DROPPED_IGMP_REPORT
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV1GeneralQueryPassed() {
+        val apfFilter = getIgmpApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv1 general query packet:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:01')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.1')
+        //   igmp = IGMP(type=0x11, mrcode=0)
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e00000100112233445508004500001c000100000102cfdc0a000002e00000011100eeff00000000
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            PASSED_IPV4
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV2ReportDropped() {
+        val apfFilter = getIgmpApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv2 report packet:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:7f:00:01')
+        //   ip = IP(src='10.0.0.2', dst='239.0.0.1')
+        //   igmp = IGMP(type=0x16, gaddr='239.0.0.1')
+        //   pkt = ether/ip/igmp
+        val v2ReportPkt = """
+            01005e7f000100112233445508004500001c000100000102c0dc0a000002ef0000011614fae9ef000001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(v2ReportPkt),
+            DROPPED_IGMP_REPORT
+        )
+
+        // Using scapy to generate IGMPv2 leave packet:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:7f:00:01')
+        //   ip = IP(src='10.0.0.2', dst='239.0.0.1')
+        //   igmp = IGMP(type=0x17, gaddr='239.0.0.1')
+        //   pkt = ether/ip/igmp
+        val v2LeaveReportPkt = """
+            01005e7f000100112233445508004500001c000100000102c0dc0a000002ef0000011714f9e9ef000001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(v2LeaveReportPkt),
+            DROPPED_IGMP_REPORT
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV2GeneralQueryReplied() {
+        val apfFilter = getIgmpApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv2 general query packet without router alert option:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:01')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.1')
+        //   igmp = IGMP(type=0x11)
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e00000100112233445508004500001c000100000102cfdc0a000002e00000011114eeeb00000000
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            DROPPED_IGMP_V2_GENERAL_QUERY_REPLIED
+        )
+
+        val igmpv2ReportPkts = setOf(
+            // ###[ Ethernet ]###
+            //   dst       = 01:00:5e:00:00:01
+            //   src       = 02:03:04:05:06:07
+            //   type      = IPv4
+            // ###[ IP ]###
+            //      version   = 4
+            //      ihl       = 6
+            //      tos       = 0xc0
+            //      len       = 32
+            //      id        = 0
+            //      flags     = DF
+            //      frag      = 0
+            //      ttl       = 1
+            //      proto     = igmp
+            //      chksum    = 0xeb15
+            //      src       = 10.0.0.1
+            //      dst       = 239.0.0.1
+            //      \options   \
+            //       |###[ IP Option Router Alert ]###
+            //       |  copy_flag = 1
+            //       |  optclass  = control
+            //       |  option    = router_alert
+            //       |  length    = 4
+            //       |  alert     = router_shall_examine_packet
+            // ###[ IGMP ]###
+            //         type      = Version 2 - Membership Report
+            //         mrcode    = 0
+            //         chksum    = 0xfafd
+            //         gaddr     = 239.0.0.1
+            """
+            01005e000001020304050607080046c00020000040000102eb150a000001ef000001940400001600fafd
+            ef000001
+            """.replace("\\s+".toRegex(), "").trim().uppercase(),
+
+            // ###[ Ethernet ]###
+            //   dst       = 01:00:5e:00:00:02
+            //   src       = 02:03:04:05:06:07
+            //   type      = IPv4
+            // ###[ IP ]###
+            //      version   = 4
+            //      ihl       = 6
+            //      tos       = 0xc0
+            //      len       = 32
+            //      id        = 0
+            //      flags     = DF
+            //      frag      = 0
+            //      ttl       = 1
+            //      proto     = igmp
+            //      chksum    = 0xeb14
+            //      src       = 10.0.0.1
+            //      dst       = 239.0.0.2
+            //      \options   \
+            //       |###[ IP Option Router Alert ]###
+            //       |  copy_flag = 1
+            //       |  optclass  = control
+            //       |  option    = router_alert
+            //       |  length    = 4
+            //       |  alert     = router_shall_examine_packet
+            // ###[ IGMP ]###
+            //         type      = Version 2 - Membership Report
+            //         mrcode    = 0
+            //         chksum    = 0xfafc
+            //         gaddr     = 239.0.0.2
+            """
+            01005e000002020304050607080046c00020000040000102eb140a000001ef000002940400001600fafc
+            ef000002
+            """.replace("\\s+".toRegex(), "").trim().uppercase(),
+            // ###[ Ethernet ]###
+            //   dst       = 01:00:5e:00:00:03
+            //   src       = 02:03:04:05:06:07
+            //   type      = IPv4
+            // ###[ IP ]###
+            //      version   = 4
+            //      ihl       = 6
+            //      tos       = 0xc0
+            //      len       = 32
+            //      id        = 0
+            //      flags     = DF
+            //      frag      = 0
+            //      ttl       = 1
+            //      proto     = igmp
+            //      chksum    = 0xeb13
+            //      src       = 10.0.0.1
+            //      dst       = 239.0.0.3
+            //      \options   \
+            //       |###[ IP Option Router Alert ]###
+            //       |  copy_flag = 1
+            //       |  optclass  = control
+            //       |  option    = router_alert
+            //       |  length    = 4
+            //       |  alert     = router_shall_examine_packet
+            // ###[ IGMP ]###
+            //         type      = Version 2 - Membership Report
+            //         mrcode    = 0
+            //         chksum    = 0xfafb
+            //         gaddr     = 239.0.0.3
+            """
+            01005e000003020304050607080046c00020000040000102eb130a000001ef000003940400001600fafb
+            ef000003
+            """.replace("\\s+".toRegex(), "").trim().uppercase()
+        )
+
+        val transmitPackets = apfTestHelpers.getAllTransmittedPackets()
+            .map { HexDump.toHexString(it).uppercase() }.toSet()
+        assertEquals(igmpv2ReportPkts, transmitPackets)
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV2GeneralQueryWithRouterAlertOptionReplied() {
+        val apfFilter = getIgmpApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv2 general query packet with router alert option:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:01')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.1', options=[IPOption_Router_Alert()])
+        //   igmp = IGMP(type=0x11)
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e0000010011223344550800460000200001000001023ad40a000002e0000001940400001114eeeb
+            00000000
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            DROPPED_IGMP_V2_GENERAL_QUERY_REPLIED
+        )
+
+        val igmpv2ReportPkts = setOf(
+            // ###[ Ethernet ]###
+            //   dst       = 01:00:5e:00:00:01
+            //   src       = 02:03:04:05:06:07
+            //   type      = IPv4
+            // ###[ IP ]###
+            //      version   = 4
+            //      ihl       = 6
+            //      tos       = 0xc0
+            //      len       = 32
+            //      id        = 0
+            //      flags     = DF
+            //      frag      = 0
+            //      ttl       = 1
+            //      proto     = igmp
+            //      chksum    = 0xeb15
+            //      src       = 10.0.0.1
+            //      dst       = 239.0.0.1
+            //      \options   \
+            //       |###[ IP Option Router Alert ]###
+            //       |  copy_flag = 1
+            //       |  optclass  = control
+            //       |  option    = router_alert
+            //       |  length    = 4
+            //       |  alert     = router_shall_examine_packet
+            // ###[ IGMP ]###
+            //         type      = Version 2 - Membership Report
+            //         mrcode    = 0
+            //         chksum    = 0xfafd
+            //         gaddr     = 239.0.0.1
+            """
+            01005e000001020304050607080046c00020000040000102eb150a000001ef000001940400001600fafd
+            ef000001
+            """.replace("\\s+".toRegex(), "").trim().uppercase(),
+
+            // ###[ Ethernet ]###
+            //   dst       = 01:00:5e:00:00:02
+            //   src       = 02:03:04:05:06:07
+            //   type      = IPv4
+            // ###[ IP ]###
+            //      version   = 4
+            //      ihl       = 6
+            //      tos       = 0xc0
+            //      len       = 32
+            //      id        = 0
+            //      flags     = DF
+            //      frag      = 0
+            //      ttl       = 1
+            //      proto     = igmp
+            //      chksum    = 0xeb14
+            //      src       = 10.0.0.1
+            //      dst       = 239.0.0.2
+            //      \options   \
+            //       |###[ IP Option Router Alert ]###
+            //       |  copy_flag = 1
+            //       |  optclass  = control
+            //       |  option    = router_alert
+            //       |  length    = 4
+            //       |  alert     = router_shall_examine_packet
+            // ###[ IGMP ]###
+            //         type      = Version 2 - Membership Report
+            //         mrcode    = 0
+            //         chksum    = 0xfafc
+            //         gaddr     = 239.0.0.2
+            """
+            01005e000002020304050607080046c00020000040000102eb140a000001ef000002940400001600fafc
+            ef000002
+            """.replace("\\s+".toRegex(), "").trim().uppercase(),
+
+            // ###[ Ethernet ]###
+            //   dst       = 01:00:5e:00:00:03
+            //   src       = 02:03:04:05:06:07
+            //   type      = IPv4
+            // ###[ IP ]###
+            //      version   = 4
+            //      ihl       = 6
+            //      tos       = 0xc0
+            //      len       = 32
+            //      id        = 0
+            //      flags     = DF
+            //      frag      = 0
+            //      ttl       = 1
+            //      proto     = igmp
+            //      chksum    = 0xeb13
+            //      src       = 10.0.0.1
+            //      dst       = 239.0.0.3
+            //      \options   \
+            //       |###[ IP Option Router Alert ]###
+            //       |  copy_flag = 1
+            //       |  optclass  = control
+            //       |  option    = router_alert
+            //       |  length    = 4
+            //       |  alert     = router_shall_examine_packet
+            // ###[ IGMP ]###
+            //         type      = Version 2 - Membership Report
+            //         mrcode    = 0
+            //         chksum    = 0xfafb
+            //         gaddr     = 239.0.0.3
+            """
+            01005e000003020304050607080046c00020000040000102eb130a000001ef000003940400001600fafb
+            ef000003
+            """.replace("\\s+".toRegex(), "").trim().uppercase()
+        )
+
+        val transmitPackets = apfTestHelpers.getAllTransmittedPackets()
+            .map { HexDump.toHexString(it).uppercase() }.toSet()
+        assertEquals(igmpv2ReportPkts, transmitPackets)
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV2GroupSpecificQueryPassed() {
+        val apfFilter = getIgmpApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv2 group specific query packet without router alert option:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:7f:00:01')
+        //   ip = IP(src='10.0.0.2', dst='239.0.0.1')
+        //   igmp = IGMP(type=0x11, gaddr='239.0.0.1')
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e7f000100112233445508004500001c000100000102c0dc0a000002ef0000011114ffe9ef000001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            PASSED_IPV4
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV3ReportDropped() {
+        val apfFilter = getIgmpApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv3 report packet without router alert option:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:16')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.22')
+        //   igmp = IGMPv3(type=0x22)/IGMPv3mr(records=[IGMPv3gr(rtype=2, maddr='239.0.0.1')])
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e000001001122334455080045c00024000100000102cf140a000002e00000012200ecfc000000
+            0102000000ef000001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            DROPPED_IGMP_REPORT
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV3GeneralQueryReplied() {
+        val apfFilter = getIgmpApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv3 general query packet without router alert option:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:01')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.1')
+        //   igmp = IGMPv3(type=0x11)/IGMPv3mq()
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e000001001122334455080045c00020000100000102cf180a000002e00000011114eeeb00000000
+            00000000
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            DROPPED_IGMP_V3_GENERAL_QUERY_REPLIED
+        )
+
+        val transmittedIgmpv3Reports = apfTestHelpers.consumeTransmittedPackets(1)
+
+        // ###[ Ethernet ]###
+        //   dst       = 01:00:5e:00:00:16
+        //   src       = 02:03:04:05:06:07
+        //   type      = IPv4
+        // ###[ IP ]###
+        //      version   = 4
+        //      ihl       = 6
+        //      tos       = 0xc0
+        //      len       = 56
+        //      id        = 0
+        //      flags     = DF
+        //      frag      = 0
+        //      ttl       = 1
+        //      proto     = igmp
+        //      chksum    = 0xf9e8
+        //      src       = 10.0.0.1
+        //      dst       = 224.0.0.22
+        //      \options   \
+        //       |###[ IP Option Router Alert ]###
+        //       |  copy_flag = 1
+        //       |  optclass  = control
+        //       |  option    = router_alert
+        //       |  length    = 4
+        //       |  alert     = router_shall_examine_packet
+        // ###[ IGMPv3 ]###
+        //         type      = Version 3 Membership Report
+        //         mrcode    = 0
+        //         chksum    = 0xaf4
+        // ###[ IGMPv3mr ]###
+        //            res2      = 0x0
+        //            numgrp    = 3
+        //            \records   \
+        //             |###[ IGMPv3gr ]###
+        //             |  rtype     = Mode Is Exclude
+        //             |  auxdlen   = 0
+        //             |  numsrc    = 0
+        //             |  maddr     = 239.0.0.1
+        //             |  srcaddrs  = []
+        //             |###[ IGMPv3gr ]###
+        //             |  rtype     = Mode Is Exclude
+        //             |  auxdlen   = 0
+        //             |  numsrc    = 0
+        //             |  maddr     = 239.0.0.2
+        //             |  srcaddrs  = []
+        //             |###[ IGMPv3gr ]###
+        //             |  rtype     = Mode Is Exclude
+        //             |  auxdlen   = 0
+        //             |  numsrc    = 0
+        //             |  maddr     = 239.0.0.3
+        //             |  srcaddrs  = []
+        val igmpv3ReportPkt = """
+            01005e000016020304050607080046c00038000040000102f9e80a000001e00000169404000022000af40
+            000000302000000ef00000102000000ef00000202000000ef000003
+        """.replace("\\s+".toRegex(), "").trim()
+
+        assertContentEquals(
+            HexDump.hexStringToByteArray(igmpv3ReportPkt),
+            transmittedIgmpv3Reports[0]
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV3GeneralQueryWithRouterAlertOptionReplied() {
+        val apfFilter = getIgmpApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv3 general query packet with router alert option:
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:00:00:01')
+        //   ip = IP(src='10.0.0.2', dst='224.0.0.1', options=[IPOption_Router_Alert()])
+        //   igmp = IGMPv3(type=0x11)/IGMPv3mq()
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e000001001122334455080046c000240001000001023a100a000002e0000001940400001114eeeb0
+            000000000000000
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            DROPPED_IGMP_V3_GENERAL_QUERY_REPLIED
+        )
+
+        val transmittedIgmpv3Reports = apfTestHelpers.consumeTransmittedPackets(1)
+
+        // ###[ Ethernet ]###
+        //   dst       = 01:00:5e:00:00:16
+        //   src       = 02:03:04:05:06:07
+        //   type      = IPv4
+        // ###[ IP ]###
+        //      version   = 4
+        //      ihl       = 6
+        //      tos       = 0xc0
+        //      len       = 56
+        //      id        = 0
+        //      flags     = DF
+        //      frag      = 0
+        //      ttl       = 1
+        //      proto     = igmp
+        //      chksum    = 0xf9e8
+        //      src       = 10.0.0.1
+        //      dst       = 224.0.0.22
+        //      \options   \
+        //       |###[ IP Option Router Alert ]###
+        //       |  copy_flag = 1
+        //       |  optclass  = control
+        //       |  option    = router_alert
+        //       |  length    = 4
+        //       |  alert     = router_shall_examine_packet
+        // ###[ IGMPv3 ]###
+        //         type      = Version 3 Membership Report
+        //         mrcode    = 0
+        //         chksum    = 0xaf4
+        // ###[ IGMPv3mr ]###
+        //            res2      = 0x0
+        //            numgrp    = 3
+        //            \records   \
+        //             |###[ IGMPv3gr ]###
+        //             |  rtype     = Mode Is Exclude
+        //             |  auxdlen   = 0
+        //             |  numsrc    = 0
+        //             |  maddr     = 239.0.0.1
+        //             |  srcaddrs  = []
+        //             |###[ IGMPv3gr ]###
+        //             |  rtype     = Mode Is Exclude
+        //             |  auxdlen   = 0
+        //             |  numsrc    = 0
+        //             |  maddr     = 239.0.0.2
+        //             |  srcaddrs  = []
+        //             |###[ IGMPv3gr ]###
+        //             |  rtype     = Mode Is Exclude
+        //             |  auxdlen   = 0
+        //             |  numsrc    = 0
+        //             |  maddr     = 239.0.0.3
+        //             |  srcaddrs  = []
+        val igmpv3ReportPkt = """
+            01005e000016020304050607080046c00038000040000102f9e80a000001e00000169404000022000af40
+            000000302000000ef00000102000000ef00000202000000ef000003
+        """.replace("\\s+".toRegex(), "").trim()
+
+        assertContentEquals(
+            HexDump.hexStringToByteArray(igmpv3ReportPkt),
+            transmittedIgmpv3Reports[0]
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV3GroupSpecificQueryPassed() {
+        val apfFilter = getIgmpApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv3 group specific query packet
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:7f:00:01')
+        //   ip = IP(src='10.0.0.2', dst='239.0.0.1')
+        //   igmp = IGMPv3(type=0x11)/IGMPv3mq(gaddr='239.0.0.1')
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e7f0001001122334455080045c00020000100000102c0180a000002ef0000011114ffe9ef000001
+            00000000
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            PASSED_IPV4
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIgmpV3GroupAndSourceSpecificQueryPassed() {
+        val apfFilter = getIgmpApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate IGMPv3 group and source specific query packet
+        //   ether = Ether(src='00:11:22:33:44:55', dst='01:00:5e:7f:00:01')
+        //   ip = IP(src='10.0.0.2', dst='239.0.0.1')
+        //   igmp = IGMPv3(type=0x11)/IGMPv3mq(gaddr='239.0.0.1', numsrc=1, srcaddrs=['10.0.0.1'])
+        //   pkt = ether/ip/igmp
+        val pkt = """
+            01005e7f0001001122334455080045c00024000100000102c0140a000002ef0000011114f5e7ef0000010
+            00000010a000001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            PASSED_IPV4
         )
     }
 
@@ -571,12 +1341,12 @@ class ApfFilterTest {
         val apfConfig = getDefaultConfig()
         apfConfig.multicastFilter = true
         val apfFilter = getApfFilter(apfConfig)
-        consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
         val lp = LinkProperties()
         lp.addLinkAddress(linkAddress)
         apfFilter.setLinkProperties(lp)
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
 
         // Using scapy to generate DHCP4 offer packet:
         //   ether = Ether(src='00:11:22:33:44:55', dst='ff:ff:ff:ff:ff:ff')
@@ -606,7 +1376,7 @@ class ApfFilterTest {
             0000000000000000000000000000000000000000000000000000638253633501023604c0
             a801010104ffffff000304c0a80101330400015180060408080808ff
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(dhcp4Pkt),
@@ -620,7 +1390,7 @@ class ApfFilterTest {
         val nonDhcpMcastPkt = """
             ffffffffffff001122334455080045000014000100004015d929c0a80101e0000001
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nonDhcpMcastPkt),
@@ -634,7 +1404,7 @@ class ApfFilterTest {
         val nonDhcpBcastPkt = """
             ffffffffffff001122334455080045000014000100004015b92bc0a80101ffffffff
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nonDhcpBcastPkt),
@@ -648,7 +1418,7 @@ class ApfFilterTest {
         val nonDhcpNetBcastPkt = """
             ffffffffffff001122334455080045000014000100004015ae2cc0a801010a0000ff
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nonDhcpNetBcastPkt),
@@ -662,7 +1432,7 @@ class ApfFilterTest {
         val nonDhcpUcastPkt = """
             020304050607001122334455080045000014000100004015f780c0a80101c0a80102
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nonDhcpUcastPkt),
@@ -676,7 +1446,7 @@ class ApfFilterTest {
         val nonDhcpUcastL2BcastPkt = """
             ffffffffffff001122334455080045000014000100004015f780c0a80101c0a80102
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nonDhcpUcastL2BcastPkt),
@@ -687,9 +1457,9 @@ class ApfFilterTest {
     @Test
     fun testArpFilterDropPktsOnV6OnlyNetwork() {
         val apfFilter = getApfFilter()
-        consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         apfFilter.updateClatInterfaceState(true)
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
 
         // Drop ARP request packet when clat is enabled
         // Using scapy to generate ARP request packet:
@@ -699,7 +1469,7 @@ class ApfFilterTest {
         val arpPkt = """
             010203040506000102030405080600010800060400015c857e3c74e1c0a8012200000000000000000000
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(arpPkt),
@@ -730,9 +1500,9 @@ class ApfFilterTest {
         apfConfig.multicastFilter = true
         apfConfig.ieee802_3Filter = true
         val apfFilter = getApfFilter(apfConfig)
-        consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         apfFilter.addTcpKeepalivePacketFilter(1, parcel)
-        var program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        var program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
 
         // Drop IPv4 keepalive ack
         // Using scapy to generate IPv4 TCP keepalive ack packet with seq + 1:
@@ -744,7 +1514,7 @@ class ApfFilterTest {
             01020304050600010203040508004500002800010000400666c50a0000060a000005d4313039499602d2
             7e916116501020004b4f0000
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(keepaliveAckPkt),
@@ -761,7 +1531,7 @@ class ApfFilterTest {
             01020304050600010203040508004500002800010000400666c50a0000060a000005d431303949960336
             7e916115501020004aec0000
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(nonKeepaliveAckPkt1),
@@ -779,7 +1549,7 @@ class ApfFilterTest {
             01020304050600010203040508004500003200010000400666bb0a0000060a000005d4313039499602d27
             e91611650102000372c000000010203040506070809
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(nonKeepaliveAckPkt2),
@@ -796,7 +1566,7 @@ class ApfFilterTest {
             01020304050600010203040508004500002800010000400666c40a0000070a0000055ba0ff987e91610c4
             2f697155010200066e60000
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(otherSrcKeepaliveAck),
@@ -805,15 +1575,15 @@ class ApfFilterTest {
 
         // test IPv4 packets when TCP keepalive filter is removed
         apfFilter.removeKeepalivePacketFilter(1)
-        program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
-        verifyProgramRun(
+        program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(keepaliveAckPkt),
             PASSED_IPV4_UNICAST
         )
 
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(otherSrcKeepaliveAck),
@@ -840,9 +1610,9 @@ class ApfFilterTest {
         apfConfig.multicastFilter = true
         apfConfig.ieee802_3Filter = true
         val apfFilter = getApfFilter(apfConfig)
-        consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         apfFilter.addNattKeepalivePacketFilter(1, parcel)
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
 
         // Drop IPv4 keepalive response packet
         // Using scapy to generate IPv4 NAT-T keepalive ack packet with payload 0xff:
@@ -854,7 +1624,7 @@ class ApfFilterTest {
         val validNattPkt = """
             01020304050600010203040508004500001d00010000401166c50a0000060a000005119404000009d73cff
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(validNattPkt),
@@ -871,7 +1641,7 @@ class ApfFilterTest {
         val invalidNattPkt = """
             01020304050600010203040508004500001d00010000401166c50a0000060a000005119404000009d83cfe
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(invalidNattPkt),
@@ -889,7 +1659,7 @@ class ApfFilterTest {
             01020304050600010203040508004500002600010000401166bc0a0000060a000005119404000012c2120
             0010203040506070809
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(nonNattPkt),
@@ -907,7 +1677,7 @@ class ApfFilterTest {
             01020304050600010203040508004500002600010000401166bb0a0000070a000005119404000012c2110
             0010203040506070809
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(otherSrcNonNattPkt),
@@ -918,7 +1688,7 @@ class ApfFilterTest {
     @Test
     fun testIPv4TcpPort7Filter() {
         val apfFilter = getApfFilter()
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
 
         // Drop IPv4 TCP port 7 packet
         // Using scapy to generate IPv4 TCP port 7 packet:
@@ -930,7 +1700,7 @@ class ApfFilterTest {
             01020304050600010203040508004500002800010000400666c50a0000060a00000500140007000000000
             0000000500220007bbd0000
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(tcpPort7Pkt),
@@ -947,7 +1717,7 @@ class ApfFilterTest {
             01020304050600010203040508004500002800012000400646c50a0000060a00000500140050000000000
             0000000500220007b740000
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(initialFragmentTcpPkt),
@@ -964,7 +1734,7 @@ class ApfFilterTest {
             01020304050600010203040508004500002800012064400646610a0000060a00000500140050000000000
             0000000500220007b740000
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(fragmentTcpPkt),
@@ -977,14 +1747,14 @@ class ApfFilterTest {
         val apfConfig = getDefaultConfig()
         apfConfig.multicastFilter = true
         val apfFilter = getApfFilter(apfConfig)
-        consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         val lp = LinkProperties()
         for (addr in hostIpv6Addresses) {
             lp.addLinkAddress(LinkAddress(InetAddress.getByAddress(addr), 64))
         }
         apfFilter.setLinkProperties(lp)
         apfFilter.setDozeMode(true)
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         // Using scapy to generate non ICMPv6 sent to ff00::/8 (multicast prefix) packet:
         // eth = Ether(src="00:01:02:03:04:05", dst="01:02:03:04:05:06")
         // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="ff00::1", nh=59)
@@ -993,7 +1763,7 @@ class ApfFilterTest {
             ffffffffffff00112233445586dd6000000000003b4020010000000000000200001a11223344ff00000
             0000000000000000000000000
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(nonIcmpv6McastPkt),
@@ -1009,7 +1779,7 @@ class ApfFilterTest {
             02030405060700010203040586dd6000000000083aff20010000000000000200001a11223344ff00000
             000000000000000000000000180001a3a00000000
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(icmpv6EchoPkt),
@@ -1020,13 +1790,13 @@ class ApfFilterTest {
     @Test
     fun testIPv6PacketFilter() {
         val apfFilter = getApfFilter()
-        consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         val lp = LinkProperties()
         for (addr in hostIpv6Addresses) {
             lp.addLinkAddress(LinkAddress(InetAddress.getByAddress(addr), 64))
         }
         apfFilter.setLinkProperties(lp)
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
         // Using scapy to generate non ICMPv6 packet:
         // eth = Ether(src="00:01:02:03:04:05", dst="01:02:03:04:05:06")
         // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="2001::200:1a:3344:1122", nh=59)
@@ -1035,7 +1805,7 @@ class ApfFilterTest {
             ffffffffffff00112233445586dd6000000000003b4020010000000000000200001a112233442001000
             0000000000200001a33441122
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(nonIcmpv6Pkt),
@@ -1051,7 +1821,7 @@ class ApfFilterTest {
             01020304050600010203040586dd6000000000183aff20010000000000000200001a11223344ff02000
             000000000000000000000000188007227a000000000000000000000000000000000000000
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(icmpv6McastNaPkt),
@@ -1066,7 +1836,7 @@ class ApfFilterTest {
             01020304050600010203040586dd600000000000004020010000000000000200001a112233442001000
             0000000000200001a33441122
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(ipv6WithHopByHopOptionPkt),
@@ -1077,7 +1847,7 @@ class ApfFilterTest {
     @Test
     fun testArpFilterDropPktsNoIPv4() {
         val apfFilter = getApfFilter()
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
 
         // Drop ARP request packet with invalid hw type
         // Using scapy to generate ARP request packet with invalid hw type :
@@ -1087,7 +1857,7 @@ class ApfFilterTest {
         val invalidHwTypePkt = """
             01020304050600010203040508060003080000040001c0a8012200000000
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(invalidHwTypePkt),
@@ -1102,7 +1872,7 @@ class ApfFilterTest {
         val invalidProtoTypePkt = """
             010203040506000102030405080600010014060000015c857e3c74e1000000000000
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(invalidProtoTypePkt),
@@ -1119,7 +1889,7 @@ class ApfFilterTest {
             0000000000000000c0a8012200000000000000000000000000000000000000000000
             0000
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(invalidHwLenPkt),
@@ -1136,7 +1906,7 @@ class ApfFilterTest {
             00000000000000000000000000000000000000000000000000000000000000000000
             000000000000
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(invalidProtoLenPkt),
@@ -1151,7 +1921,7 @@ class ApfFilterTest {
         val invalidOpPkt = """
             010203040506000102030405080600010800060400055c857e3c74e1c0a8012200000000000000000000
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(invalidOpPkt),
@@ -1166,7 +1936,7 @@ class ApfFilterTest {
         val noHostArpReplyPkt = """
             010203040506000102030405080600010800060400025c857e3c74e10000000000000000000000000000
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(noHostArpReplyPkt),
@@ -1181,7 +1951,7 @@ class ApfFilterTest {
         val garpReplyPkt = """
             ffffffffffff000102030405080600010800060400025c857e3c74e1c0a8012200000000000000000000
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(garpReplyPkt),
@@ -1192,7 +1962,7 @@ class ApfFilterTest {
     @Test
     fun testArpFilterPassPktsNoIPv4() {
         val apfFilter = getApfFilter()
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         // Pass non-broadcast ARP reply packet
         // Using scapy to generate unicast ARP reply packet:
         // eth = Ether(src="00:01:02:03:04:05", dst="01:02:03:04:05:06")
@@ -1201,7 +1971,7 @@ class ApfFilterTest {
         val nonBcastArpReplyPkt = """
             010203040506000102030405080600010800060400025c857e3c74e10102030400000000000000000000
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(nonBcastArpReplyPkt),
@@ -1216,7 +1986,7 @@ class ApfFilterTest {
         val arpRequestPkt = """
             ffffffffffff000102030405080600010800060400015c857e3c74e1c0a8012200000000000001020304
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(arpRequestPkt),
@@ -1227,12 +1997,12 @@ class ApfFilterTest {
     @Test
     fun testArpFilterDropPktsWithIPv4() {
         val apfFilter = getApfFilter()
-        consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
         val lp = LinkProperties()
         lp.addLinkAddress(linkAddress)
         apfFilter.setLinkProperties(lp)
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
         // Drop ARP reply packet is not for the device
         // Using scapy to generate ARP reply packet not for the device:
         // eth = Ether(src="00:01:02:03:04:05", dst="FF:FF:FF:FF:FF:FF")
@@ -1241,7 +2011,7 @@ class ApfFilterTest {
         val otherHostArpReplyPkt = """
             ffffffffffff000102030405080600010800060400025c857e3c74e1c0a8012200000000000001020304
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(otherHostArpReplyPkt),
@@ -1256,7 +2026,7 @@ class ApfFilterTest {
         val otherHostArpRequestPkt = """
             ffffffffffff000102030405080600010800060400015c857e3c74e1c0a8012200000000000001020304
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(otherHostArpRequestPkt),
@@ -1267,12 +2037,12 @@ class ApfFilterTest {
     @Test
     fun testArpFilterPassPktsWithIPv4() {
         val apfFilter = getApfFilter()
-        consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
         val lp = LinkProperties()
         lp.addLinkAddress(linkAddress)
         apfFilter.setLinkProperties(lp)
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
 
         // Using scapy to generate ARP broadcast reply packet:
         // eth = Ether(src="00:01:02:03:04:05", dst="FF:FF:FF:FF:FF:FF")
@@ -1281,7 +2051,7 @@ class ApfFilterTest {
         val bcastArpReplyPkt = """
             ffffffffffff000102030405080600010800060400025c857e3c74e1c0a801220000000000000a000001
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(bcastArpReplyPkt),
@@ -1294,12 +2064,12 @@ class ApfFilterTest {
     @Test
     fun testArpTransmit() {
         val apfFilter = getApfFilter()
-        consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
         val lp = LinkProperties()
         lp.addLinkAddress(linkAddress)
         apfFilter.setLinkProperties(lp)
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
         val receivedArpPacketBuf = ArpPacket.buildArpPacket(
             arpBroadcastMacAddress,
             senderMacAddress,
@@ -1310,14 +2080,14 @@ class ApfFilterTest {
         )
         val receivedArpPacket = ByteArray(ARP_ETHER_IPV4_LEN)
         receivedArpPacketBuf.get(receivedArpPacket)
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             receivedArpPacket,
             DROPPED_ARP_REQUEST_REPLIED
         )
 
-        val transmittedPackets = consumeTransmittedPackets(1)
+        val transmittedPackets = apfTestHelpers.consumeTransmittedPackets(1)
         val expectedArpReplyBuf = ArpPacket.buildArpPacket(
             senderMacAddress,
             apfFilter.mHardwareAddress,
@@ -1337,14 +2107,14 @@ class ApfFilterTest {
     @Test
     fun testArpOffloadDisabled() {
         val apfConfig = getDefaultConfig()
-        apfConfig.shouldHandleArpOffload = false
+        apfConfig.handleArpOffload = false
         val apfFilter = getApfFilter(apfConfig)
-        consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
         val lp = LinkProperties()
         lp.addLinkAddress(linkAddress)
         apfFilter.setLinkProperties(lp)
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
         val receivedArpPacketBuf = ArpPacket.buildArpPacket(
             arpBroadcastMacAddress,
             senderMacAddress,
@@ -1355,7 +2125,7 @@ class ApfFilterTest {
         )
         val receivedArpPacket = ByteArray(ARP_ETHER_IPV4_LEN)
         receivedArpPacketBuf.get(receivedArpPacket)
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             receivedArpPacket,
@@ -1369,7 +2139,7 @@ class ApfFilterTest {
         doReturn(listOf<ByteArray>()).`when`(dependencies).getAnycast6Addresses(any())
         val apfFilter = getApfFilter()
         // validate NS packet check when there is no IPv6 address
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         // Using scapy to generate IPv6 NS packet:
         // eth = Ether(src="00:01:02:03:04:05", dst="01:02:03:04:05:06")
         // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="2001::200:1a:3344:1122", hlim=255)
@@ -1381,7 +2151,7 @@ class ApfFilterTest {
             00000020010000000000000200001A33441122
         """.replace("\\s+".toRegex(), "").trim()
         // when there is no IPv6 addresses -> pass NS packet
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nsPkt),
@@ -1393,7 +2163,7 @@ class ApfFilterTest {
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     fun testNsFilter() {
         val apfFilter = getApfFilter()
-        consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         val lp = LinkProperties()
         for (addr in hostIpv6Addresses) {
             lp.addLinkAddress(LinkAddress(InetAddress.getByAddress(addr), 64))
@@ -1411,9 +2181,9 @@ class ApfFilterTest {
         }
 
         apfFilter.setLinkProperties(lp)
-        consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
         apfFilter.updateClatInterfaceState(true)
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
 
         // validate Ethernet dst address check
         // Using scapy to generate IPv6 NS packet:
@@ -1428,7 +2198,7 @@ class ApfFilterTest {
             000020010000000000000200001A334411220201000102030405
         """.replace("\\s+".toRegex(), "").trim()
         // invalid unicast ether dst -> pass
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nonHostDstMacNsPkt),
@@ -1447,7 +2217,7 @@ class ApfFilterTest {
             0000000020010000000000000200001A334411220201000102030405
         """.replace("\\s+".toRegex(), "").trim()
         // mcast dst mac is not one of solicited mcast mac derived from one of device's ip -> pass
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nonMcastDstMacNsPkt),
@@ -1467,7 +2237,7 @@ class ApfFilterTest {
         """.replace("\\s+".toRegex(), "").trim()
         // mcast dst mac is one of solicited mcast mac derived from one of device's ip
         // -> drop and replied
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(hostMcastDstMacNsPkt),
@@ -1486,7 +2256,7 @@ class ApfFilterTest {
             00000000000200001A334411220101000102030405
         """.replace("\\s+".toRegex(), "").trim()
         // mcast dst mac is broadcast address -> drop and replied
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(broadcastNsPkt),
@@ -1507,7 +2277,7 @@ class ApfFilterTest {
             00000020010000000000000200001A334411220101000102030405
         """.replace("\\s+".toRegex(), "").trim()
         // dst ip is one of device's ip -> drop and replied
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(validHostDstIpNsPkt),
@@ -1527,7 +2297,7 @@ class ApfFilterTest {
             0101000102030405
         """.replace("\\s+".toRegex(), "").trim()
         // dst ip is device's anycast address -> drop and replied
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(validHostAnycastDstIpNsPkt),
@@ -1546,7 +2316,7 @@ class ApfFilterTest {
             E30000000020010000000000000200001A334411220101000102030405
         """.replace("\\s+".toRegex(), "").trim()
         // unicast dst ip is not one of device's ip -> pass
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nonHostUcastDstIpNsPkt),
@@ -1565,7 +2335,7 @@ class ApfFilterTest {
             1C0000000020010000000000000200001A334411220101000102030405
         """.replace("\\s+".toRegex(), "").trim()
         // mcast dst ip is not one of solicited mcast ip derived from one of device's ip -> pass
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nonHostMcastDstIpNsPkt),
@@ -1584,7 +2354,7 @@ class ApfFilterTest {
                     "000020010000000000000200001A334411220101000102030405"
         // mcast dst ip is one of solicited mcast ip derived from one of device's ip
         //   -> drop and replied
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(hostMcastDstIpNsPkt),
@@ -1605,7 +2375,7 @@ class ApfFilterTest {
             000200001A334411220101010203040506
         """.replace("\\s+".toRegex(), "").trim()
         // payload len < 24 -> drop
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(shortNsPkt),
@@ -1624,7 +2394,7 @@ class ApfFilterTest {
             00000000000200001A444455550101010203040506
         """.replace("\\s+".toRegex(), "").trim()
         // target ip is not one of device's ip -> drop
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(otherHostNsPkt),
@@ -1643,7 +2413,7 @@ class ApfFilterTest {
             00000020010000000000000200001A334411220101010203040506
         """.replace("\\s+".toRegex(), "").trim()
         // hoplimit is not 255 -> drop
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(invalidHoplimitNsPkt),
@@ -1662,7 +2432,7 @@ class ApfFilterTest {
             00000020010000000000000200001A334411220101010203040506
         """.replace("\\s+".toRegex(), "").trim()
         // icmp6 code is not 0 -> drop
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(invalidIcmpCodeNsPkt),
@@ -1681,7 +2451,7 @@ class ApfFilterTest {
             16CE0000000020010000000000000200001A123456780101010203040506
         """.replace("\\s+".toRegex(), "").trim()
         // target ip is one of tentative address -> pass
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(tentativeTargetIpNsPkt),
@@ -1700,7 +2470,7 @@ class ApfFilterTest {
             00000020010000000000000200001C225566660101010203040506
         """.replace("\\s+".toRegex(), "").trim()
         // target ip is none of {non-tentative, anycast} -> drop
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(invalidTargetIpNsPkt),
@@ -1719,7 +2489,7 @@ class ApfFilterTest {
             00001A334411220201020304050607
         """.replace("\\s+".toRegex(), "").trim()
         // DAD NS request -> pass
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(dadNsPkt),
@@ -1737,7 +2507,7 @@ class ApfFilterTest {
             000000000200001A33441122
         """.replace("\\s+".toRegex(), "").trim()
         // payload len < 32 -> pass
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(noOptionNsPkt),
@@ -1756,7 +2526,7 @@ class ApfFilterTest {
             000020010000000000000200001A334411220101010203040506
         """.replace("\\s+".toRegex(), "").trim()
         // non-DAD src IPv6 is FF::/8 -> drop
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nonDadMcastSrcIpPkt),
@@ -1775,7 +2545,7 @@ class ApfFilterTest {
             140000000020010000000000000200001A334411220101010203040506
         """.replace("\\s+".toRegex(), "").trim()
         // non-DAD src IPv6 is 00::/8 -> drop
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(nonDadLoopbackSrcIpPkt),
@@ -1796,7 +2566,7 @@ class ApfFilterTest {
             05060101010203040506
         """.replace("\\s+".toRegex(), "").trim()
         // non-DAD with multiple options, SLLA in 2nd option -> pass
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(sllaNotFirstOptionNsPkt),
@@ -1815,7 +2585,7 @@ class ApfFilterTest {
             20010000000000000200001A334411220201010203040506
         """.replace("\\s+".toRegex(), "").trim()
         // non-DAD with one option but not SLLA -> pass
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(noSllaOptionNsPkt),
@@ -1835,7 +2605,7 @@ class ApfFilterTest {
             0506
         """.replace("\\s+".toRegex(), "").trim()
         // non-DAD, SLLA is multicast MAC -> drop
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(mcastMacSllaOptionNsPkt),
@@ -1854,7 +2624,7 @@ class ApfFilterTest {
         }
 
         apfFilter.setLinkProperties(lp)
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 3)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
         val validIpv6Addresses = hostIpv6Addresses + hostAnycast6Addresses
         val expectPackets = mutableListOf<ByteArray>()
         for (addr in validIpv6Addresses) {
@@ -1867,7 +2637,7 @@ class ApfFilterTest {
                 addr
             )
 
-            verifyProgramRun(
+            apfTestHelpers.verifyProgramRun(
                 apfFilter.mApfVersionSupported,
                 program,
                 receivedUcastNsPacket,
@@ -1899,7 +2669,7 @@ class ApfFilterTest {
                 addr
             )
 
-            verifyProgramRun(
+            apfTestHelpers.verifyProgramRun(
                 apfFilter.mApfVersionSupported,
                 program,
                 receivedMcastNsPacket,
@@ -1917,7 +2687,7 @@ class ApfFilterTest {
             expectPackets.add(expectedMcastNaPacket)
         }
 
-        val transmitPackets = consumeTransmittedPackets(expectPackets.size)
+        val transmitPackets = apfTestHelpers.consumeTransmittedPackets(expectPackets.size)
         for (i in transmitPackets.indices) {
             assertContentEquals(expectPackets[i], transmitPackets[i])
         }
@@ -1935,7 +2705,7 @@ class ApfFilterTest {
             lp.addLinkAddress(LinkAddress(InetAddress.getByAddress(addr), 64))
         }
         apfFilter.setLinkProperties(lp)
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 3)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
         // Using scapy to generate IPv6 NS packet:
         // eth = Ether(src="00:01:02:03:04:05", dst="02:03:04:05:06:07")
         // ip6 = IPv6(src="2001::200:1a:1122:3344", dst="ff02::1:ff44:1122", hlim=255, tc=20)
@@ -1947,14 +2717,14 @@ class ApfFilterTest {
             0200001A11223344FF0200000000000000000001FF4411228700952D0000
             000020010000000000000200001A334411220101000102030405
         """.replace("\\s+".toRegex(), "").trim()
-        verifyProgramRun(
+        apfTestHelpers.verifyProgramRun(
             apfFilter.mApfVersionSupported,
             program,
             HexDump.hexStringToByteArray(hostMcastDstIpNsPkt),
             DROPPED_IPV6_NS_REPLIED_NON_DAD
         )
 
-        val transmitPkts = consumeTransmittedPackets(1)
+        val transmitPkts = apfTestHelpers.consumeTransmittedPackets(1)
         // Using scapy to generate IPv6 NA packet:
         // eth = Ether(src="02:03:04:05:06:07", dst="00:01:02:03:04:05")
         // ip6 = IPv6(src="2001::200:1a:3344:1122", dst="2001::200:1a:1122:3344", hlim=255, tc=20)
@@ -1975,7 +2745,7 @@ class ApfFilterTest {
     @Test
     fun testNdOffloadDisabled() {
         val apfConfig = getDefaultConfig()
-        apfConfig.shouldHandleNdOffload = false
+        apfConfig.handleNdOffload = false
         val apfFilter = getApfFilter(apfConfig)
         val lp = LinkProperties()
         for (addr in hostIpv6Addresses) {
@@ -1983,7 +2753,7 @@ class ApfFilterTest {
         }
 
         apfFilter.setLinkProperties(lp)
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 3)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
         val validIpv6Addresses = hostIpv6Addresses + hostAnycast6Addresses
         for (addr in validIpv6Addresses) {
             // unicast solicited NS request
@@ -1995,7 +2765,7 @@ class ApfFilterTest {
                 addr
             )
 
-            verifyProgramRun(
+            apfTestHelpers.verifyProgramRun(
                 apfFilter.mApfVersionSupported,
                 program,
                 receivedUcastNsPacket,
@@ -2017,7 +2787,7 @@ class ApfFilterTest {
                 addr
             )
 
-            verifyProgramRun(
+            apfTestHelpers.verifyProgramRun(
                 apfFilter.mApfVersionSupported,
                 program,
                 receivedMcastNsPacket,
@@ -2026,77 +2796,1176 @@ class ApfFilterTest {
         }
     }
 
+    private fun getApfWithIpv4PingOffloadEnabled(
+        enableMultiCastFilter: Boolean = true
+    ): Pair<ApfFilter, ByteArray> {
+        val apfConfig = getDefaultConfig()
+        apfConfig.multicastFilter = enableMultiCastFilter
+        apfConfig.handleIpv4PingOffload = true
+        val apfFilter = getApfFilter(apfConfig)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
+        val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
+        val lp = LinkProperties()
+        lp.addLinkAddress(linkAddress)
+        apfFilter.setLinkProperties(lp)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
+        return Pair(apfFilter, program)
+    }
+
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     @Test
-    fun testRegisterOffloadEngine() {
+    fun testIpv4EchoRequestReplied() {
+        doReturn(64).`when`(dependencies).ipv4DefaultTtl
+        val (apfFilter, program) = getApfWithIpv4PingOffloadEnabled()
+        // Using scapy to generate IPv4 echo request packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="02:03:04:05:06:07")
+        // ip = IP(src="10.0.0.2", dst="10.0.0.1")
+        // icmp = ICMP(id=1, seq=123)
+        // pkt = eth/ip/icmp/b"hello"
+        val ipv4EchoRequestPkt = """
+            02030405060701020304050608004500002100010000400166d90a0000020a0
+            000010800b3b10001007b68656c6c6f
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(ipv4EchoRequestPkt),
+            DROPPED_IPV4_PING_REQUEST_REPLIED
+        )
+
+        val transmitPkt = apfTestHelpers.consumeTransmittedPackets(1)[0]
+
+        // ###[ Ethernet ]###
+        //   dst       = 01:02:03:04:05:06
+        //   src       = 02:03:04:05:06:07
+        //   type      = IPv4
+        // ###[ IP ]###
+        //      version   = 4
+        //      ihl       = 5
+        //      tos       = 0x0
+        //      len       = 33
+        //      id        = 1
+        //      flags     =
+        //      frag      = 0
+        //      ttl       = 64
+        //      proto     = icmp
+        //      chksum    = 0x66d9
+        //      src       = 10.0.0.1
+        //      dst       = 10.0.0.2
+        //      \options   \
+        // ###[ ICMP ]###
+        //         type      = echo-reply
+        //         code      = 0
+        //         chksum    = 0xbbb1
+        //         id        = 0x1
+        //         seq       = 0x7b
+        //         unused    = b''
+        // ###[ Raw ]###
+        //            load      = b'hello'
+        val expectedReply = """
+            01020304050602030405060708004500002100010000400166D90A0000010A0
+            000020000BBB10001007B68656C6C6F
+        """.replace("\\s+".toRegex(), "").trim()
+        assertContentEquals(
+            HexDump.hexStringToByteArray(expectedReply),
+            transmitPkt
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testCorruptedIpv4IcmpPacketDropped() {
+        val (apfFilter, program) = getApfWithIpv4PingOffloadEnabled()
+        // Using scapy to generate corrupted icmp packet
+        // eth = Ether(src="01:02:03:04:05:06", dst="02:03:04:05:06:07")
+        // ip = IP(proto=1, src="10.0.0.2", dst="10.0.0.1")
+        // pkt = eth/ip/b"hello"
+        val ipv4EchoRequestPkt = """
+            02030405060701020304050608004500001900010000400166e10a0000020a0
+            0000168656c6c6f
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(ipv4EchoRequestPkt),
+            DROPPED_IPV4_ICMP_INVALID
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIpv4EchoRequestWithOptionPassed() {
+        val (apfFilter, program) = getApfWithIpv4PingOffloadEnabled()
+        // Using scapy to generate IPv4 echo request packet with option:
+        // eth = Ether(src="01:02:03:04:05:06", dst="02:03:04:05:06:07")
+        // ip = IP(src="10.0.0.2", dst="10.0.0.1", options=IPOption(b'\x94\x04\x00\x00'))
+        // icmp = ICMP(id=1, seq=123)
+        // pkt = eth/ip/icmp/b"hello"
+        val ipv4EchoRequestPkt = """
+            020304050607010203040506080046000025000100004001d1d00a0000020a0
+            00001940400000800b3b10001007b68656c6c6f
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(ipv4EchoRequestPkt),
+            PASSED_IPV4_UNICAST
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIpv4EchoRequestToOtherHostPassed() {
+        val (apfFilter, program) = getApfWithIpv4PingOffloadEnabled()
+        // Using scapy to generate IPv4 echo request packet to other host:
+        // eth = Ether(src="01:02:03:04:05:06", dst="02:03:04:05:06:07")
+        // ip = IP(src="10.0.0.2", dst="10.0.0.111")
+        // icmp = ICMP(id=1, seq=123)
+        // pkt = eth/ip/icmp/b"hello"
+        val ipv4EchoRequestPkt = """
+            020304050607010203040506080045000021000100004001666b0a0000020a0
+            0006f0800b3b10001007b68656c6c6f
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(ipv4EchoRequestPkt),
+            PASSED_IPV4_UNICAST
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testBroadcastIpv4EchoRequestPassed() {
+        val (apfFilter, program) = getApfWithIpv4PingOffloadEnabled(enableMultiCastFilter = false)
+        // Using scapy to generate broadcast IPv4 echo request packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="ff:ff:ff:ff:ff:ff")
+        // ip = IP(src="10.0.0.2", dst="10.0.0.255")
+        // icmp = ICMP(id=1, seq=123)
+        // pkt = eth/ip/icmp/b"hello"
+        val ipv4EchoRequestPkt = """
+            ffffffffffff01020304050608004500002100010000400165db0a0000020a0
+            000ff0800b3b10001007b68656c6c6f
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(ipv4EchoRequestPkt),
+            PASSED_IPV4
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIpv4EchoReplyPassed() {
+        val (apfFilter, program) = getApfWithIpv4PingOffloadEnabled()
+        // Using scapy to generate IPv4 echo reply packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="02:03:04:05:06:07")
+        // ip = IP(src="10.0.0.2", dst="10.0.0.1")
+        // icmp = ICMP(type=0, id=1, seq=123)
+        // pkt = eth/ip/icmp/b"hello"
+        val ipv4EchoReplyPkt = """
+            02030405060701020304050608004500002100010000400166d90a0000020a0
+            000010000bbb10001007b68656c6c6f
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(ipv4EchoReplyPkt),
+            PASSED_IPV4_UNICAST
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testOffloadServiceInfoUpdateTriggersProgramInstall() {
         val apfConfig = getDefaultConfig()
-        apfConfig.shouldHandleMdnsOffload = true
+        apfConfig.handleMdnsOffload = true
         val apfFilter = getApfFilter(apfConfig)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         val captor = ArgumentCaptor.forClass(OffloadEngine::class.java)
         verify(nsdManager).registerOffloadEngine(
-                eq(ifParams.name),
-                anyLong(),
-                anyLong(),
-                any(),
-                captor.capture()
+            eq(ifParams.name),
+            anyLong(),
+            anyLong(),
+            any(),
+            captor.capture()
         )
         val offloadEngine = captor.value
-        val info1 = OffloadServiceInfo(
-                OffloadServiceInfo.Key("TestServiceName", "_advertisertest._tcp"),
-                listOf(),
-                "Android_test.local",
-                byteArrayOf(0x01, 0x02, 0x03, 0x04),
-                0,
-                OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
+        val info = OffloadServiceInfo(
+            OffloadServiceInfo.Key("gambit", "_googlecast._tcp"),
+            listOf(),
+            "Android_f47ac10b58cc4b88bc3f5e7a81e59872.local",
+            ByteArray(5) { 0x01 },
+            0,
+            OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
         )
-        val info2 = OffloadServiceInfo(
-                OffloadServiceInfo.Key("TestServiceName2", "_advertisertest._tcp"),
-                listOf(),
-                "Android_test.local",
-                byteArrayOf(0x01, 0x02, 0x03, 0x04),
-                0,
-                OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
-        )
-        val updatedInfo1 = OffloadServiceInfo(
-                OffloadServiceInfo.Key("TestServiceName", "_advertisertest._tcp"),
-                listOf(),
-                "Android_test.local",
-                byteArrayOf(),
-                0,
-                OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
-        )
-        handler.post { offloadEngine.onOffloadServiceUpdated(info1) }
-        handlerThread.waitForIdle(TIMEOUT_MS)
-        assertContentEquals(listOf(info1), apfFilter.mOffloadServiceInfos)
-        handler.post { offloadEngine.onOffloadServiceUpdated(info2) }
-        handlerThread.waitForIdle(TIMEOUT_MS)
-        assertContentEquals(listOf(info1, info2), apfFilter.mOffloadServiceInfos)
-        handler.post { offloadEngine.onOffloadServiceUpdated(updatedInfo1) }
-        handlerThread.waitForIdle(TIMEOUT_MS)
-        assertContentEquals(listOf(info2, updatedInfo1), apfFilter.mOffloadServiceInfos)
-        handler.post { offloadEngine.onOffloadServiceRemoved(updatedInfo1) }
-        handlerThread.waitForIdle(TIMEOUT_MS)
-        assertContentEquals(listOf(info2), apfFilter.mOffloadServiceInfos)
+        visibleOnHandlerThread(handler) { offloadEngine.onOffloadServiceUpdated(info) }
 
-        handler.post { apfFilter.shutdown() }
-        handlerThread.waitForIdle(TIMEOUT_MS)
-        verify(nsdManager).unregisterOffloadEngine(any())
+        verify(apfController).installPacketFilter(any(), any())
+
+        visibleOnHandlerThread(handler) { apfFilter.shutdown() }
+        verify(nsdManager).unregisterOffloadEngine(eq(offloadEngine))
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testCorruptedOffloadServiceInfoUpdateNotTriggerNewProgramInstall() {
+        val apfConfig = getDefaultConfig()
+        apfConfig.handleMdnsOffload = true
+        val apfFilter = getApfFilter(apfConfig)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
+        val captor = ArgumentCaptor.forClass(OffloadEngine::class.java)
+        verify(nsdManager).registerOffloadEngine(
+            eq(ifParams.name),
+            anyLong(),
+            anyLong(),
+            any(),
+            captor.capture()
+        )
+        val offloadEngine = captor.value
+        val castOffloadInfo = OffloadServiceInfo(
+            OffloadServiceInfo.Key("gambit", "_googlecast._tcp"),
+            listOf(),
+            "Android_f47ac10b58cc4b88bc3f5e7a81e59872.local",
+            HexDump.hexStringToByteArray(castOffloadPayload),
+            0,
+            OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
+        )
+        visibleOnHandlerThread(handler) {
+            offloadEngine.onOffloadServiceUpdated(castOffloadInfo)
+        }
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
+        val corruptedOffloadInfo = OffloadServiceInfo(
+            OffloadServiceInfo.Key("gambit", "_${"a".repeat(63)}._tcp"),
+            listOf(),
+            "Android_f47ac10b58cc4b88bc3f5e7a81e59872.local",
+            byteArrayOf(0x01, 0x02, 0x03, 0x04),
+            0,
+            OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
+        )
+        visibleOnHandlerThread(handler) {
+            offloadEngine.onOffloadServiceUpdated(corruptedOffloadInfo)
+        }
+        verify(apfController, never()).installPacketFilter(any(), any())
+    }
+
+    private fun getApfWithMdnsOffloadEnabled(
+        mcFilter: Boolean = true,
+        v6Only: Boolean = false,
+        removeTvRemoteRecord: Boolean = false
+    ): Pair<ApfFilter, ByteArray> {
+        val apfConfig = getDefaultConfig()
+        apfConfig.handleMdnsOffload = true
+        if (mcFilter) {
+            apfConfig.multicastFilter = true
+        }
+        val apfFilter = getApfFilter(apfConfig)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
+        val captor = ArgumentCaptor.forClass(OffloadEngine::class.java)
+        verify(nsdManager).registerOffloadEngine(
+            eq(ifParams.name),
+            anyLong(),
+            anyLong(),
+            any(),
+            captor.capture()
+        )
+        val offloadEngine = captor.value
+        val lp = LinkProperties()
+        if (v6Only) {
+            apfFilter.updateClatInterfaceState(true)
+            apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
+        } else {
+            val ipv4LinkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
+            lp.addLinkAddress(ipv4LinkAddress)
+        }
+        val ipv6LinkAddress = LinkAddress(hostLinkLocalIpv6Address, 64)
+        lp.addLinkAddress(ipv6LinkAddress)
+        apfFilter.setLinkProperties(lp)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
+        val castOffloadInfo = OffloadServiceInfo(
+            OffloadServiceInfo.Key("gambit-3cb56c6253638b3641e3d289013cc0ae", "_googlecast._tcp"),
+            listOf(),
+            "Android_f47ac10b58cc4b88bc3f5e7a81e59872.local",
+            HexDump.hexStringToByteArray(castOffloadPayload),
+            0,
+            OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
+        )
+        val tvRemoteOffloadInfo = OffloadServiceInfo(
+            OffloadServiceInfo.Key("gambit", "_androidtvremote2._tcp"),
+            listOf(),
+            "Android_f47ac10b58cc4b88bc3f5e7a81e59872.local",
+            HexDump.hexStringToByteArray(tvRemoteOffloadPayload),
+            0,
+            OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
+        )
+
+        visibleOnHandlerThread(handler) {
+            offloadEngine.onOffloadServiceUpdated(castOffloadInfo)
+            offloadEngine.onOffloadServiceUpdated(tvRemoteOffloadInfo)
+            if (removeTvRemoteRecord) {
+                offloadEngine.onOffloadServiceRemoved(tvRemoteOffloadInfo)
+            }
+        }
+        val program = apfTestHelpers.consumeInstalledProgram(
+            apfController,
+            installCnt = if (removeTvRemoteRecord) 3 else 2
+        )
+        return Pair(apfFilter, program)
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIPv4MdnsQueryReplied() {
+        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false)
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
+        // ip = IP(src="10.0.0.3", dst="224.0.0.251")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_googlecast._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val castIPv4MdnsPtrQuery = """
+            01005e0000fb0102030405060800450000440001000040118faa0a000003e00
+            000fb14e914e900309fa50000010000010000000000000b5f676f6f676c6563
+            617374045f746370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(castIPv4MdnsPtrQuery),
+            DROPPED_MDNS_REPLIED
+        )
+
+        var transmitPkt = apfTestHelpers.consumeTransmittedPackets(1)[0]
+
+        // ###[ Ethernet ]###
+        //   dst       = 01:00:5e:00:00:fb
+        //   src       = 02:03:04:05:06:07
+        //   type      = IPv4
+        // ###[ IP ]###
+        //      version   = 4
+        //      ihl       = 5
+        //      tos       = 0x0
+        //      len       = 514
+        //      id        = 0
+        //      flags     = DF
+        //      frag      = 0
+        //      ttl       = 255
+        //      proto     = udp
+        //      chksum    = 0x8eee
+        //      src       = 10.0.0.1
+        //      dst       = 224.0.0.251
+        //      \options   \
+        // ###[ UDP ]###
+        //         sport     = mdns
+        //         dport     = mdns
+        //         len       = 494
+        //         chksum    = 0x2f0d
+        // ###[ DNS ]###
+        //           id        = 0
+        //           qr        = 1
+        //           opcode    = QUERY
+        //           aa        = 1
+        //           tc        = 0
+        //           rd        = 0
+        //           ra        = 0
+        //           z         = 0
+        //           ad        = 0
+        //           cd        = 0
+        //           rcode     = ok
+        //           qdcount   = 0
+        //           ancount   = 7
+        //           nscount   = 0
+        //           arcount   = 0
+        //           \qd        \
+        //           \an        \
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'_googlecast._tcp.local.'
+        //            |  type      = PTR
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = b'gambit-3cb56c6253638b3641e3d289013cc0ae._googlecast._tcp.local.'
+        //            |###[ DNS SRV Resource Record ]###
+        //            |  rrname    = b'\xc0.'
+        //            |  type      = SRV
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  priority  = 12320
+        //            |  weight    = 12320
+        //            |  port      = 14384
+        //            |  target    = b'9 3cb56c62-5363-8b36-41e3-d289013cc0ae.local..'
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'\xc0.'
+        //            |  type      = TXT
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = [b' "id=3cb56c6253638b3641e3d289013cc0ae cd=8ECC37F6755390D005DFC02F8EC0D4FA rm=4ABD579644ACFCCF ve=05 md=gambit ic=/setup/icon.png fn=gambit a=264709 st=0 bs=FA8FFD2242A7 nf=1 rs= ']
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = A
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 100.89.85.228
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b' (Android_f47ac10b58cc4b88bc3f5e7a81e59872\xc0\x1d\x00\x01\x00\x01\x00\x00\x00x\x00\x04dYU\xe4\xc1W\x00.\x00\x01\x00\x00\x00x\x00\x10\xfe\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x03\xc1W\x00\x1c.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = fe80::3
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b' (Android_f47ac10b58cc4b88bc3f5e7a81e59872\xc0\x1d\x00\x01\x00\x01\x00\x00\x00x\x00\x04dYU\xe4\xc1W\x00.\x00\x01\x00\x00\x00x\x00\x10\xfe\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x03\xc1W\x00\x1c.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 200a::3
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b' (Android_f47ac10b58cc4b88bc3f5e7a81e59872\xc0\x1d\x00\x01\x00\x01\x00\x00\x00x\x00\x04dYU\xe4\xc1W\x00.\x00\x01\x00\x00\x00x\x00\x10\xfe\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x03\xc1W\x00\x1c.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 200b::3
+        //           \ns        \
+        //           \ar        \
+        val expectedIPv4CastMdnsReply = """
+            01005E0000FB02030405060708004500020200004000FF118EEE0A000001E00
+            000FB14E914E901EE2F0D0000840000000007000000000B5F676F6F676C6563
+            617374045F746370056C6F63616C00000C000100000078002A2767616D62697
+            42D336362353663363235333633386233363431653364323839303133636330
+            6165C00C01C0000021000100000078003430203020383030392033636235366
+            336322D353336332D386233362D343165332D6432383930313363633061652E
+            6C6F63616C2E01C000001000010000007800B3B2202269643D3363623536633
+            6323533363338623336343165336432383930313363633061652063643D3845
+            434333374636373535333930443030354446433032463845433044344641207
+            26D3D344142443537393634344143464343462076653D3035206D643D67616D
+            6269742069633D2F73657475702F69636F6E2E706E6720666E3D67616D62697
+            420613D3236343730392073743D302062733D46413846464432323432413720
+            6E663D312072733D2028416E64726F69645F663437616331306235386363346
+            2383862633366356537613831653539383732C01D0001000100000078000464
+            5955E4C157001C0001000000780010FE800000000000000000000000000003C
+            157001C0001000000780010200A0000000000000000000000000003C157001C
+            0001000000780010200B0000000000000000000000000003
+        """.replace("\\s+".toRegex(), "").trim()
+
+        assertContentEquals(
+            HexDump.hexStringToByteArray(expectedIPv4CastMdnsReply),
+            transmitPkt
+        )
+
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
+        // ip = IP(src="10.0.0.3", dst="224.0.0.251")
+        // udp = UDP(dport=5353, sport=5353)
+        // questions = [
+        //   DNSQR(qname="_airplay._tcp.local", qtype="PTR"),
+        //   DNSQR(qname="gambit-3cb56c6253638b3641e3d289013cc0ae._googlecast._tcp.local", qtype="TXT")
+        // ]
+        // dns = dns_compress(DNS(qd=questions))
+        // pkt = eth/ip/udp/dns
+        val castIPv4MdnsTxtQuery = """
+            01005e0000fb0102030405060800450000440001000040118faa0a000003e00
+            000fb14e914e900309fa50000010000010000000000000b5f676f6f676c6563
+            617374045f746370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(castIPv4MdnsTxtQuery),
+            DROPPED_MDNS_REPLIED
+        )
+
+        transmitPkt = apfTestHelpers.consumeTransmittedPackets(1)[0]
+
+        assertContentEquals(
+            HexDump.hexStringToByteArray(expectedIPv4CastMdnsReply),
+            transmitPkt
+        )
+
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
+        // ip = IP(src="10.0.0.3", dst="224.0.0.251")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_androidtvremote2._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val tvRemoteIPv4MdnsPtrQuery = """
+            01005e0000fb01020304050608004500004a0001000040118fa40a000003e00
+            000fb14e914e900366966000001000001000000000000115f616e64726f6964
+            747672656d6f746532045f746370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(tvRemoteIPv4MdnsPtrQuery),
+            DROPPED_MDNS_REPLIED
+        )
+
+        transmitPkt = apfTestHelpers.consumeTransmittedPackets(1)[0]
+
+        // ###[ Ethernet ]###
+        //  dst       = 01:00:5e:00:00:fb
+        //  src       = 02:03:04:05:06:07
+        //  type      = IPv4
+        // ###[ IP ]###
+        //      version   = 4
+        //      ihl       = 5
+        //      tos       = 0x0
+        //      len       = 332
+        //      id        = 0
+        //      flags     = DF
+        //      frag      = 0
+        //      ttl       = 255
+        //      proto     = udp
+        //      chksum    = 0x8fa4
+        //      src       = 10.0.0.1
+        //      dst       = 224.0.0.251
+        //      \options   \
+        // ###[ UDP ]###
+        //         sport     = mdns
+        //         dport     = mdns
+        //         len       = 312
+        //         chksum    = 0xf867
+        // ###[ DNS ]###
+        //            id        = 0
+        //           qr        = 1
+        //           opcode    = QUERY
+        //           aa        = 1
+        //           tc        = 0
+        //           rd        = 0
+        //           ra        = 0
+        //           z         = 0
+        //           ad        = 0
+        //           cd        = 0
+        //           rcode     = ok
+        //           qdcount   = 0
+        //           ancount   = 7
+        //           nscount   = 0
+        //           arcount   = 0
+        //           \qd        \
+        //           \an        \
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'_androidtvremote2._tcp.local.'
+        //            |  type      = PTR
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = b'gambit._androidtvremote2._tcp.local.'
+        //            |###[ DNS SRV Resource Record ]###
+        //            |  rrname    = b'gambit._androidtvremote2._tcp.local.'
+        //            |  type      = SRV
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  priority  = 12320
+        //            |  weight    = 12320
+        //            |  port      = 13876
+        //            |  target    = b'6 Android_2570595cc11d4af4a4b7146b946eeb9e.local.'
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'gambit._androidtvremote2._tcp.local.'
+        //            |  type      = TXT
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = [b'"bt=3C:4E:56:76:1E:E9"']
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = A
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 100.89.85.228
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = fe80::3
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 200a::3
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 200b::3
+        //           \ns        \
+        //           \ar        \
+        val expectedIPv4tvRemoteMdnsReply = """
+            01005E0000FB02030405060708004500014C00004000FF118FA40A000001E00
+            000FB14E914E90138F867000084000000000700000000115F616E64726F6964
+            747672656D6F746532045F746370056C6F63616C00000C00010000007800090
+            667616D626974C00CC03400210001000000780037302030203634363620416E
+            64726F69645F323537303539356363313164346166346134623731343662393
+            43665656239652E6C6F63616CC03400100001000000780017162262743D3343
+            3A34453A35363A37363A31453A45392228416E64726F69645F6634376163313
+            062353863633462383862633366356537613831653539383732C02300010001
+            000000780004645955E4C0A3001C0001000000780010FE80000000000000000
+            0000000000003C0A3001C0001000000780010200A0000000000000000000000
+            000003C0A3001C0001000000780010200B0000000000000000000000000003
+        """.replace("\\s+".toRegex(), "").trim()
+
+        assertContentEquals(
+            HexDump.hexStringToByteArray(expectedIPv4tvRemoteMdnsReply),
+            transmitPkt
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIPv4MdnsQueryDropped() {
+        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(removeTvRemoteRecord = true)
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
+        // ip = IP(src="10.0.0.3", dst="224.0.0.251")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_airplay._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val airplayIPv4MdnsPtrQuery = """
+            01005e0000fb0102030405060800450000410001000040118fad0a000003e00
+            000fb14e914e9002d8203000001000001000000000000085f616972706c6179
+            045f746370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(airplayIPv4MdnsPtrQuery),
+            DROPPED_MDNS
+        )
+
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
+        // ip = IP(src="10.0.0.3", dst="224.0.0.251")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_androidtvremote2._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val tvRemoteIPv4MdnsPtrQuery = """
+            01005e0000fb01020304050608004500004a0001000040118fa40a000003e00
+            000fb14e914e900366966000001000001000000000000115f616e64726f6964
+            747672656d6f746532045f746370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(tvRemoteIPv4MdnsPtrQuery),
+            DROPPED_MDNS
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIPv4MdnsQueryWithOptionPassed() {
+        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false)
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
+        // ip = IP(src="10.0.0.3", dst="224.0.0.251", options=IPOption(b'\x94\x04\x00\x00'))
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_googlecast._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val castIPv4MdnsPtrQueryWithOption = """
+            01005e0000fb010203040506080046000048000100004011faa10a000003e00
+            000fb9404000014e914e900309fa50000010000010000000000000b5f676f6f
+            676c6563617374045f746370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(castIPv4MdnsPtrQueryWithOption),
+            PASSED_IPV4
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIPv4MdnsQueryDroppedOnV6OnlyNetwork() {
+        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false, v6Only = true)
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
+        // ip = IP(src="10.0.0.3", dst="224.0.0.251")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_googlecast._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val castIPv4MdnsPtrQuery = """
+            01005e0000fb0102030405060800450000440001000040118faa0a000003e00
+            000fb14e914e900309fa50000010000010000000000000b5f676f6f676c6563
+            617374045f746370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(castIPv4MdnsPtrQuery),
+            DROPPED_IPV4_NON_DHCP4
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIPv4MdnsReplyPassed() {
+        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false)
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
+        // ip = IP(src="10.0.0.3", dst="224.0.0.251")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qr=1, aa=1, rd=0, qd=None, an=DNSRR(rrname="_androidtvremote2._tcp.local", type="PTR", rdata="gambit._androidtvremote2._tcp.local", ttl=120))
+        // pkt = eth/ip/udp/dns
+        val tvRemoteIPv4MdnsPtrAnswer = """
+            01005e0000fb0102030405060800450000750001000040118f790a000003e00
+            000fb14e914e9006169b4000084000000000100000000115f616e64726f6964
+            747672656d6f746532045f746370056c6f63616c00000c00010000007800250
+            667616d626974115f616e64726f6964747672656d6f746532045f746370056c
+            6f63616c00
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(tvRemoteIPv4MdnsPtrAnswer),
+            PASSED_MDNS
+        )
+    }
+
+    fun testIPv6MdnsQueryReplied() {
+        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false)
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="33:33:00:00:00:FB")
+        // ip = IPv6(src="fe80::1", dst="ff02::fb")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_googlecast._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val castIPv6MdnsPtrQuery = """
+            3333000000fb01020304050686dd6000000000301140fe80000000000000000
+            0000000000001ff0200000000000000000000000000fb14e914e900308c2400
+            00010000010000000000000b5f676f6f676c6563617374045f746370056c6f6
+            3616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(castIPv6MdnsPtrQuery),
+            DROPPED_MDNS_REPLIED
+        )
+
+        var transmitPkt = apfTestHelpers.consumeTransmittedPackets(1)[0]
+
+        // ###[ Ethernet ]###
+        //  dst       = 33:33:00:00:00:fb
+        //  src       = 02:03:04:05:06:07
+        //  type      = IPv6
+        // ###[ IPv6 ]###
+        //      version   = 6
+        //      tc        = 0
+        //      fl        = 0
+        //      plen      = 494
+        //      nh        = UDP
+        //      hlim      = 255
+        //      src       = fe80::3
+        //      dst       = ff02::fb
+        // ###[ UDP ]###
+        //         sport     = mdns
+        //         dport     = mdns
+        //         len       = 494
+        //         chksum    = 0x1b88
+        // ###[ DNS ]###
+        //           id        = 0
+        //           qr        = 1
+        //           opcode    = QUERY
+        //           aa        = 1
+        //           tc        = 0
+        //           rd        = 0
+        //           ra        = 0
+        //           z         = 0
+        //           ad        = 0
+        //           cd        = 0
+        //           rcode     = ok
+        //           qdcount   = 0
+        //           ancount   = 7
+        //           nscount   = 0
+        //           arcount   = 0
+        //           \qd        \
+        //           \an        \
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'_googlecast._tcp.local.'
+        //            |  type      = PTR
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = b'gambit-3cb56c6253638b3641e3d289013cc0ae._googlecast._tcp.local.'
+        //            |###[ DNS SRV Resource Record ]###
+        //            |  rrname    = b'\xc0.'
+        //            |  type      = SRV
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  priority  = 12320
+        //            |  weight    = 12320
+        //            |  port      = 14384
+        //            |  target    = b'9 3cb56c62-5363-8b36-41e3-d289013cc0ae.local..'
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'\xc0.'
+        //            |  type      = TXT
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = [b' "id=3cb56c6253638b3641e3d289013cc0ae cd=8ECC37F6755390D005DFC02F8EC0D4FA rm=4ABD579644ACFCCF ve=05 md=gambit ic=/setup/icon.png fn=gambit a=264709 st=0 bs=FA8FFD2242A7 nf=1 rs= ']
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = A
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 100.89.85.228
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b' (Android_f47ac10b58cc4b88bc3f5e7a81e59872\xc0\x1d\x00\x01\x00\x01\x00\x00\x00x\x00\x04dYU\xe4\xc1W\x00.\x00\x01\x00\x00\x00x\x00\x10\xfe\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x03\xc1W\x00\x1c.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = fe80::3
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b' (Android_f47ac10b58cc4b88bc3f5e7a81e59872\xc0\x1d\x00\x01\x00\x01\x00\x00\x00x\x00\x04dYU\xe4\xc1W\x00.\x00\x01\x00\x00\x00x\x00\x10\xfe\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x03\xc1W\x00\x1c.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 200a::3
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b' (Android_f47ac10b58cc4b88bc3f5e7a81e59872\xc0\x1d\x00\x01\x00\x01\x00\x00\x00x\x00\x04dYU\xe4\xc1W\x00.\x00\x01\x00\x00\x00x\x00\x10\xfe\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x03\xc1W\x00\x1c.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 200b::3
+        //           \ns        \
+        //           \ar        \
+        val expectedIPv6CastMdnsReply = """
+            3333000000FB02030405060786DD6000000001EE11FFFE80000000000000000
+            0000000000003FF0200000000000000000000000000FB14E914E901EE1B8800
+            00840000000007000000000B5F676F6F676C6563617374045F746370056C6F6
+            3616C00000C000100000078002A2767616D6269742D33636235366336323533
+            36333862333634316533643238393031336363306165C00C01C000002100010
+            0000078003430203020383030392033636235366336322D353336332D386233
+            362D343165332D6432383930313363633061652E6C6F63616C2E01C00000100
+            0010000007800B3B2202269643D336362353663363235333633386233363431
+            65336432383930313363633061652063643D384543433337463637353533393
+            044303035444643303246384543304434464120726D3D344142443537393634
+            344143464343462076653D3035206D643D67616D6269742069633D2F7365747
+            5702F69636F6E2E706E6720666E3D67616D62697420613D3236343730392073
+            743D302062733D464138464644323234324137206E663D312072733D2028416
+            E64726F69645F66343761633130623538636334623838626333663565376138
+            31653539383732C01D00010001000000780004645955E4C157001C000100000
+            0780010FE800000000000000000000000000003C157001C0001000000780010
+            200A0000000000000000000000000003C157001C0001000000780010200B000
+            0000000000000000000000003
+        """.replace("\\s+".toRegex(), "").trim()
+
+        assertContentEquals(
+            HexDump.hexStringToByteArray(expectedIPv6CastMdnsReply),
+            transmitPkt
+        )
+
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="33:33:00:00:00:FB")
+        // ip = IPv6(src="fe80::1", dst="ff02::fb")
+        // udp = UDP(dport=5353, sport=5353)
+        // questions = [
+        //   DNSQR(qname="_airplay._tcp.local", qtype="PTR"),
+        //   DNSQR(qname="gambit-3cb56c6253638b3641e3d289013cc0ae._googlecast._tcp.local", qtype="TXT")
+        // ]
+        // dns = dns_compress(DNS(qd=questions))
+        // pkt = eth/ip/udp/dns
+        val castIPv6MdnsTxtQuery = """
+            3333000000fb01020304050686dd6000000000671140fe80000000000000000
+            0000000000001ff0200000000000000000000000000fb14e914e90067439100
+            0001000002000000000000085f616972706c6179045f746370056c6f63616c0
+            0000c00012767616d6269742d33636235366336323533363338623336343165
+            336432383930313363633061650b5f676f6f676c6563617374c01500100001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(castIPv6MdnsTxtQuery),
+            DROPPED_MDNS_REPLIED
+        )
+
+        transmitPkt = apfTestHelpers.consumeTransmittedPackets(1)[0]
+
+        assertContentEquals(
+            HexDump.hexStringToByteArray(expectedIPv6CastMdnsReply),
+            transmitPkt
+        )
+
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="33:33:00:00:00:FB")
+        // ip = IPv6(src="fe80::1", dst="ff02::fb")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_androidtvremote2._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val tvRemoteIPv6MdnsPtrQuery = """
+            3333000000fb01020304050686dd6000000000361140fe80000000000000000
+            0000000000001ff0200000000000000000000000000fb14e914e9003655e500
+            0001000001000000000000115f616e64726f6964747672656d6f746532045f7
+            46370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(tvRemoteIPv6MdnsPtrQuery),
+            DROPPED_MDNS_REPLIED
+        )
+
+        transmitPkt = apfTestHelpers.consumeTransmittedPackets(1)[0]
+
+        // ###[ Ethernet ]###
+        // dst       = 33:33:00:00:00:fb
+        // src       = 02:03:04:05:06:07
+        // type      = IPv6
+        // ###[ IPv6 ]###
+        // version   = 6
+        // tc        = 0
+        // fl        = 0
+        // plen      = 312
+        // nh        = UDP
+        // hlim      = 255
+        // src       = fe80::3
+        // dst       = ff02::fb
+        // ###[ UDP ]###
+        //         sport     = mdns
+        //         dport     = mdns
+        //         len       = 312
+        //         chksum    = 0xf867
+        // ###[ DNS ]###
+        //            id        = 0
+        //           qr        = 1
+        //           opcode    = QUERY
+        //           aa        = 1
+        //           tc        = 0
+        //           rd        = 0
+        //           ra        = 0
+        //           z         = 0
+        //           ad        = 0
+        //           cd        = 0
+        //           rcode     = ok
+        //           qdcount   = 0
+        //           ancount   = 7
+        //           nscount   = 0
+        //           arcount   = 0
+        //           \qd        \
+        //           \an        \
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'_androidtvremote2._tcp.local.'
+        //            |  type      = PTR
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = b'gambit._androidtvremote2._tcp.local.'
+        //            |###[ DNS SRV Resource Record ]###
+        //            |  rrname    = b'gambit._androidtvremote2._tcp.local.'
+        //            |  type      = SRV
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  priority  = 12320
+        //            |  weight    = 12320
+        //            |  port      = 13876
+        //            |  target    = b'6 Android_2570595cc11d4af4a4b7146b946eeb9e.local.'
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'gambit._androidtvremote2._tcp.local.'
+        //            |  type      = TXT
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = [b'"bt=3C:4E:56:76:1E:E9"']
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = A
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 100.89.85.228
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = fe80::3
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 200a::3
+        //            |###[ DNS Resource Record ]###
+        //            |  rrname    = b'Android_f47ac10b58cc4b88bc3f5e7a81e59872.local.'
+        //            |  type      = AAAA
+        //            |  cacheflush= 0
+        //            |  rclass    = IN
+        //            |  ttl       = 120
+        //            |  rdlen     = None
+        //            |  rdata     = 200b::3
+        //           \ns        \
+        //           \ar        \
+        val expectedIPv6tvRemoteMdnsReply = """
+            3333000000FB02030405060786DD60000000013811FFFE80000000000000000
+            0000000000003FF0200000000000000000000000000FB14E914E90138E4E200
+            0084000000000700000000115F616E64726F6964747672656D6F746532045F7
+            46370056C6F63616C00000C00010000007800090667616D626974C00CC03400
+            210001000000780037302030203634363620416E64726F69645F32353730353
+            935636331316434616634613462373134366239343665656239652E6C6F6361
+            6CC03400100001000000780017162262743D33433A34453A35363A37363A314
+            53A45392228416E64726F69645F663437616331306235386363346238386263
+            3366356537613831653539383732C02300010001000000780004645955E4C0A
+            3001C0001000000780010FE800000000000000000000000000003C0A3001C00
+            01000000780010200A0000000000000000000000000003C0A3001C000100000
+            0780010200B0000000000000000000000000003
+        """.replace("\\s+".toRegex(), "").trim()
+
+        assertContentEquals(
+            HexDump.hexStringToByteArray(expectedIPv6tvRemoteMdnsReply),
+            transmitPkt
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIPv6MdnsQueryDropped() {
+        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(removeTvRemoteRecord = true)
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="33:33:00:00:00:FB")
+        // ip = IPv6(src="fe80::1", dst="ff02::fb")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_airplay._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val airplayIPv6MdnsPtrQuery = """
+            3333000000fb01020304050686dd60000000002d1140fe80000000000000000
+            0000000000001ff0200000000000000000000000000fb14e914e9002d6e8200
+            0001000001000000000000085f616972706c6179045f746370056c6f63616c0
+            0000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(airplayIPv6MdnsPtrQuery),
+            DROPPED_MDNS
+        )
+
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="33:33:00:00:00:FB")
+        // ip = IPv6(src="fe80::1", dst="ff02::fb")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_androidtvremote2._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val tvRemoteIPv6MdnsPtrQuery = """
+            3333000000fb01020304050686dd6000000000361140fe80000000000000000
+            0000000000001ff0200000000000000000000000000fb14e914e9003655e500
+            0001000001000000000000115f616e64726f6964747672656d6f746532045f7
+            46370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(tvRemoteIPv6MdnsPtrQuery),
+            DROPPED_MDNS
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIPv6MdnsReplyPassed() {
+        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false)
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="33:33:00:00:00:FB")
+        // ip = IPv6(src="fe80::1", dst="ff02::fb")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qr=1, aa=1, rd=0, qd=None, an=DNSRR(rrname="_androidtvremote2._tcp.local", type="PTR", rdata="gambit._androidtvremote2._tcp.local", ttl=120))
+        // pkt = eth/ip/udp/dns
+        val tvRemoteIPv6MdnsPtrAnswer = """
+            3333000000fb01020304050686dd6000000000611140fe80000000000000000
+            0000000000001ff0200000000000000000000000000fb14e914e90061563300
+            0084000000000100000000115f616e64726f6964747672656d6f746532045f7
+            46370056c6f63616c00000c00010000007800250667616d626974115f616e64
+            726f6964747672656d6f746532045f746370056c6f63616c00
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(tvRemoteIPv6MdnsPtrAnswer),
+            PASSED_MDNS
+        )
     }
 
     @Test
     fun testApfProgramUpdate() {
         val apfFilter = getApfFilter()
-        consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         // add IPv4 address, expect to have apf program update
         val lp = LinkProperties()
         val linkAddress = LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24)
         lp.addLinkAddress(linkAddress)
         apfFilter.setLinkProperties(lp)
-        consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
 
         // add the same IPv4 address, expect to have no apf program update
         apfFilter.setLinkProperties(lp)
-        verify(ipClientCallback, never()).installPacketFilter(any())
+        verify(apfController, never()).installPacketFilter(any(), any())
 
         // add IPv6 addresses, expect to have apf program update
         for (addr in hostIpv6Addresses) {
@@ -2104,11 +3973,11 @@ class ApfFilterTest {
         }
 
         apfFilter.setLinkProperties(lp)
-        consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
 
         // add the same IPv6 addresses, expect to have no apf program update
         apfFilter.setLinkProperties(lp)
-        verify(ipClientCallback, never()).installPacketFilter(any())
+        verify(apfController, never()).installPacketFilter(any(), any())
 
         // add more tentative IPv6 addresses, expect to have apf program update
         for (addr in hostIpv6TentativeAddresses) {
@@ -2123,11 +3992,11 @@ class ApfFilterTest {
         }
 
         apfFilter.setLinkProperties(lp)
-        consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
 
         // add the same IPv6 addresses, expect to have no apf program update
         apfFilter.setLinkProperties(lp)
-        verify(ipClientCallback, never()).installPacketFilter(any())
+        verify(apfController, never()).installPacketFilter(any(), any())
     }
 
     // The APFv6 code path is only turned on in V+
@@ -2139,31 +4008,32 @@ class ApfFilterTest {
         )
         doReturn(mcastAddrs).`when`(dependencies).getIPv4MulticastAddresses(any())
         val apfConfig = getDefaultConfig()
-        apfConfig.shouldHandleIgmpOffload = true
+        apfConfig.handleIgmpOffload = true
         val apfFilter = getApfFilter(apfConfig)
-        consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         val addr = InetAddress.getByName("239.0.0.1") as Inet4Address
         mcastAddrs.add(addr)
         doReturn(mcastAddrs).`when`(dependencies).getIPv4MulticastAddresses(any())
         val testPacket = HexDump.hexStringToByteArray("000000")
         Os.write(igmpWriteSocket, testPacket, 0, testPacket.size)
-        consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
 
         Os.write(igmpWriteSocket, testPacket, 0, testPacket.size)
         Thread.sleep(NO_CALLBACK_TIMEOUT_MS)
-        verify(ipClientCallback, never()).installPacketFilter(any())
+        verify(apfController, never()).installPacketFilter(any(), any())
 
         mcastAddrs.remove(addr)
         doReturn(mcastAddrs).`when`(dependencies).getIPv4MulticastAddresses(any())
         Os.write(igmpWriteSocket, testPacket, 0, testPacket.size)
-        consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
     }
 
     @Test
     fun testApfFilterInitializationCleanUpTheApfMemoryRegion() {
         val apfFilter = getApfFilter()
         val programCaptor = ArgumentCaptor.forClass(ByteArray::class.java)
-        verify(ipClientCallback, times(2)).installPacketFilter(programCaptor.capture())
+        verify(apfController, times(2))
+            .installPacketFilter(programCaptor.capture(), any())
         val program = programCaptor.allValues.first()
         assertContentEquals(ByteArray(4096) { 0 }, program)
     }
@@ -2171,9 +4041,9 @@ class ApfFilterTest {
     @Test
     fun testApfFilterResumeWillCleanUpTheApfMemoryRegion() {
         val apfFilter = getApfFilter()
-        consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         apfFilter.resume()
-        val program = consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
         assertContentEquals(ByteArray(4096) { 0 }, program)
     }
 
@@ -2189,7 +4059,7 @@ class ApfFilterTest {
         )
         doReturn(mcastAddrs).`when`(dependencies).getIPv4MulticastAddresses(any())
         val apfFilter = getApfFilter()
-        consumeInstalledProgram(ipClientCallback, installCnt = 2)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         assertEquals(mcastAddrs.toSet(), apfFilter.mIPv4MulticastAddresses)
         assertEquals(mcastAddrsExcludeAllHost.toSet(), apfFilter.mIPv4McastAddrsExcludeAllHost)
 
@@ -2198,11 +4068,23 @@ class ApfFilterTest {
         mcastAddrsExcludeAllHost.add(addr)
         doReturn(mcastAddrs).`when`(dependencies).getIPv4MulticastAddresses(any())
         apfFilter.updateIPv4MulticastAddrs()
-        consumeInstalledProgram(ipClientCallback, installCnt = 1)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
         assertEquals(mcastAddrs.toSet(), apfFilter.mIPv4MulticastAddresses)
         assertEquals(mcastAddrsExcludeAllHost.toSet(), apfFilter.mIPv4McastAddrsExcludeAllHost)
 
         apfFilter.updateIPv4MulticastAddrs()
-        verify(ipClientCallback, never()).installPacketFilter(any())
+        verify(apfController, never()).installPacketFilter(any(), any())
+    }
+
+    @Test
+    fun testApfFailOpenOnLimitedRAM() {
+        val apfConfig = getDefaultConfig()
+        apfConfig.apfRamSize = 256
+        val apfFilter = getApfFilter(apfConfig)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
+        assertContentEquals(
+            ByteArray(apfConfig.apfRamSize - ApfCounterTracker.Counter.totalSize()) { 0 },
+            program
+        )
     }
 }

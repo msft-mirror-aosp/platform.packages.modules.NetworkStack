@@ -322,6 +322,7 @@ public abstract class IpClientIntegrationTestCommon {
     // should be enough between the timestamp when the IP provisioning completes successfully and
     // when IpClientLinkObserver sees the RTM_NEWADDR netlink events.
     private static final long TEST_LIFETIME_TOLERANCE_MS = 4_000L;
+    private static final long TEST_POLL_NEIGHBOR_PARAMETER_MS = 500L;
 
     @Rule
     public final DevSdkIgnoreRule mIgnoreRule = new DevSdkIgnoreRule();
@@ -445,6 +446,7 @@ public abstract class IpClientIntegrationTestCommon {
     private static final String IPV4_TEST_SUBNET_PREFIX = "192.168.1.0/24";
     private static final String IPV4_ANY_ADDRESS_PREFIX = "0.0.0.0/0";
     private static final String HOSTNAME = "testhostname";
+    private static final String TEST_IPV6_PREFIX = "2001:db8:1::/64";
     private static final String IPV6_OFF_LINK_DNS_SERVER = "2001:4860:4860::64";
     private static final String IPV6_ON_LINK_DNS_SERVER = "2001:db8:1::64";
     private static final int TEST_DEFAULT_MTU = 1500;
@@ -955,6 +957,12 @@ public abstract class IpClientIntegrationTestCommon {
             mPacketReaderThread.quitSafely();
             mPacketReaderThread.join();
         }
+    }
+
+    private int getNeighborParameterUcastSolicit(String ifaceName) throws IOException {
+        final String ucast_solicit = getOneLineCommandOutput(
+                "su root cat proc/sys/net/ipv6/neigh/" + ifaceName + "/ucast_solicit");
+        return Integer.parseInt(ucast_solicit);
     }
 
     private MacAddress getIfaceMacAddr(String ifaceName) throws IOException {
@@ -2099,7 +2107,7 @@ public abstract class IpClientIntegrationTestCommon {
 
     private void sendRouterAdvertisement(boolean waitForRs, short lifetime, int valid,
             int preferred) throws Exception {
-        final ByteBuffer pio = buildPioOption(valid, preferred, "2001:db8:1::/64");
+        final ByteBuffer pio = buildPioOption(valid, preferred, TEST_IPV6_PREFIX);
         final ByteBuffer rdnss = buildRdnssOption(3600, IPV6_OFF_LINK_DNS_SERVER);
         sendRouterAdvertisement(waitForRs, lifetime, pio, rdnss);
     }
@@ -2152,6 +2160,18 @@ public abstract class IpClientIntegrationTestCommon {
         return buildRaPacket((short) 1800, options);
     }
 
+    private static ByteBuffer buildRaPacket(final String prefix, final String dnsServer,
+            int validLifetime, int preferredLifetime, int dnsLifetime, boolean shouldIncludeSlla)
+            throws Exception {
+        final ByteBuffer pio = buildPioOption(validLifetime, preferredLifetime, prefix);
+        final ByteBuffer rdnss = buildRdnssOption(dnsLifetime, dnsServer);
+        final List<ByteBuffer> options = new ArrayList<ByteBuffer>();
+        options.add(pio);
+        options.add(rdnss);
+        if (shouldIncludeSlla) options.add(buildSllaOption());
+        return buildRaPacket(options.toArray(new ByteBuffer[options.size()]));
+    }
+
     private void disableIpv6ProvisioningDelays() throws Exception {
         // Speed up the test by disabling DAD and removing router_solicitation_delay.
         // We don't need to restore the default value because the interface is removed in tearDown.
@@ -2184,11 +2204,9 @@ public abstract class IpClientIntegrationTestCommon {
 
     private LinkProperties doIpv6OnlyProvisioning() throws Exception {
         final InOrder inOrder = inOrder(mCb);
-        final ByteBuffer pio = buildPioOption(3600, 1800, "2001:db8:1::/64");
-        final ByteBuffer rdnss = buildRdnssOption(3600, IPV6_OFF_LINK_DNS_SERVER);
-        final ByteBuffer slla = buildSllaOption();
-        final ByteBuffer ra = buildRaPacket(pio, rdnss, slla);
-
+        final ByteBuffer ra = buildRaPacket(TEST_IPV6_PREFIX, IPV6_OFF_LINK_DNS_SERVER,
+                3600 /* validLifetime */, 1800 /* preferredLifetime */, 3600 /* dnsLifetime */,
+                true /* shouldIncludeSlla */);
         return doIpv6OnlyProvisioning(inOrder, ra);
     }
 
@@ -2281,12 +2299,10 @@ public abstract class IpClientIntegrationTestCommon {
                 .build();
         startIpClientProvisioning(config);
 
-        final ByteBuffer pio = buildPioOption(600, 300, "2001:db8:1::/64");
-        // put an IPv6 link-local DNS server
-        final ByteBuffer rdnss = buildRdnssOption(600, ROUTER_LINK_LOCAL.getHostAddress());
-        // put SLLA option to avoid address resolution for "fe80::1"
-        final ByteBuffer slla = buildSllaOption();
-        final ByteBuffer ra = buildRaPacket(pio, rdnss, slla);
+        final ByteBuffer ra = buildRaPacket(TEST_IPV6_PREFIX,
+                ROUTER_LINK_LOCAL.getHostAddress() /* an IPv6 link-local DNS server */,
+                600 /* validLifetime */, 300 /* preferredLifetime */, 600 /* dnsLifetime */,
+                true /* shouldIncludeSlla */);
 
         waitForRouterSolicitation();
         mPacketReader.sendResponse(ra);
@@ -3090,10 +3106,9 @@ public abstract class IpClientIntegrationTestCommon {
 
     private LinkProperties performDualStackProvisioning() throws Exception {
         final Inet6Address dnsServer = ipv6Addr(IPV6_OFF_LINK_DNS_SERVER);
-        final ByteBuffer pio = buildPioOption(3600, 1800, "2001:db8:1::/64");
-        final ByteBuffer rdnss = buildRdnssOption(3600, IPV6_OFF_LINK_DNS_SERVER);
-        final ByteBuffer slla = buildSllaOption();
-        final ByteBuffer ra = buildRaPacket(pio, rdnss, slla);
+        final ByteBuffer ra = buildRaPacket(TEST_IPV6_PREFIX, IPV6_OFF_LINK_DNS_SERVER,
+                3600 /* validLifetime */, 1800 /* preferredLifetime */, 3600 /* dnsLifetime */,
+                true /* shouldIncludeSlla */);
 
         return performDualStackProvisioning(ra, dnsServer);
     }
@@ -3943,7 +3958,6 @@ public abstract class IpClientIntegrationTestCommon {
         assertEquals(ETH_P_IPV6, ns.ethHdr.etherType);
         assertEquals(IPPROTO_ICMPV6, ns.ipv6Hdr.nextHeader);
         assertEquals(0xff, ns.ipv6Hdr.hopLimit);
-        assertTrue(ns.ipv6Hdr.srcIp.isLinkLocalAddress());
         assertEquals(ICMPV6_NEIGHBOR_SOLICITATION, ns.icmpv6Hdr.type);
         assertEquals(0, ns.icmpv6Hdr.code);
         assertEquals(0, ns.nsHdr.reserved);
@@ -3983,15 +3997,32 @@ public abstract class IpClientIntegrationTestCommon {
         return ns;
     }
 
-    private List<NeighborSolicitation> waitForMultipleNeighborSolicitations() throws Exception {
+    private NeighborSolicitation waitForMulticastNeighborSolicitation(final Inet6Address targetIp)
+            throws Exception {
+        NeighborSolicitation ns;
+        while ((ns = getNextNeighborSolicitation()) != null) {
+            if (ns.ipv6Hdr.dstIp.isMulticastAddress() // Solicited-node multicast address
+                    && ns.nsHdr.target.equals(targetIp)) {
+                break;
+            }
+        }
+        assertNotNull("No multicast Neighbor solicitation received on interface within timeout",
+                ns);
+        assertMulticastNeighborSolicitation(ns, targetIp);
+        return ns;
+    }
+
+    private List<NeighborSolicitation> waitForMultipleNeighborSolicitations(int expectedNsCount)
+            throws Exception {
         NeighborSolicitation ns;
         final List<NeighborSolicitation> nsList = new ArrayList<NeighborSolicitation>();
         while ((ns = getNextNeighborSolicitation()) != null) {
-            // Filter out the multicast NSes used for duplicate address detetction, the target
+            // Filter out the multicast NSes used for duplicate address detection, the target
             // address is the global IPv6 address inside these NSes, and multicast NSes sent from
             // device's GUAs to force first-hop router to update the neighbor cache entry.
             if (ns.ipv6Hdr.srcIp.isLinkLocalAddress() && ns.nsHdr.target.isLinkLocalAddress()) {
                 nsList.add(ns);
+                if (nsList.size() == expectedNsCount) break;
             }
         }
         assertFalse(nsList.isEmpty());
@@ -4053,8 +4084,74 @@ public abstract class IpClientIntegrationTestCommon {
         verify(mCb, never()).onReachabilityLost(any());
     }
 
+    private void expectAndRespondToMulticastNeighborSolicitation(final Inet6Address targetIp)
+            throws Exception {
+        final NeighborSolicitation ns = waitForMulticastNeighborSolicitation(targetIp);
+
+        int flag = NEIGHBOR_ADVERTISEMENT_FLAG_ROUTER | NEIGHBOR_ADVERTISEMENT_FLAG_SOLICITED;
+        final ByteBuffer na = NeighborAdvertisement.build(ROUTER_MAC /* srcMac */,
+                ns.ethHdr.srcMac /* dstMac */, ROUTER_LINK_LOCAL /* srcIp */,
+                ns.ipv6Hdr.srcIp /* dstIp */, flag, ROUTER_LINK_LOCAL /* target */);
+        mPacketReader.sendResponse(na);
+    }
+
+    private void verifyRestoringNeighborParametersToSteadyState() throws Exception {
+        final int expectedNudSolicitNum = readNudSolicitNumInSteadyStateFromResource();
+        final long startTime = System.currentTimeMillis();
+        // polling the "ucast_solicit" sysctl every 500ms to check if it's restored to steady
+        // state, i.e. probe count of 10.
+        while (getNeighborParameterUcastSolicit(mIfaceName) != expectedNudSolicitNum) {
+            if (System.currentTimeMillis() - startTime >= TEST_TIMEOUT_MS) {
+                final String msg = "neighbor parameter ucast_solicit isn't restored to "
+                        + expectedNudSolicitNum + " within " + TEST_TIMEOUT_MS + "ms";
+                fail(msg);
+            }
+            Thread.sleep(TEST_POLL_NEIGHBOR_PARAMETER_MS);
+        }
+    }
+
+    /**
+     *  A function helper to set up the steps to verify NUD (neighbor unreachable detection) probes.
+     *  This function helper intends to respond to the multicast NS for the default gateway during
+     *  address resolution, which makes the default gateway neighbor reachable, it ends up starting
+     *  an L2 roam, which will trigger kernel to probe all neighbors later then. The specific test
+     *  case may or may not respond to that probes, depending on whether it expectes an NUD failure
+     *  from that probe.
+     *
+     *  If a specific test case expects to see an NUD failure after an L2 roam, then it should not
+     *  respond to any unicast NS or multicast NS (if multicast_resolicit feature is enabled). The
+     *  packet order example as below, fe80::bf8e:de37:69d7:2b29 is the IPv6 link-local address of
+     *  a test tap interface.
+     *
+     * 7 fe80::bf8e:de37:69d7:2b29  ff02::2 ICMPv6  76  Router Solicitation from 0a:c9:06:70:77:b3
+     * 9 fe80::1                    ff02::1 ICMPv6  13  Router Advertisement
+     *
+     * tap interface does address resolution for default gateway fe80::1 due to a DNS look-up
+     * query to sent to off-link DNS server. And responding to NS with NA to make the default
+     * gateway as reachable.
+     * 13 2001:db8:1:0:babe:11e3:49d8:d4af  ff02::1:ff00:1     ICMPv6  92  Neighbor Solicitation for fe80::1 from 0a:c9:06:70:77:b3
+     * 16 fe80::1  2001:db8:1:0:babe:11e3:49d8:d4af            ICMPv6  92  Neighbor Advertisement fe80::1 (rtr, sol) is at 00:1a:11:22:33:44
+     * 17 2001:db8:1:0:1818:bf6:5e82:4378   2001:4860:4860::64 DNS     99  Standard query 0xa13e AAAA ipv4only.arpa
+     *
+     * Post an L2 roam, the tap interface forces kernel start another probe, it sends 5 unicast
+     * NSes, the tap interface eventually gets a NUD failure due to there is no response.
+     * 21 fe80::bf8e:de37:69d7:2b29   fe80::1   ICMPv6  92   Neighbor Solicitation for fe80::1 from 0a:c9:06:70:77:b3
+     * 23 fe80::bf8e:de37:69d7:2b29   fe80::1   ICMPv6  92   Neighbor Solicitation for fe80::1 from 0a:c9:06:70:77:b3
+     * 25 fe80::bf8e:de37:69d7:2b29   fe80::1   ICMPv6  92   Neighbor Solicitation for fe80::1 from 0a:c9:06:70:77:b3
+     * 26 fe80::bf8e:de37:69d7:2b29   fe80::1   ICMPv6  92   Neighbor Solicitation for fe80::1 from 0a:c9:06:70:77:b3
+     * 27 fe80::bf8e:de37:69d7:2b29   fe80::1   ICMPv6  92   Neighbor Solicitation for fe80::1 from 0a:c9:06:70:77:b3
+     *
+     * Extra 3 multicat NSes are sent if "mcast_resolitict" sysctl is enabled.
+     * 28 fe80::bf8e:de37:69d7:2b29   ff02::1:ff00:1   ICMPv6   92    Neighbor Solicitation for fe80::1 from 0a:c9:06:70:77:b3
+     * 29 fe80::bf8e:de37:69d7:2b29   ff02::1:ff00:1   ICMPv6   92    Neighbor Solicitation for fe80::1 from 0a:c9:06:70:77:b3
+     * 31 fe80::bf8e:de37:69d7:2b29   ff02::1:ff00:1   ICMPv6   92    Neighbor Solicitation for fe80::1 from 0a:c9:06:70:77:b3
+     */
     private void prepareIpReachabilityMonitorTest(boolean isMulticastResolicitEnabled)
             throws Exception {
+        mNetworkAgentThread =
+                new HandlerThread(IpClientIntegrationTestCommon.class.getSimpleName());
+        mNetworkAgentThread.start();
+
         final ScanResultInfo info = makeScanResultInfo(TEST_DEFAULT_SSID, TEST_DEFAULT_BSSID);
         ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
                 .withLayer2Information(new Layer2Information(TEST_L2KEY, TEST_CLUSTER,
@@ -4067,18 +4164,44 @@ public abstract class IpClientIntegrationTestCommon {
                 isMulticastResolicitEnabled);
         startIpClientProvisioning(config);
         verify(mCb, timeout(TEST_TIMEOUT_MS)).setFallbackMulticastFilter(true);
-        doIpv6OnlyProvisioning();
 
-        // Simulate the roaming.
+        final ByteBuffer ra = buildRaPacket(TEST_IPV6_PREFIX, IPV6_OFF_LINK_DNS_SERVER,
+                3600 /* validLifetime */, 1800 /* preferredLifetime */, 3600 /* dnsLifetime */,
+                false /* shouldIncludeSlla */);
+        // RA doesn't include SLLA option, thus device has no IPv6 link-local address and mac
+        // address mapping for default gateway. sending a UDP packet to off-line DNS server will
+        // trigger the address resolution for default gateway, simulate that default gateway is
+        // reachable by responding to those NSes.
+        final LinkProperties lp = doIpv6OnlyProvisioning(null /* inOrder */, ra);
+        runAsShell(MANAGE_TEST_NETWORKS, () -> createTestNetworkAgentAndRegister(lp));
+        sendPacketToPeer(ipv6Addr(IPV6_OFF_LINK_DNS_SERVER));
+        expectAndRespondToMulticastNeighborSolicitation(ROUTER_LINK_LOCAL);
+        assertNeverNotifyNeighborLost();
+
+        // There is a race between the IpReachabilityMonitor handling of reachable neighbors and the
+        // following test code that forces the start of L2 roaming. Once the neighbor is confirmed
+        // to be still reachable, IpReachabilityMonitor restores the NUD parameters such as probe
+        // count and probe interval to the steady state (probe count of 10 and interval of 750 ms).
+        // Starting L2 roaming sets the NUD parameters to the post-roaming mode (probe count of 5
+        // and interval of 750 ms). If the following test code occurs early, IpReachabilityMonitor
+        // will first set the NUD parameters to the post-roaming state and then restore to the
+        // stable state, which means that the device will send more probes, which may cause flaky
+        // test because we expect to see a NUD failure event after receiving all expected probes,
+        // but sometimes this does not happen because the device is still retransmitting more.
+        // Polling the "unicast_solicit" sysctl to check if the IpReachabilityMonitor has already
+        // restore the neighbor parameter to steady state.
+        verifyRestoringNeighborParametersToSteadyState();
+
+        // Simulate the L2 roaming, this will trigger kernel to probe all neighbors again.
         forceLayer2Roaming();
     }
 
     private void runIpReachabilityMonitorProbeFailedTest() throws Exception {
         prepareIpReachabilityMonitorTest();
 
-        final List<NeighborSolicitation> nsList = waitForMultipleNeighborSolicitations();
         final int expectedNudSolicitNum = readNudSolicitNumPostRoamingFromResource();
-        assertEquals(expectedNudSolicitNum, nsList.size());
+        final List<NeighborSolicitation> nsList =
+                waitForMultipleNeighborSolicitations(expectedNudSolicitNum);
         for (NeighborSolicitation ns : nsList) {
             assertUnicastNeighborSolicitation(ns, ROUTER_MAC /* dstMac */,
                     ROUTER_LINK_LOCAL /* dstIp */, ROUTER_LINK_LOCAL /* targetIp */);
@@ -4086,7 +4209,6 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
-    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     public void testIpReachabilityMonitor_probeFailed() throws Exception {
         runIpReachabilityMonitorProbeFailedTest();
         assertNotifyNeighborLost(ROUTER_LINK_LOCAL /* targetIp */,
@@ -4094,7 +4216,6 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test @SignatureRequiredTest(reason = "requires mock callback object")
-    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     public void testIpReachabilityMonitor_probeFailed_legacyCallback() throws Exception {
         when(mCb.getInterfaceVersion()).thenReturn(12 /* assign an older interface aidl version */);
 
@@ -4122,10 +4243,10 @@ public abstract class IpClientIntegrationTestCommon {
     private void runIpReachabilityMonitorMcastResolicitProbeFailedTest() throws Exception {
         prepareIpReachabilityMonitorTest(true /* isMulticastResolicitEnabled */);
 
-        final List<NeighborSolicitation> nsList = waitForMultipleNeighborSolicitations();
         final int expectedNudSolicitNum = readNudSolicitNumPostRoamingFromResource();
         int expectedSize = expectedNudSolicitNum + NUD_MCAST_RESOLICIT_NUM;
-        assertEquals(expectedSize, nsList.size());
+        final List<NeighborSolicitation> nsList =
+                waitForMultipleNeighborSolicitations(expectedSize);
         for (NeighborSolicitation ns : nsList.subList(0, expectedNudSolicitNum)) {
             assertUnicastNeighborSolicitation(ns, ROUTER_MAC /* dstMac */,
                     ROUTER_LINK_LOCAL /* dstIp */, ROUTER_LINK_LOCAL /* targetIp */);
@@ -4136,7 +4257,6 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
-    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     public void testIpReachabilityMonitor_mcastResolicitProbeFailed() throws Exception {
         runIpReachabilityMonitorMcastResolicitProbeFailedTest();
         assertNotifyNeighborLost(ROUTER_LINK_LOCAL /* targetIp */,
@@ -4144,7 +4264,6 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test @SignatureRequiredTest(reason = "requires mock callback object")
-    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     public void testIpReachabilityMonitor_mcastResolicitProbeFailed_legacyCallback()
             throws Exception {
         when(mCb.getInterfaceVersion()).thenReturn(12 /* assign an older interface aidl version */);
@@ -4331,15 +4450,11 @@ public abstract class IpClientIntegrationTestCommon {
         startIpClientProvisioning(config);
         verify(mCb, timeout(TEST_TIMEOUT_MS)).setFallbackMulticastFilter(true);
 
-        final List<ByteBuffer> options = new ArrayList<ByteBuffer>();
-        options.add(buildPioOption(3600, 1800, "2001:db8:1::/64")); // PIO
-        options.add(buildRdnssOption(3600, dnsServer));             // RDNSS
         // If target IP of address resolution is default router's IPv6 link-local address,
         // then we should not take SLLA option in RA.
-        if (!targetIp.equals(ROUTER_LINK_LOCAL)) {
-            options.add(buildSllaOption());                         // SLLA
-        }
-        final ByteBuffer ra = buildRaPacket(options.toArray(new ByteBuffer[options.size()]));
+        final ByteBuffer ra = buildRaPacket(TEST_IPV6_PREFIX, dnsServer,
+                3600 /* validLifetime */, 1800 /* preferredLifetime */, 3600 /* dnsLifetime */,
+                !targetIp.equals(ROUTER_LINK_LOCAL) /* shouldIncludeSlla */);
         final Inet6Address dnsServerIp = ipv6Addr(dnsServer);
         final LinkProperties lp = performDualStackProvisioning(ra, dnsServerIp);
         runAsShell(MANAGE_TEST_NETWORKS, () -> createTestNetworkAgentAndRegister(lp));
@@ -4352,7 +4467,7 @@ public abstract class IpClientIntegrationTestCommon {
      * If dstIp is off-link, then targetIp should be the IPv6 default router.
      * The ND cache should not have an entry for targetIp.
      */
-    private void sendPacketToUnreachableNeighbor(Inet6Address dstIp) throws Exception {
+    private void sendPacketToPeer(final InetAddress dstIp) throws Exception {
         final Random random = new Random();
         final byte[] data = new byte[100];
         random.nextBytes(data);
@@ -4388,7 +4503,7 @@ public abstract class IpClientIntegrationTestCommon {
             final Inet6Address targetIp,
             final boolean expectNeighborLost) throws Exception {
         prepareIpReachabilityMonitorAddressResolutionTest(dnsServer, targetIp);
-        sendPacketToUnreachableNeighbor(ipv6Addr(dnsServer));
+        sendPacketToPeer(ipv6Addr(dnsServer));
         expectAndDropMulticastNses(targetIp, expectNeighborLost);
     }
 
@@ -4486,7 +4601,7 @@ public abstract class IpClientIntegrationTestCommon {
     private void runIpReachabilityMonitorEverReachableIpv6NeighborTest(final String dnsServer,
             final Inet6Address targetIp) throws Exception {
         prepareIpReachabilityMonitorAddressResolutionTest(dnsServer, targetIp);
-        sendPacketToUnreachableNeighbor(ipv6Addr(dnsServer));
+        sendPacketToPeer(ipv6Addr(dnsServer));
 
         // Simulate the default router/DNS was reachable by responding to multicast NS(not for DAD).
         NeighborSolicitation ns;
@@ -4857,12 +4972,25 @@ public abstract class IpClientIntegrationTestCommon {
         LinkProperties lp = doIpv6OnlyProvisioning();
         assertNotNull(lp);
         assertEquals(3, lp.getLinkAddresses().size()); // IPv6 privacy, stable privacy, link-local
-        for (LinkAddress la : lp.getLinkAddresses()) {
-            final Inet6Address address = (Inet6Address) la.getAddress();
-            if (address.isLinkLocalAddress()) continue;
-            // Remove IPv6 GUAs from interface.
-            mNetd.interfaceDelAddress(mIfaceName, address.getHostAddress(), la.getPrefixLength());
-        }
+
+        final LinkAddress privacyAddress =
+                IpClient.find(lp.getLinkAddresses(), this::isPrivacyAddress);
+        final LinkAddress stableAddress =
+                IpClient.find(lp.getLinkAddresses(), this::isStablePrivacyAddress);
+        assertNotNull(privacyAddress);
+        assertNotNull(stableAddress);
+
+        // Delete the temporary privacy address before deleting the stable privacy address.
+        // Otherwise, deleting the stable privacy address will also delete the associated
+        // temporary privacy address. If this happens first, then deleting the non-existent
+        // temporary privacy address will throw an EADDRNOTAVAIL error.
+        // TODO: send RTM_DELADDR instead of Netd API.
+        mNetd.interfaceDelAddress(mIfaceName,
+                ((Inet6Address) privacyAddress.getAddress()).getHostAddress(),
+                privacyAddress.getPrefixLength());
+        mNetd.interfaceDelAddress(mIfaceName,
+                ((Inet6Address) stableAddress.getAddress()).getHostAddress(),
+                stableAddress.getPrefixLength());
 
         final ArgumentCaptor<LinkProperties> captor = ArgumentCaptor.forClass(LinkProperties.class);
         verify(mCb, timeout(TEST_TIMEOUT_MS)).onProvisioningFailure(captor.capture());
@@ -6044,7 +6172,6 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
-    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION, enabled = false)
     public void testIgnoreNudFailuresIfTooManyInPastDay_flagOff() throws Exception {
         // NUD failure event count exceeds daily threshold nor weekly.
@@ -6058,7 +6185,6 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
-    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION, enabled = true)
     public void testIgnoreNudFailuresIfTooManyInPastDay_notUpToThreshold()
             throws Exception {
@@ -6090,7 +6216,6 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
-    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION, enabled = false)
     public void testIgnoreNudFailuresIfTooManyInPastWeek_flagOff() throws Exception {
         // NUD failure event count exceeds the weekly threshold, but not daily threshold in the past
@@ -6109,7 +6234,6 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
-    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION, enabled = true)
     public void testIgnoreNudFailuresIfTooManyInPastWeek_notUpToThreshold() throws Exception {
         // NUD failure event count doesn't exceed either weekly threshold nor daily.
@@ -6176,13 +6300,13 @@ public abstract class IpClientIntegrationTestCommon {
         // The first new failure is ignored and written to the database.
         // The total is 10 failures in the last 6 hours, and 20 failures
         // in the past week and day.
-        sendPacketToUnreachableNeighbor(ipv6Addr(IPV6_OFF_LINK_DNS_SERVER));
+        sendPacketToPeer(ipv6Addr(IPV6_OFF_LINK_DNS_SERVER));
         expectAndDropMulticastNses(ROUTER_LINK_LOCAL, false /* expectNeighborLost */);
         assertRetrievedNetworkEventCount(TEST_CLUSTER, 20 /* expectedCountInPastWeek */,
                 20 /* expectedCountInPastDay */, 10 /* expectedCountInPastSixHours */);
 
         // The second new failure is ignored, but not written.
-        sendPacketToUnreachableNeighbor(ipv6Addr(IPV6_ON_LINK_DNS_SERVER));
+        sendPacketToPeer(ipv6Addr(IPV6_ON_LINK_DNS_SERVER));
         expectAndDropMulticastNses(ipv6Addr(IPV6_ON_LINK_DNS_SERVER),
                 false /* expectNeighborLost */);
         assertRetrievedNetworkEventCount(TEST_CLUSTER, 20 /* expectedCountInPastWeek */,
