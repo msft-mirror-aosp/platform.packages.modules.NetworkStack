@@ -2759,7 +2759,12 @@ public class IpClient extends StateMachine {
         // For now only support generating programs for Ethernet frames. If this restriction is
         // lifted the program generator will need its offsets adjusted.
         if (apfCaps.apfPacketFormat != ARPHRD_ETHER) return null;
-        if (SdkLevel.isAtLeastS()) {
+        // For devices declare APFv3+ support but have less than 1024 bytes of RAM available for
+        // the APF, set the APF version to v2. The counter region will use a few hundred bytes of
+        // RAM. If the RAM size is too small, we should reserve that region for program use.
+        if (apfCaps.apfVersionSupported >= 3 && apfCaps.maximumApfProgramSize < 1024) {
+            apfConfig.apfVersionSupported = 2;
+        } else if (SdkLevel.isAtLeastS()) {
             apfConfig.apfVersionSupported = apfCaps.apfVersionSupported;
         } else {
             // In Android R, ApfCapabilities#hasDataAccess() can be modified by OEMs. The
