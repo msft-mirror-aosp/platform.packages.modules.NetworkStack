@@ -53,6 +53,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.junit.runners.Parameterized
 import org.mockito.Mockito.times
 
 const val ETH_HLEN = 14
@@ -68,6 +69,15 @@ class ApfGeneratorTest {
 
     @get:Rule val ignoreRule = DevSdkIgnoreRule()
 
+    // Indicates which apfInterpreter to load.
+    @Parameterized.Parameter
+    var aApfInterpreterVersion: Int = 7
+
+    @Parameterized.Parameters
+    fun data(): Iterable<Any?> {
+        return mutableListOf<Int?>(6, 7)
+    }
+
     private val ramSize = 2048
     private val clampSize = 2048
 
@@ -76,7 +86,7 @@ class ApfGeneratorTest {
 
     @Before
     fun setUp() {
-        apfTestHelpers = ApfTestHelpers()
+        apfTestHelpers = ApfTestHelpers(aApfInterpreterVersion)
     }
 
     @After

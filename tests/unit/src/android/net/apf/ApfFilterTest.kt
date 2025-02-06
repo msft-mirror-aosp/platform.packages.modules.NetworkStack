@@ -117,6 +117,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.junit.runners.Parameterized
 import org.mockito.ArgumentCaptor
 import org.mockito.ArgumentMatchers.any
 import org.mockito.ArgumentMatchers.anyInt
@@ -147,6 +148,15 @@ class ApfFilterTest {
 
     @get:Rule
     val ignoreRule = DevSdkIgnoreRule()
+
+    // Indicates which apfInterpreter to load.
+    @Parameterized.Parameter
+    var apfInterpreterVersion: Int = 7
+
+    @Parameterized.Parameters
+    fun data(): Iterable<Any?> {
+        return mutableListOf<Int?>(6, 7)
+    }
 
     @Mock
     private lateinit var context: Context
@@ -275,7 +285,7 @@ class ApfFilterTest {
 
     @Before
     fun setUp() {
-        apfTestHelpers = ApfTestHelpers()
+        apfTestHelpers = ApfTestHelpers(apfInterpreterVersion)
         MockitoAnnotations.initMocks(this)
         // mock anycast6 address from /proc/net/anycast6
         doReturn(hostAnycast6Addresses).`when`(dependencies).getAnycast6Addresses(any())
