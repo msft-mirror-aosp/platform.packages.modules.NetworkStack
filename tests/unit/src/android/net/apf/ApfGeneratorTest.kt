@@ -54,7 +54,6 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.Parameterized
-import org.mockito.Mockito.times
 
 const val ETH_HLEN = 14
 const val IPV4_HLEN = 20
@@ -67,16 +66,20 @@ const val IPPROTO_UDP = 17
 @SmallTest
 class ApfGeneratorTest {
 
+    companion object {
+        @Parameterized.Parameters
+        @JvmStatic
+        fun data(): Iterable<Any?> {
+            return mutableListOf<Int?>(6, 7)
+        }
+    }
+
     @get:Rule val ignoreRule = DevSdkIgnoreRule()
 
     // Indicates which apfInterpreter to load.
-    @Parameterized.Parameter
+    @Parameterized.Parameter(0)
+    @JvmField
     var aApfInterpreterVersion: Int = 7
-
-    @Parameterized.Parameters
-    fun data(): Iterable<Any?> {
-        return mutableListOf<Int?>(6, 7)
-    }
 
     private val ramSize = 2048
     private val clampSize = 2048
