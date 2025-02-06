@@ -295,7 +295,7 @@ public class ApfFilter {
         /**
          * Install the APF program to firmware.
          */
-        boolean installPacketFilter(@NonNull byte[] filter);
+        boolean installPacketFilter(@NonNull byte[] filter, @NonNull String filterConfig);
 
         /**
          * Read the APF RAM from firmware.
@@ -1775,7 +1775,7 @@ public class ApfFilter {
             gen.addCountAndDropIfR0NotEquals(bytesToBEInt(mIPv4Address), DROPPED_ARP_OTHER_HOST);
 
             ApfV6Generator v6Gen = tryToConvertToApfV6Generator(gen);
-            if (v6Gen != null && mHandleArpOffload) {
+            if (enableArpOffload()) {
                 // Ethernet requires that all packets be at least 60 bytes long
                 v6Gen.addAllocate(60)
                         .addPacketCopy(ETHER_SRC_ADDR_OFFSET, ETHER_ADDR_LEN)
@@ -3157,8 +3157,43 @@ public class ApfFilter {
         gen.addCountTrampoline();
     }
 
+    private String getApfConfigMessage() {
+        final StringBuilder sb = new StringBuilder();
+        sb.append("{ ");
+        sb.append("mcast: ");
+        sb.append(mMulticastFilter ? "DROP" : "ALLOW");
+        sb.append(", ");
+        sb.append("offloads: ");
+        sb.append("[ ");
+        if (enableArpOffload()) {
+            sb.append("ARP, ");
+        }
+        if (enableNdOffload()) {
+            sb.append("ND, ");
+        }
+        if (enableIgmpOffload()) {
+            sb.append("IGMP, ");
+        }
+        if (enableIpv4PingOffload()) {
+            sb.append("Ping4, ");
+        }
+        if (enableMdns4Offload()) {
+            sb.append("Mdns4, ");
+        }
+        if (enableMdns6Offload()) {
+            sb.append("Mdns6, ");
+        }
+        sb.append("] ");
+        sb.append("RAs: ");
+        sb.append(mRas.size());
+        sb.append(" mDNSs: ");
+        sb.append(mOffloadRules.size());
+        sb.append(" }");
+        return sb.toString();
+    }
+
     private void installPacketFilter(byte[] program) {
-        if (!mApfController.installPacketFilter(program)) {
+        if (!mApfController.installPacketFilter(program, getApfConfigMessage())) {
             sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
         }
     }
@@ -3494,6 +3529,11 @@ public class ApfFilter {
             mIPv4McastAddrsExcludeAllHost.remove(IPV4_ADDR_ALL_HOST_MULTICAST);
             installNewProgram();
         }
+    }
+
+    @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)
+    private boolean enableArpOffload() {
+        return mHandleArpOffload && useApfV6Generator();
     }
 
     @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)

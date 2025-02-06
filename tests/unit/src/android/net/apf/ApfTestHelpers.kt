@@ -23,6 +23,7 @@ import android.net.apf.BaseApfGenerator.APF_VERSION_6
 import com.android.net.module.util.HexDump
 import kotlin.test.assertEquals
 import org.mockito.ArgumentCaptor
+import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito.clearInvocations
 import org.mockito.Mockito.timeout
 import org.mockito.Mockito.verify
@@ -313,7 +314,8 @@ class ApfTestHelpers(apfInterpreterVersion: Int){
         )
 
         verify(apfController, timeout(TIMEOUT_MS).times(installCnt)).installPacketFilter(
-            programCaptor.capture()
+            programCaptor.capture(),
+            any()
         )
 
         clearInvocations<Any>(apfController)
