@@ -38,6 +38,7 @@ import com.android.net.module.util.NetworkStackConstants.ETHER_TYPE_OFFSET
 import com.android.net.module.util.NetworkStackConstants.ICMPV6_ROUTER_SOLICITATION
 import com.android.testutils.DevSdkIgnoreRunner
 import kotlin.test.assertEquals
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -56,6 +57,12 @@ class ApfStandaloneTest {
     private val etherTypeDenyList = listOf(0x88A2, 0x88A4, 0x88B8, 0x88CD, 0x88E1, 0x88E3)
     private val ramSize = 1024
     private val clampSize = 1024
+    private lateinit var apfTestHelpers: ApfTestHelpers
+
+    @Before
+    fun setUp() {
+        apfTestHelpers = ApfTestHelpers()
+    }
 
     fun runApfTest(isSuspendMode: Boolean) {
         val program = generateApfV4Program(isSuspendMode)
@@ -78,7 +85,7 @@ class ApfStandaloneTest {
         val packetBadEtherType =
                 HexDump.hexStringToByteArray("ffffffffffff047bcb463fb588a201")
         val dataRegion = ByteArray(Counter.totalSize()) { 0 }
-        ApfTestHelpers.assertVerdict(
+        apfTestHelpers.assertVerdict(
             APF_VERSION_4,
             ApfTestHelpers.DROP,
             program,
@@ -154,7 +161,7 @@ class ApfStandaloneTest {
             c0a801013204c0a80164ff
         """.replace("\\s+".toRegex(), "").trim()
         val dhcpRequestPkt = HexDump.hexStringToByteArray(dhcpRequestPktRawBytes)
-        ApfTestHelpers.assertVerdict(
+        apfTestHelpers.assertVerdict(
             APF_VERSION_4,
             ApfTestHelpers.DROP,
             program,
@@ -195,7 +202,7 @@ class ApfStandaloneTest {
             0000000000000000000000028500c81d00000000
         """.replace("\\s+".toRegex(), "").trim()
         val rsPkt = HexDump.hexStringToByteArray(rsPktRawBytes)
-        ApfTestHelpers.assertVerdict(APF_VERSION_4, ApfTestHelpers.DROP, program, rsPkt, dataRegion)
+        apfTestHelpers.assertVerdict(APF_VERSION_4, ApfTestHelpers.DROP, program, rsPkt, dataRegion)
         assertEquals(mapOf<Counter, Long>(
                 Counter.TOTAL_PACKETS to 3,
                 Counter.DROPPED_RS to 1,
@@ -238,7 +245,7 @@ class ApfStandaloneTest {
                 00000000
             """.replace("\\s+".toRegex(), "").trim()
             val pingRequestPkt = HexDump.hexStringToByteArray(pingRequestPktRawBytes)
-            ApfTestHelpers.assertVerdict(
+            apfTestHelpers.assertVerdict(
                 APF_VERSION_4,
                 ApfTestHelpers.DROP,
                 program,

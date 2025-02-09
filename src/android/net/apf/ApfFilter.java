@@ -27,11 +27,14 @@ import static android.net.apf.ApfConstants.ARP_TARGET_IP_ADDRESS_OFFSET;
 import static android.net.apf.ApfConstants.DHCP_CLIENT_MAC_OFFSET;
 import static android.net.apf.ApfConstants.DHCP_CLIENT_PORT;
 import static android.net.apf.ApfConstants.DHCP_SERVER_PORT;
+import static android.net.apf.ApfConstants.DNS_HEADER_LEN;
 import static android.net.apf.ApfConstants.ECHO_PORT;
 import static android.net.apf.ApfConstants.ETH_DEST_ADDR_OFFSET;
 import static android.net.apf.ApfConstants.ETH_ETHERTYPE_OFFSET;
 import static android.net.apf.ApfConstants.ETH_HEADER_LEN;
 import static android.net.apf.ApfConstants.ETH_MULTICAST_IGMP_V3_ALL_MULTICAST_ROUTERS_ADDRESS;
+import static android.net.apf.ApfConstants.ETH_MULTICAST_MDNS_V4_MAC_ADDRESS;
+import static android.net.apf.ApfConstants.ETH_MULTICAST_MDNS_V6_MAC_ADDRESS;
 import static android.net.apf.ApfConstants.ETH_TYPE_MAX;
 import static android.net.apf.ApfConstants.ETH_TYPE_MIN;
 import static android.net.apf.ApfConstants.FIXED_ARP_REPLY_HEADER;
@@ -74,6 +77,7 @@ import static android.net.apf.ApfConstants.IPV4_ALL_IGMPV3_MULTICAST_ROUTERS_ADD
 import static android.net.apf.ApfConstants.IPV4_ANY_HOST_ADDRESS;
 import static android.net.apf.ApfConstants.IPV4_BROADCAST_ADDRESS;
 import static android.net.apf.ApfConstants.IPV4_DEST_ADDR_OFFSET;
+import static android.net.apf.ApfConstants.IPV4_DNS_QDCOUNT_NO_OPTIONS_OFFSET;
 import static android.net.apf.ApfConstants.IPV4_FRAGMENT_MORE_FRAGS_MASK;
 import static android.net.apf.ApfConstants.IPV4_FRAGMENT_OFFSET_MASK;
 import static android.net.apf.ApfConstants.IPV4_FRAGMENT_OFFSET_OFFSET;
@@ -83,8 +87,12 @@ import static android.net.apf.ApfConstants.IPV4_SRC_ADDR_OFFSET;
 import static android.net.apf.ApfConstants.IPV4_ROUTER_ALERT_OPTION;
 import static android.net.apf.ApfConstants.IPV4_ROUTER_ALERT_OPTION_LEN;
 import static android.net.apf.ApfConstants.IPV4_TOTAL_LENGTH_OFFSET;
+import static android.net.apf.ApfConstants.IPV4_UDP_DESTINATION_CHECKSUM_NO_OPTIONS_OFFSET;
+import static android.net.apf.ApfConstants.IPV4_UDP_DESTINATION_PORT_NO_OPTIONS_OFFSET;
+import static android.net.apf.ApfConstants.IPV4_UDP_PAYLOAD_NO_OPTIONS_OFFSET;
 import static android.net.apf.ApfConstants.IPV6_ALL_NODES_ADDRESS;
 import static android.net.apf.ApfConstants.IPV6_DEST_ADDR_OFFSET;
+import static android.net.apf.ApfConstants.IPV6_DNS_QDCOUNT_OFFSET;
 import static android.net.apf.ApfConstants.IPV6_FLOW_LABEL_LEN;
 import static android.net.apf.ApfConstants.IPV6_FLOW_LABEL_OFFSET;
 import static android.net.apf.ApfConstants.IPV6_HEADER_LEN;
@@ -93,6 +101,8 @@ import static android.net.apf.ApfConstants.IPV6_NEXT_HEADER_OFFSET;
 import static android.net.apf.ApfConstants.IPV6_PAYLOAD_LEN_OFFSET;
 import static android.net.apf.ApfConstants.IPV6_SOLICITED_NODES_PREFIX;
 import static android.net.apf.ApfConstants.IPV6_SRC_ADDR_OFFSET;
+import static android.net.apf.ApfConstants.IPV6_UDP_DESTINATION_CHECKSUM_OFFSET;
+import static android.net.apf.ApfConstants.IPV6_UDP_DESTINATION_PORT_OFFSET;
 import static android.net.apf.ApfConstants.IPV6_UNSPECIFIED_ADDRESS;
 import static android.net.apf.ApfConstants.TCP_HEADER_SIZE_OFFSET;
 import static android.net.apf.ApfConstants.TCP_UDP_DESTINATION_PORT_OFFSET;
@@ -127,6 +137,7 @@ import static android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_INVALID;
 import static android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_OTHER_HOST;
 import static android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_REPLIED_NON_DAD;
 import static android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_ROUTER_SOLICITATION;
+import static android.net.apf.ApfCounterTracker.Counter.DROPPED_MDNS;
 import static android.net.apf.ApfCounterTracker.Counter.DROPPED_RA;
 import static android.net.apf.ApfCounterTracker.Counter.FILTER_AGE_16384THS;
 import static android.net.apf.ApfCounterTracker.Counter.FILTER_AGE_SECONDS;
@@ -134,6 +145,14 @@ import static android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_BROADCAST_REP
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_REQUEST;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_UNICAST_REPLY;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_DHCP;
+import static android.net.apf.ApfConstants.IPv6_UDP_PAYLOAD_OFFSET;
+import static android.net.apf.ApfConstants.MDNS_IPV4_ADDR;
+import static android.net.apf.ApfConstants.MDNS_IPV4_ADDR_IN_LONG;
+import static android.net.apf.ApfConstants.MDNS_IPV6_ADDR;
+import static android.net.apf.ApfConstants.MDNS_PORT;
+import static android.net.apf.ApfConstants.UDP_HEADER_LEN;
+import static android.net.apf.ApfConstants.MDNS_PORT_IN_BYTES;
+import static android.net.apf.ApfCounterTracker.Counter.DROPPED_MDNS_INVALID;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_ETHER_OUR_SRC_MAC;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV4;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV4_FROM_DHCPV4_SERVER;
@@ -145,6 +164,7 @@ import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_NO_SLLA_O
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_TENTATIVE;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_NO_ADDRESS;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_UNICAST_NON_ICMP;
+import static android.net.apf.ApfCounterTracker.Counter.PASSED_MDNS;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_MLD;
 import static android.net.apf.ApfCounterTracker.Counter.PASSED_NON_IP_UNICAST;
 import static android.net.apf.ApfCounterTracker.Counter.TOTAL_PACKETS;
@@ -171,6 +191,7 @@ import static android.system.OsConstants.SOCK_CLOEXEC;
 import static android.system.OsConstants.SOCK_NONBLOCK;
 import static android.system.OsConstants.SOCK_RAW;
 
+import static com.android.net.module.util.CollectionUtils.concatArrays;
 import static com.android.net.module.util.NetworkStackConstants.ETHER_ADDR_LEN;
 import static com.android.net.module.util.NetworkStackConstants.ETHER_BROADCAST;
 import static com.android.net.module.util.NetworkStackConstants.ETHER_DST_ADDR_OFFSET;
@@ -432,6 +453,9 @@ public class ApfFilter {
     // Our tentative IPv6 addresses
     private Set<Inet6Address> mIPv6TentativeAddresses = new ArraySet<>();
 
+    // Our link-local IPv6 address
+    private Inet6Address mIPv6LinkLocalAddress;
+
     // Our joined IPv4 multicast addresses
     @VisibleForTesting
     final Set<Inet4Address> mIPv4MulticastAddresses = new ArraySet<>();
@@ -462,10 +486,7 @@ public class ApfFilter {
         // in an SSID. This is limited to APFv3 devices because this large write triggers
         // a crash on some older devices (b/78905546).
         if (hasDataAccess(mApfVersionSupported)) {
-            byte[] zeroes = new byte[mApfRamSize];
-            if (!mApfController.installPacketFilter(zeroes)) {
-                sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
-            }
+            installPacketFilter(new byte[mApfRamSize]);
         }
     }
 
@@ -486,7 +507,7 @@ public class ApfFilter {
         if (maximumApfProgramSize > mInstallableProgramSizeClamp) {
             maximumApfProgramSize = mInstallableProgramSizeClamp;
         }
-        mMaximumApfProgramSize = maximumApfProgramSize;
+        mMaximumApfProgramSize = Math.max(0, maximumApfProgramSize);
         mApfController = apfController;
         mInterfaceParams = ifParams;
         mMulticastFilter = config.multicastFilter;
@@ -1788,9 +1809,7 @@ public class ApfFilter {
         final String skipIpv4PingFilter = gen.getUniqueLabel();
         // Check 1) it's not a fragment. 2) it's ICMP.
         // If condition not match then skip the ping filter logic
-        gen.addLoad32(R0, IPV4_FRAGMENT_OFFSET_OFFSET);
-        gen.addAnd((IPV4_FRAGMENT_MORE_FRAGS_MASK | IPV4_FRAGMENT_OFFSET_MASK) << 16 | 0xFF);
-        gen.addJumpIfR0NotEquals(IPPROTO_ICMP, skipIpv4PingFilter);
+        gen.addJumpIfNotUnfragmentedIPv4Protocol(IPPROTO_ICMP, skipIpv4PingFilter);
 
         // Only offload unicast Ipv4 ping request for now.
         // While we could potentially support offloading multicast and broadcast ping requests in
@@ -1851,12 +1870,93 @@ public class ApfFilter {
     }
 
     /**
+     * Generates filter code to handle IPv4 mDNS packets.
+     * <p>
+     * On entry, this filter knows it is processing an IPv4 packet. It will then process all IPv4
+     * mDNS packets, either passing or dropping them. IPv4 non-mDNS packets are skipped.
+     *
+     * @param gen the APF generator to generate the filter code
+     * @param labelCheckMdnsQueryPayload the label to jump to for checking the mDNS query payload
+     */
+    private void generateIPv4MdnsFilter(ApfV6GeneratorBase<?> gen,
+            String labelCheckMdnsQueryPayload)
+            throws IllegalInstructionException {
+        final String skipMdnsFilter = gen.getUniqueLabel();
+
+        // For APF performance reasons, we check udp destination port before confirming it is
+        // non-fragmented IPv4 udp packet. We proceed only if the destination port is 5353 (mDNS).
+        // Otherwise, skip filtering.
+        gen.addLoadFromMemory(R0, MemorySlot.PACKET_SIZE)
+                .addJumpIfR0LessThan(
+                        ETH_HEADER_LEN + IPV4_HEADER_MIN_LEN + UDP_HEADER_LEN,
+                        skipMdnsFilter)
+                .addLoad16(R0, IPV4_UDP_DESTINATION_PORT_NO_OPTIONS_OFFSET)
+                .addJumpIfR0NotEquals(MDNS_PORT, skipMdnsFilter);
+
+        // If the destination MAC address is not 01:00:5e:00:00:fb (the mDNS multicast MAC
+        // address for IPv4 mDNS packet) or the device's MAC address, skip filtering.
+        // We need to check both the mDNS multicast MAC address and the device's MAC address
+        // because multicast to unicast conversion might have occurred.
+        gen.addLoadImmediate(R0, ETH_DEST_ADDR_OFFSET)
+                .addJumpIfBytesAtR0EqualNoneOf(
+                        List.of(mHardwareAddress, ETH_MULTICAST_MDNS_V4_MAC_ADDRESS),
+                        skipMdnsFilter
+                );
+
+        // Ignore packets with IPv4 options (header size not equal to 20) as they are rare.
+        gen.addLoadFromMemory(R0, MemorySlot.IPV4_HEADER_SIZE)
+                .addJumpIfR0NotEquals(IPV4_HEADER_MIN_LEN, skipMdnsFilter);
+
+        // Skip filtering if the packet is not a non-fragmented IPv4 UDP packet.
+        gen.addJumpIfNotUnfragmentedIPv4Protocol(IPPROTO_UDP, skipMdnsFilter);
+
+        // Skip filtering if the IPv4 destination address is not 224.0.0.251 (the mDNS multicast
+        // address).
+        // Some devices can use unicast queries for mDNS to improve performance and reliability.
+        // These packets are not currently offloaded and will be passed by APF and handled
+        // by NsdService.
+        gen.addLoad32(R0, IPV4_DEST_ADDR_OFFSET)
+                .addJumpIfR0NotEquals(MDNS_IPV4_ADDR_IN_LONG, skipMdnsFilter);
+
+        // Drop the packet if the IPv4 mDNS packet size is too small.
+        gen.addLoadFromMemory(R0, MemorySlot.PACKET_SIZE)
+                .addCountAndDropIfR0LessThan(
+                        ETH_HEADER_LEN + IPV4_HEADER_MIN_LEN + UDP_HEADER_LEN + DNS_HEADER_LEN,
+                        DROPPED_MDNS_INVALID
+                );
+
+        // We now know that the packet is an mDNS packet,
+        // i.e., a non-fragmented IPv4 UDP packet destined for port 5353 with the expected
+        // destination MAC and IP addresses.
+
+        // If the packet contains questions, check the query payload. Otherwise, check the
+        // reply payload.
+        gen.addLoad16(R0, IPV4_DNS_QDCOUNT_NO_OPTIONS_OFFSET)
+                // Set the UDP payload offset in R1 before potentially jumping to the payload
+                // check logic.
+                .addLoadImmediate(R1, IPV4_UDP_PAYLOAD_NO_OPTIONS_OFFSET)
+                .addJumpIfR0NotEquals(0, labelCheckMdnsQueryPayload);
+
+        // TODO: check the reply payload.
+        if (mMulticastFilter) {
+            gen.addCountAndDrop(DROPPED_MDNS);
+        } else {
+            gen.addCountAndPass(PASSED_MDNS);
+        }
+
+        gen.defineLabel(skipMdnsFilter);
+    }
+
+    /**
      * Generate filter code to process IPv4 packets. Execution of this code ends in either the
      * DROP_LABEL or PASS_LABEL and does not fall off the end.
      * Preconditions:
      *  - Packet being filtered is IPv4
+     *
+     * @param gen the APF generator to generate the filter code
+     * @param labelCheckMdnsQueryPayload the label to jump to for checking the mDNS query payload
      */
-    private void generateIPv4Filter(ApfV4GeneratorBase<?> gen)
+    private void generateIPv4Filter(ApfV4GeneratorBase<?> gen, String labelCheckMdnsQueryPayload)
             throws IllegalInstructionException {
         // Here's a basic summary of what the IPv4 filter program does:
         //
@@ -1867,6 +1967,21 @@ public class ApfFilter {
         //     pass
         //   else
         //     drop
+        //
+        // (APFv6+ specific logic)
+        // if it's mDNS:
+        //   if it's a query:
+        //     if the query matches one of the offload rules:
+        //       transmit mDNS reply and drop
+        //     else if filtering multicast (i.e. multicast lock not held):
+        //       drop
+        //     else
+        //       pass
+        //   else:
+        //     if filtering multicast (i.e. multicast lock not held):
+        //       drop
+        //     else
+        //       pass
         //
         // (APFv6+ specific logic)
         // if it's IGMP:
@@ -1929,6 +2044,10 @@ public class ApfFilter {
             return;
         }
 
+        if (enableMdns4Offload()) {
+            generateIPv4MdnsFilter((ApfV6GeneratorBase<?>) gen, labelCheckMdnsQueryPayload);
+        }
+
         if (enableIgmpOffload()) {
             generateIgmpFilter((ApfV6GeneratorBase<?>) gen);
         }
@@ -1938,11 +2057,7 @@ public class ApfFilter {
 
             // Pass DHCP addressed to us.
             // Check 1) it's not a fragment. 2) it's UDP.
-            // Load 16 bit frag flags/offset field, 8 bit ttl, 8 bit protocol
-            gen.addLoad32(R0, IPV4_FRAGMENT_OFFSET_OFFSET);
-            // see above for explanation of this constant
-            gen.addAnd((IPV4_FRAGMENT_MORE_FRAGS_MASK | IPV4_FRAGMENT_OFFSET_MASK) << 16 | 0xFF);
-            gen.addJumpIfR0NotEquals(IPPROTO_UDP, skipDhcpv4Filter);
+            gen.addJumpIfNotUnfragmentedIPv4Protocol(IPPROTO_UDP, skipDhcpv4Filter);
             // Check it's addressed to DHCP client port.
             gen.addLoadFromMemory(R1, MemorySlot.IPV4_HEADER_SIZE);
             gen.addLoad16Indexed(R0, TCP_UDP_DESTINATION_PORT_OFFSET);
@@ -2220,17 +2335,108 @@ public class ApfFilter {
     }
 
     /**
+     * Generates filter code to handle IPv6 mDNS packets.
+     * <p>
+     * On entry, this filter knows it is processing an IPv6 packet. It will then process all IPv6
+     * mDNS packets, either passing or dropping them. IPv6 non-mDNS packets are skipped.
+     *
+     * @param gen the APF generator to generate the filter code
+     * @param labelCheckMdnsQueryPayload the label to jump to for checking the mDNS query payload
+     */
+    private void generateIPv6MdnsFilter(ApfV6GeneratorBase<?> gen,
+            String labelCheckMdnsQueryPayload) throws IllegalInstructionException {
+        final String skipMdnsFilter = gen.getUniqueLabel();
+
+        // For APF performance reasons, we check udp destination port before confirming it is IPv6
+        // udp packet. We proceed only if the destination port is 5353 (mDNS). Otherwise, skip
+        // filtering.
+        gen.addLoadFromMemory(R0, MemorySlot.PACKET_SIZE)
+                .addJumpIfR0LessThan(
+                        ETH_HEADER_LEN + IPV6_HEADER_LEN + UDP_HEADER_LEN,
+                        skipMdnsFilter)
+                .addLoad16(R0, IPV6_UDP_DESTINATION_PORT_OFFSET)
+                .addJumpIfR0NotEquals(MDNS_PORT, skipMdnsFilter);
+
+        // If the destination MAC address is not 33:33:00:00:00:fb (the mDNS multicast MAC
+        // address for IPv6 mDNS packet) or the device's MAC address, skip filtering.
+        // We need to check both the mDNS multicast MAC address and the device's MAC address
+        // because multicast to unicast conversion might have occurred.
+        gen.addLoadImmediate(R0, ETH_DEST_ADDR_OFFSET)
+                .addJumpIfBytesAtR0EqualNoneOf(
+                        List.of(mHardwareAddress, ETH_MULTICAST_MDNS_V6_MAC_ADDRESS),
+                        skipMdnsFilter
+                );
+
+        // Skip filtering if the packet is not an IPv6 UDP packet.
+        gen.addLoad8(R0, IPV6_NEXT_HEADER_OFFSET)
+                .addJumpIfR0NotEquals(IPPROTO_UDP, skipMdnsFilter);
+
+        // Skip filtering if the IPv6 destination address is not ff02::fb (the mDNS multicast
+        // IPv6 address).
+        // Some devices can use unicast queries for mDNS to improve performance and reliability.
+        // These packets are not currently offloaded and will be passed by APF and handled
+        // by NsdService.
+        gen.addLoadImmediate(R0, IPV6_DEST_ADDR_OFFSET)
+                .addJumpIfBytesAtR0NotEqual(MDNS_IPV6_ADDR, skipMdnsFilter);
+
+        // Drop the packet if the IPv6 mDNS packet size is too small.
+        gen.addLoadFromMemory(R0, MemorySlot.PACKET_SIZE)
+                .addCountAndDropIfR0LessThan(
+                        ETH_HEADER_LEN + IPV6_HEADER_LEN + UDP_HEADER_LEN + DNS_HEADER_LEN,
+                        DROPPED_MDNS_INVALID);
+
+        // We now know that the packet is an mDNS packet,
+        // i.e., an IPv6 UDP packet destined for port 5353 with the expected destination MAC and IP
+        // addresses.
+
+        // If the packet contains questions, check the query payload. Otherwise, check the
+        // reply payload.
+        gen.addLoad16(R0, IPV6_DNS_QDCOUNT_OFFSET)
+                // Set the UDP payload offset in R1 before potentially jumping to the payload
+                // check logic.
+                .addLoadImmediate(R1, IPv6_UDP_PAYLOAD_OFFSET)
+                .addJumpIfR0NotEquals(0, labelCheckMdnsQueryPayload);
+
+        // TODO: check the reply payload.
+        if (mMulticastFilter) {
+            gen.addCountAndDrop(DROPPED_MDNS);
+        } else {
+            gen.addCountAndPass(PASSED_MDNS);
+        }
+
+        gen.defineLabel(skipMdnsFilter);
+    }
+
+    /**
      * Generate filter code to process IPv6 packets. Execution of this code ends in either the
      * DROP_LABEL or PASS_LABEL, or falls off the end for ICMPv6 packets.
      * Preconditions:
      *  - Packet being filtered is IPv6
+     *
+     * @param gen the APF generator to generate the filter code
+     * @param labelCheckMdnsQueryPayload the label to jump to for checking the mDNS query payload
      */
-    private void generateIPv6Filter(ApfV4GeneratorBase<?> gen)
+    private void generateIPv6Filter(ApfV4GeneratorBase<?> gen, String labelCheckMdnsQueryPayload)
             throws IllegalInstructionException {
         // Here's a basic summary of what the IPv6 filter program does:
         //
         // if there is a hop-by-hop option present (e.g. MLD query)
         //   pass
+        //
+        // (APFv6+ specific logic)
+        // if it's mDNS:
+        //   if it's a query:
+        //     if the query matches one of the offload rules:
+        //       transmit mDNS reply and drop
+        //     else if filtering multicast (i.e. multicast lock not held):
+        //       drop
+        //     else
+        //       pass
+        //   else:
+        //     if filtering multicast (i.e. multicast lock not held):
+        //       drop
+        //     else
+        //       pass
         //
         // if we're dropping multicast
         //   if it's not ICMPv6 or it's ICMPv6 but we're in doze mode:
@@ -2283,6 +2489,10 @@ public class ApfFilter {
         // MLD packets set the router-alert hop-by-hop option.
         // TODO: be smarter about not blindly passing every packet with HBH options.
         gen.addCountAndPassIfR0Equals(IPPROTO_HOPOPTS, PASSED_MLD);
+
+        if (enableMdns6Offload()) {
+            generateIPv6MdnsFilter((ApfV6GeneratorBase<?>) gen, labelCheckMdnsQueryPayload);
+        }
 
         // Drop multicast if the multicast filter is enabled.
         if (mMulticastFilter) {
@@ -2523,17 +2733,7 @@ public class ApfFilter {
         final String checkIgmpV1orV2 = v6Gen.getUniqueLabel();
 
         // Check 1) it's not a fragment. 2) it's IGMP.
-        // Load 16 bit frag flags/offset field, 8 bit ttl, 8 bit protocol.
-        v6Gen.addLoad32(R0, IPV4_FRAGMENT_OFFSET_OFFSET)
-        // Mask out all but the reserved and don't fragment bits, plus the TTL field.
-        // Because:
-        //   IPV4_FRAGMENT_OFFSET_MASK = 0x1fff
-        //   IPV4_FRAGMENT_MORE_FRAGS_MASK = 0x2000
-        // hence this constant ends up being 0x3FFF00FF.
-        // We want the more flag bit and offset to be 0 (ie. not a fragment),
-        // so after this masking we end up with just the ip protocol (hopefully IGMP).
-                .addAnd((IPV4_FRAGMENT_MORE_FRAGS_MASK | IPV4_FRAGMENT_OFFSET_MASK) << 16 | 0xFF)
-                .addJumpIfR0NotEquals(IPV4_PROTOCOL_IGMP, skipIgmpFilter);
+        v6Gen.addJumpIfNotUnfragmentedIPv4Protocol(IPV4_PROTOCOL_IGMP, skipIgmpFilter);
 
         // Calculate the IPv4 payload length: (total length - IPv4 header length).
         // Memory slot 0 is occupied temporarily to store the length.
@@ -2640,6 +2840,168 @@ public class ApfFilter {
                 gen.getUniqueLabel());
     }
 
+    private byte[] createMdns4PktFromEthDstToIPv4Tos(boolean enabled) {
+        if (!enabled) {
+            return null;
+        }
+        return concatArrays(
+                ETH_MULTICAST_MDNS_V4_MAC_ADDRESS,
+                mHardwareAddress,
+                new byte[]{
+                        0x08, 0x00, // ethertype: IPv4
+                        0x45, 0x00, // version, IHL, DSCP, ECN,
+                });
+    }
+
+    private byte[] createMdns6PktFromEthDstToIPv6FlowLabel(boolean enabled) {
+        if (!enabled) {
+            return null;
+        }
+        return concatArrays(
+                ETH_MULTICAST_MDNS_V6_MAC_ADDRESS,
+                mHardwareAddress,
+                new byte[]{
+                        (byte) 0x86, (byte) 0xdd, // ethertype: IPv6
+                        0x60, 0x00, 0x00, 0x00, // version, traffic class, flow label
+                });
+    }
+
+
+    private byte[] createMdns4PktFromIPv4IdToUdpDport(boolean enabled) {
+        if (!enabled) {
+            return null;
+        }
+        return concatArrays(
+                new byte[]{
+                        0x00, 0x00, // identification
+                        (byte) (IPV4_FLAG_DF >> 8), 0, // flags, fragment offset
+                        (byte) 0xff, // set TTL to 255 per rfc6762#section-11
+                        (byte) IPPROTO_UDP,
+                        0x00, 0x00, // checksum, it's a placeholder that will be filled in later.
+                },
+                mIPv4Address,
+                MDNS_IPV4_ADDR,
+                MDNS_PORT_IN_BYTES, // source port
+                MDNS_PORT_IN_BYTES); // destination port
+    }
+
+    private byte[] createMdns6PktFromIPv6NextHdrToUdpDport(boolean enabled) {
+        if (!enabled) {
+            return null;
+        }
+        return concatArrays(
+                new byte[]{
+                        (byte) IPPROTO_UDP,
+                        (byte) 0xff, // set hop limit to 255 per rfc6762#section-11
+                },
+                mIPv6LinkLocalAddress.getAddress(),
+                MDNS_IPV6_ADDR,
+                MDNS_PORT_IN_BYTES, // source port
+                MDNS_PORT_IN_BYTES); // destination port
+    }
+
+    /**
+     * Generates filter code to process an mDNS payload against offload rules.
+     * The generated filter code is guaranteed to process all IPv4 and IPv6 mDNS packets,
+     * ensuring each packet is either passed or dropped.
+     * <p>
+     * On entry, the packet is known to be an IPv4/IPv6 mDNS query packet, and register R1
+     * is set to the offset of the beginning of the UDP payload (the DNS header).
+     *
+     * @param gen the APF generator to generate the filter code
+     */
+    private void generateMdnsQueryOffload(ApfV6GeneratorBase<?> gen)
+            throws IllegalInstructionException {
+        // TODO: Implement failover logic for insufficient APF RAM to offload all records. When
+        //  APF RAM is not enough, rules with lower priority should be transitioned to passthrough
+        //  mode (e.g., if a QNAME matches, the packet should be passed). If RAM remains
+        //  insufficient even with all rules in passthrough mode, the mDNS filter should fail open.
+
+        // Set R0 to the offset of the beginning of the UDP payload (the DNS header)
+        gen.addSwap();
+
+        final boolean enableMdns4 = enableMdns4Offload();
+        final boolean enableMdns6 = enableMdns6Offload();
+        final byte[] mdns4EthDstToTos = createMdns4PktFromEthDstToIPv4Tos(enableMdns4);
+        final byte[] mdns4IdToUdpDport = createMdns4PktFromIPv4IdToUdpDport(enableMdns4);
+        final byte[] mdns6EthDstToFlowLabel = createMdns6PktFromEthDstToIPv6FlowLabel(enableMdns6);
+        final byte[] mdns6NextHdrToUdpDport = createMdns6PktFromIPv6NextHdrToUdpDport(enableMdns6);
+
+        for (MdnsOffloadRule rule : mOffloadRules) {
+            final String ruleNotMatch = gen.getUniqueLabel();
+            final String ruleMatch = gen.getUniqueLabel();
+            final String offloadIPv6Mdns = gen.getUniqueLabel();
+
+            for (MdnsOffloadRule.Matcher matcher : rule.mMatchers) {
+                gen.addJumpIfPktAtR0ContainDnsQ(matcher.mQnames, matcher.mQtype, ruleMatch);
+            }
+
+            gen.addJump(ruleNotMatch);
+
+            gen.defineLabel(ruleMatch);
+
+            if (enableMdns4 && enableMdns6) {
+                gen.addLoad16(R0, ETH_ETHERTYPE_OFFSET)
+                        .addJumpIfR0NotEquals(ETH_P_IP, offloadIPv6Mdns);
+            }
+
+            if (enableMdns4) {
+                final int udpLength = UDP_HEADER_LEN + rule.mOffloadPayload.length;
+                final int ipv4TotalLength = IPV4_HEADER_MIN_LEN + udpLength;
+                final int pktLength = ETH_HEADER_LEN + ipv4TotalLength;
+
+                gen.addAllocate(pktLength)
+                        .addDataCopy(mdns4EthDstToTos)
+                        .addWriteU16(ipv4TotalLength)
+                        .addDataCopy(mdns4IdToUdpDport)
+                        .addWrite32(udpLength << 16) // udp length and checksum
+                        .addDataCopy(rule.mOffloadPayload)
+                        .addTransmitL4(
+                                ETH_HEADER_LEN, // ip_ofs
+                                IPV4_UDP_DESTINATION_CHECKSUM_NO_OPTIONS_OFFSET, // csum_ofs
+                                IPV4_SRC_ADDR_OFFSET, // csum_start
+                                IPPROTO_UDP + udpLength, // partial_sum
+                                true // udp
+                        ).addCountAndDrop(Counter.DROPPED_MDNS_REPLIED);
+            }
+
+            if (enableMdns4 && enableMdns6) {
+                gen.defineLabel(offloadIPv6Mdns);
+            }
+
+            if (enableMdns6) {
+                final int udpLength = UDP_HEADER_LEN + rule.mOffloadPayload.length;
+                final int pktLength = ETH_HEADER_LEN + IPV6_HEADER_LEN + udpLength;
+                gen.addAllocate(pktLength)
+                        .addDataCopy(mdns6EthDstToFlowLabel)
+                        .addWriteU16(udpLength) // payload length
+                        .addDataCopy(mdns6NextHdrToUdpDport)
+                        .addWrite32(udpLength << 16) //  udp length and checksum
+                        .addDataCopy(rule.mOffloadPayload)
+                        .addTransmitL4(
+                                    ETH_HEADER_LEN, // ip_ofs
+                                    IPV6_UDP_DESTINATION_CHECKSUM_OFFSET, // csum_ofs
+                                    IPV6_SRC_ADDR_OFFSET, // csum_start
+                                    IPPROTO_UDP + udpLength, // partial_sum
+                                    true // udp
+                        ).addCountAndDrop(Counter.DROPPED_MDNS_REPLIED);
+            }
+
+            gen.defineLabel(ruleNotMatch);
+        }
+
+        // If no offload rules match, we should still respect the multicast filter. During the
+        // transition period, not all apps will use NsdManager for mDNS advertising. If an app
+        // decides to perform mDNS advertising itself, it must acquire a multicast lock, and no
+        // offload rules will be registered for that app. In this case, the APF should pass the
+        // mDNS packet and allow the app to handle the query.
+        if (mMulticastFilter) {
+            gen.addCountAndDrop(DROPPED_MDNS);
+        } else {
+            gen.addCountAndPass(PASSED_MDNS);
+        }
+    }
+
     /**
      * Begin generating an APF program to:
      * <ul>
@@ -2670,6 +3032,8 @@ public class ApfFilter {
             gen = new ApfV4Generator(mApfVersionSupported, mApfRamSize,
                     mInstallableProgramSizeClamp);
         }
+
+        final String labelCheckMdnsQueryPayload = gen.getUniqueLabel();
 
         if (hasDataAccess(mApfVersionSupported)) {
             if (gen instanceof ApfV4Generator) {
@@ -2747,7 +3111,7 @@ public class ApfFilter {
         // Add IPv4 filters:
         String skipIPv4FiltersLabel = gen.getUniqueLabel();
         gen.addJumpIfR0NotEquals(ETH_P_IP, skipIPv4FiltersLabel);
-        generateIPv4Filter(gen);
+        generateIPv4Filter(gen, labelCheckMdnsQueryPayload);
         gen.defineLabel(skipIPv4FiltersLabel);
 
         // Check for IPv6:
@@ -2764,7 +3128,17 @@ public class ApfFilter {
 
         // Add IPv6 filters:
         gen.defineLabel(ipv6FilterLabel);
-        generateIPv6Filter(gen);
+        generateIPv6Filter(gen, labelCheckMdnsQueryPayload);
+
+        // Add mDNS query payload check.
+        if (enableMdns4Offload() || enableMdns6Offload()) {
+            final String skipMdnsQueryPayloadCheck = gen.getUniqueLabel();
+            gen.addJump(skipMdnsQueryPayloadCheck);
+            gen.defineLabel(labelCheckMdnsQueryPayload);
+            generateMdnsQueryOffload((ApfV6GeneratorBase<?>) gen);
+            gen.defineLabel(skipMdnsQueryPayloadCheck);
+        }
+
         return gen;
     }
 
@@ -2781,6 +3155,12 @@ public class ApfFilter {
 
         // TODO: merge the addCountTrampoline() into generate() method
         gen.addCountTrampoline();
+    }
+
+    private void installPacketFilter(byte[] program) {
+        if (!mApfController.installPacketFilter(program)) {
+            sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
+        }
     }
 
     /**
@@ -2807,6 +3187,7 @@ public class ApfFilter {
             if (gen.programLengthOverEstimate() > mMaximumApfProgramSize) {
                 Log.e(TAG, "Program exceeds maximum size " + mMaximumApfProgramSize);
                 sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_OVER_SIZE_FAILURE);
+                installPacketFilter(new byte[mMaximumApfProgramSize]);
                 return;
             }
 
@@ -2839,12 +3220,11 @@ public class ApfFilter {
         } catch (IllegalInstructionException | IllegalStateException | IllegalArgumentException e) {
             Log.wtf(TAG, "Failed to generate APF program.", e);
             sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_GENERATE_FILTER_EXCEPTION);
+            installPacketFilter(new byte[mMaximumApfProgramSize]);
             return;
         }
         if (mIsRunning) {
-            if (!mApfController.installPacketFilter(program)) {
-                sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
-            }
+            installPacketFilter(program);
         }
         mLastInstalledProgramMinLifetime = programMinLft;
         mLastInstalledProgram = program;
@@ -3088,6 +3468,7 @@ public class ApfFilter {
         mIPv4PrefixLength = prefix;
         mIPv6TentativeAddresses = ipv6Addresses.first;
         mIPv6NonTentativeAddresses = ipv6Addresses.second;
+        mIPv6LinkLocalAddress = NetworkStackUtils.selectPreferredIPv6LinkLocalAddress(lp);
 
         installNewProgram();
     }
@@ -3125,8 +3506,21 @@ public class ApfFilter {
         return mHandleMdnsOffload && useApfV6Generator();
     }
 
+    @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)
     private boolean enableIgmpReportsMonitor() {
         return mHandleIgmpOffload && useApfV6Generator();
+    }
+
+    @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)
+    private boolean enableMdns4Offload() {
+        return enableOffloadEngineRegistration() && mIPv4Address != null
+                && !mOffloadRules.isEmpty();
+    }
+
+    @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)
+    private boolean enableMdns6Offload() {
+        return enableOffloadEngineRegistration() && mIPv6LinkLocalAddress != null
+                && !mOffloadRules.isEmpty();
     }
 
     @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)
