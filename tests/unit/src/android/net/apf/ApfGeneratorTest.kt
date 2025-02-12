@@ -53,7 +53,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.mockito.Mockito.times
+import org.junit.runners.Parameterized
 
 const val ETH_HLEN = 14
 const val IPV4_HLEN = 20
@@ -66,7 +66,20 @@ const val IPPROTO_UDP = 17
 @SmallTest
 class ApfGeneratorTest {
 
+    companion object {
+        @Parameterized.Parameters
+        @JvmStatic
+        fun data(): Iterable<Any?> {
+            return mutableListOf<Int?>(6, 7)
+        }
+    }
+
     @get:Rule val ignoreRule = DevSdkIgnoreRule()
+
+    // Indicates which apfInterpreter to load.
+    @Parameterized.Parameter(0)
+    @JvmField
+    var aApfInterpreterVersion: Int = 7
 
     private val ramSize = 2048
     private val clampSize = 2048
@@ -76,7 +89,7 @@ class ApfGeneratorTest {
 
     @Before
     fun setUp() {
-        apfTestHelpers = ApfTestHelpers()
+        apfTestHelpers = ApfTestHelpers(aApfInterpreterVersion)
     }
 
     @After
@@ -566,18 +579,20 @@ class ApfGeneratorTest {
         val largeByteArray = ByteArray(256) { 0x01 }
         gen = ApfV6Generator(largeByteArray, APF_VERSION_6, ramSize, clampSize)
         program = gen.generate()
+        val debugBufferSize = 1289 + Counter.totalSize()
         assertContentEquals(
                 byteArrayOf(
                         encodeInstruction(opcode = 14, immLength = 2, register = 1), 1, 0
                 ) + largeByteArray + byteArrayOf(
-                        encodeInstruction(opcode = 21, immLength = 1, register = 0), 48, 5, -3
+                        encodeInstruction(opcode = 21, immLength = 1, register = 0),
+                        48, (debugBufferSize shr 8).toByte(), debugBufferSize.toByte()
                 ),
                 program
         )
         assertContentEquals(
                 listOf(
                         "0: data        256, " + "01".repeat(256),
-                        "259: debugbuf    size=1533"
+                        "259: debugbuf    size=$debugBufferSize"
                 ),
                 apfTestHelpers.disassembleApf(program).map { it.trim() }
         )
@@ -865,7 +880,7 @@ class ApfGeneratorTest {
                 .generate()
         assertContentEquals(listOf(
                 "0: data        9, 112233445566778899",
-                "12: debugbuf    size=1760",
+                "12: debugbuf    size=${1516 + Counter.totalSize()}",
                 "16: allocate    18",
                 "20: datacopy    src=3, len=6",
                 "23: datacopy    src=4, len=3",
@@ -897,7 +912,7 @@ class ApfGeneratorTest {
         val byteHexString = "01".repeat(255) + "02".repeat(5)
         assertContentEquals(listOf(
             "0: data        260, $byteHexString",
-            "263: debugbuf    size=1508",
+            "263: debugbuf    size=${1264 + Counter.totalSize()}",
             "267: allocate    300",
             "271: datacopy    src=3, len=255",
             "274: datacopy    src=3, len=35",
@@ -926,7 +941,7 @@ class ApfGeneratorTest {
         val byteHexString = "03".repeat(255) + "04".repeat(45)
         assertContentEquals(listOf(
             "0: data        300, $byteHexString",
-            "303: debugbuf    size=1474",
+            "303: debugbuf    size=${1230 + Counter.totalSize()}",
             "307: allocate    300",
             "311: datacopy    src=3, len=255",
             "314: datacopy    src=258, len=45",

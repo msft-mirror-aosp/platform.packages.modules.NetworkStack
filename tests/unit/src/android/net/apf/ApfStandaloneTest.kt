@@ -41,6 +41,7 @@ import kotlin.test.assertEquals
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.junit.runners.Parameterized
 
 /**
  * This class generate ApfStandaloneTest programs for side-loading into firmware without needing the
@@ -54,6 +55,11 @@ import org.junit.runner.RunWith
 @SmallTest
 class ApfStandaloneTest {
 
+    // Indicates which apfInterpreter to load.
+    @Parameterized.Parameter(0)
+    @JvmField
+    var apfInterpreterVersion: Int = 7
+
     private val etherTypeDenyList = listOf(0x88A2, 0x88A4, 0x88B8, 0x88CD, 0x88E1, 0x88E3)
     private val ramSize = 1024
     private val clampSize = 1024
@@ -61,7 +67,7 @@ class ApfStandaloneTest {
 
     @Before
     fun setUp() {
-        apfTestHelpers = ApfTestHelpers()
+        apfTestHelpers = ApfTestHelpers(apfInterpreterVersion)
     }
 
     fun runApfTest(isSuspendMode: Boolean) {
@@ -445,5 +451,10 @@ class ApfStandaloneTest {
 
     companion object {
         const val TAG = "ApfStandaloneTest"
+        @Parameterized.Parameters
+        @JvmStatic
+        fun data(): Iterable<Any?> {
+            return mutableListOf<Int?>(6, 7)
+        }
     }
 }
