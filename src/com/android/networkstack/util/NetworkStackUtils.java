@@ -16,6 +16,7 @@
 
 package com.android.networkstack.util;
 
+import static android.net.apf.ApfConstants.IPV6_SOLICITED_NODES_PREFIX;
 import static android.os.Build.VERSION.CODENAME;
 import static android.os.Build.VERSION.SDK_INT;
 import static android.system.OsConstants.IFA_F_DEPRECATED;
@@ -401,6 +402,24 @@ public class NetworkStackUtils {
     }
 
     /**
+     * Checks if the given IPv6 address is a solicited-node multicast address.
+     *
+     * <p>Solicited-node multicast addresses are used for Neighbor Discovery in IPv6.
+     * They have a specific prefix (FF02::1:FFxx:xxxx) where the last 64 bits are derived
+     * from the interface's link-layer address. This function only checks if the address
+     * has the correct prefix; it does *not* verify the lower 64 bits.
+     */
+    public static boolean isIPv6AddressSolicitedNodeMulticast(@NonNull final Inet6Address addr) {
+        for (int i = 0; i < IPV6_SOLICITED_NODES_PREFIX.length; i++) {
+            if (addr.getAddress()[i] != IPV6_SOLICITED_NODES_PREFIX[i]) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
      * Check whether a link address is IPv6 global preferred unicast address.
      */
     public static boolean isIPv6GUA(@NonNull final LinkAddress address) {
@@ -538,6 +557,17 @@ public class NetworkStackUtils {
      * @param fd the socket's {@link FileDescriptor}.
      */
     public static native void attachEgressIgmpReportFilter(FileDescriptor fd) throws ErrnoException;
+
+    /**
+     * Attaches a socket filter that accepts egress IGMPv2/v3, MLDv1/v2 reports to the given socket.
+     *
+     * This filter doesn't include IGMPv1 report since device will not send out IGMPv1 report
+     * when the device leaves a multicast address group.
+     *
+     * @param fd the socket's {@link FileDescriptor}.
+     */
+    public static native void attachEgressMulticastReportFilter(
+            FileDescriptor fd) throws ErrnoException;
 
     private static native void addArpEntry(byte[] ethAddr, byte[] netAddr, String ifname,
             FileDescriptor fd) throws IOException;

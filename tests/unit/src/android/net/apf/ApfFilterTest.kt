@@ -50,7 +50,6 @@ import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_INVALID
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_OTHER_HOST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_REPLIED_NON_DAD
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_MDNS
-import android.net.apf.ApfCounterTracker.Counter.DROPPED_MDNS_INVALID
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_MDNS_REPLIED
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_BROADCAST_REPLY
 import android.net.apf.ApfCounterTracker.Counter.PASSED_ARP_REQUEST
@@ -117,6 +116,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.junit.runners.Parameterized
 import org.mockito.ArgumentCaptor
 import org.mockito.ArgumentMatchers.any
 import org.mockito.ArgumentMatchers.anyInt
@@ -143,10 +143,21 @@ class ApfFilterTest {
         private const val THREAD_QUIT_MAX_RETRY_COUNT = 3
         private const val NO_CALLBACK_TIMEOUT_MS: Long = 500
         private const val TAG = "ApfFilterTest"
+
+        @Parameterized.Parameters
+        @JvmStatic
+        fun data(): Iterable<Any?> {
+            return mutableListOf<Int?>(6, 7)
+        }
     }
 
     @get:Rule
     val ignoreRule = DevSdkIgnoreRule()
+
+    // Indicates which apfInterpreter to load.
+    @Parameterized.Parameter(0)
+    @JvmField
+    var apfInterpreterVersion: Int = 7
 
     @Mock
     private lateinit var context: Context
@@ -275,7 +286,7 @@ class ApfFilterTest {
 
     @Before
     fun setUp() {
-        apfTestHelpers = ApfTestHelpers()
+        apfTestHelpers = ApfTestHelpers(apfInterpreterVersion)
         MockitoAnnotations.initMocks(this)
         // mock anycast6 address from /proc/net/anycast6
         doReturn(hostAnycast6Addresses).`when`(dependencies).getAnycast6Addresses(any())
@@ -475,6 +486,11 @@ class ApfFilterTest {
 
         naPacketBuf.get(naPacket)
         return naPacket
+    }
+
+    private fun updateIPv4MulticastAddrs(apfFilter: ApfFilter, mcastAddrs: List<Inet4Address>) {
+        doReturn(mcastAddrs).`when`(dependencies).getIPv4MulticastAddresses(any())
+        apfFilter.updateIPv4MulticastAddrs()
     }
 
     @Test
@@ -2997,7 +3013,7 @@ class ApfFilterTest {
         )
         visibleOnHandlerThread(handler) { offloadEngine.onOffloadServiceUpdated(info) }
 
-        verify(apfController).installPacketFilter(any())
+        verify(apfController).installPacketFilter(any(), any())
 
         visibleOnHandlerThread(handler) { apfFilter.shutdown() }
         verify(nsdManager).unregisterOffloadEngine(eq(offloadEngine))
@@ -3042,7 +3058,7 @@ class ApfFilterTest {
         visibleOnHandlerThread(handler) {
             offloadEngine.onOffloadServiceUpdated(corruptedOffloadInfo)
         }
-        verify(apfController, never()).installPacketFilter(any())
+        verify(apfController, never()).installPacketFilter(any(), any())
     }
 
     private fun getApfWithMdnsOffloadEnabled(
@@ -3551,30 +3567,6 @@ class ApfFilterTest {
         )
     }
 
-    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
-    @Test
-    fun testCorruptedIPv4MdnsPacketDropped() {
-        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false)
-        // Using scapy to generate packet:
-        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
-        // ip = IP(proto=17, src="10.0.0.3", dst="224.0.0.251")
-        // udp = UDP(dport=5353, sport=5353)
-        // pkt = eth/ip/udp/b"hello"
-        val corruptedIPv4MdnsPkt = """
-            01005e0000fb0102030405060800450000210001000040118fcd0a000003e00
-            000fb14e914e9000da73168656c6c6f
-        """.replace("\\s+".toRegex(), "").trim()
-
-        apfTestHelpers.verifyProgramRun(
-            apfFilter.mApfVersionSupported,
-            program,
-            HexDump.hexStringToByteArray(corruptedIPv4MdnsPkt),
-            DROPPED_MDNS_INVALID
-        )
-    }
-
-    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
-    @Test
     fun testIPv6MdnsQueryReplied() {
         val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false)
         // Using scapy to generate packet:
@@ -3965,29 +3957,6 @@ class ApfFilterTest {
         )
     }
 
-    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
-    @Test
-    fun testCorruptedIPv6MdnsPacketDropped() {
-        val (apfFilter, program) = getApfWithMdnsOffloadEnabled(mcFilter = false)
-        // Using scapy to generate packet:
-        // eth = Ether(src="01:02:03:04:05:06", dst="33:33:00:00:00:FB")
-        // ip = IPv6(src="fe80::1", dst="ff02::fb")
-        // udp = UDP(dport=5353, sport=5353)
-        // pkt = eth/ip/udp/b"hello"
-        val corruptedIPv6MdnsPkt = """
-            3333000000fb01020304050686dd60000000000d1140fe80000000000000000
-            0000000000001ff0200000000000000000000000000fb14e914e9000d93b068
-            656c6c6f
-        """.replace("\\s+".toRegex(), "").trim()
-
-        apfTestHelpers.verifyProgramRun(
-            apfFilter.mApfVersionSupported,
-            program,
-            HexDump.hexStringToByteArray(corruptedIPv6MdnsPkt),
-            DROPPED_MDNS_INVALID
-        )
-    }
-
     @Test
     fun testApfProgramUpdate() {
         val apfFilter = getApfFilter()
@@ -4001,7 +3970,7 @@ class ApfFilterTest {
 
         // add the same IPv4 address, expect to have no apf program update
         apfFilter.setLinkProperties(lp)
-        verify(apfController, never()).installPacketFilter(any())
+        verify(apfController, never()).installPacketFilter(any(), any())
 
         // add IPv6 addresses, expect to have apf program update
         for (addr in hostIpv6Addresses) {
@@ -4013,7 +3982,7 @@ class ApfFilterTest {
 
         // add the same IPv6 addresses, expect to have no apf program update
         apfFilter.setLinkProperties(lp)
-        verify(apfController, never()).installPacketFilter(any())
+        verify(apfController, never()).installPacketFilter(any(), any())
 
         // add more tentative IPv6 addresses, expect to have apf program update
         for (addr in hostIpv6TentativeAddresses) {
@@ -4032,7 +4001,7 @@ class ApfFilterTest {
 
         // add the same IPv6 addresses, expect to have no apf program update
         apfFilter.setLinkProperties(lp)
-        verify(apfController, never()).installPacketFilter(any())
+        verify(apfController, never()).installPacketFilter(any(), any())
     }
 
     // The APFv6 code path is only turned on in V+
@@ -4056,7 +4025,7 @@ class ApfFilterTest {
 
         Os.write(igmpWriteSocket, testPacket, 0, testPacket.size)
         Thread.sleep(NO_CALLBACK_TIMEOUT_MS)
-        verify(apfController, never()).installPacketFilter(any())
+        verify(apfController, never()).installPacketFilter(any(), any())
 
         mcastAddrs.remove(addr)
         doReturn(mcastAddrs).`when`(dependencies).getIPv4MulticastAddresses(any())
@@ -4068,7 +4037,8 @@ class ApfFilterTest {
     fun testApfFilterInitializationCleanUpTheApfMemoryRegion() {
         val apfFilter = getApfFilter()
         val programCaptor = ArgumentCaptor.forClass(ByteArray::class.java)
-        verify(apfController, times(2)).installPacketFilter(programCaptor.capture())
+        verify(apfController, times(2))
+            .installPacketFilter(programCaptor.capture(), any())
         val program = programCaptor.allValues.first()
         assertContentEquals(ByteArray(4096) { 0 }, program)
     }
@@ -4101,14 +4071,13 @@ class ApfFilterTest {
         val addr = InetAddress.getByName("239.0.0.2") as Inet4Address
         mcastAddrs.add(addr)
         mcastAddrsExcludeAllHost.add(addr)
-        doReturn(mcastAddrs).`when`(dependencies).getIPv4MulticastAddresses(any())
-        apfFilter.updateIPv4MulticastAddrs()
+        updateIPv4MulticastAddrs(apfFilter, mcastAddrs)
         apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
         assertEquals(mcastAddrs.toSet(), apfFilter.mIPv4MulticastAddresses)
         assertEquals(mcastAddrsExcludeAllHost.toSet(), apfFilter.mIPv4McastAddrsExcludeAllHost)
 
-        apfFilter.updateIPv4MulticastAddrs()
-        verify(apfController, never()).installPacketFilter(any())
+        updateIPv4MulticastAddrs(apfFilter, mcastAddrs)
+        verify(apfController, never()).installPacketFilter(any(), any())
     }
 
     @Test

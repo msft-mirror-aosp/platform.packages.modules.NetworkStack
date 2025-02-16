@@ -117,7 +117,6 @@ import static org.mockito.Mockito.argThat;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -753,6 +752,10 @@ public abstract class IpClientIntegrationTestCommon {
         // Enable DHCPv6 Prefix Delegation.
         setFeatureEnabled(NetworkStackUtils.IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION,
                 true /* isDhcp6PrefixDelegationEnabled */);
+
+        // Enable replacement of netd usage with netlink in IpClient.
+        setFeatureEnabled(NetworkStackUtils.IPCLIENT_REPLACE_NETD_WITH_NETLINK_VERSION,
+                true /* isIpClientReplaceNetdWithNetlinkEnabled */);
 
         // Set flags based on test method annotations.
         final Flag[] flags = testMethod.getAnnotationsByType(Flag.class);
@@ -1482,7 +1485,7 @@ public abstract class IpClientIntegrationTestCommon {
 
         if (shouldChangeMtu) {
             // Pretend that ConnectivityService set the MTU.
-            mNetd.interfaceSetMtu(mIfaceName, mtu);
+            NetlinkUtils.setInterfaceMtu(mIfaceName, mtu);
             assertEquals(NetworkInterface.getByName(mIfaceName).getMTU(), mtu);
         }
 
@@ -1496,12 +1499,9 @@ public abstract class IpClientIntegrationTestCommon {
         try {
             mIpc.shutdown();
             awaitIpClientShutdown();
-            if (shouldRemoveTestInterface) {
-                verify(mNetd, never()).interfaceSetMtu(mIfaceName, TEST_DEFAULT_MTU);
-            } else {
+            if (!shouldRemoveTestInterface) {
                 // Verify that MTU indeed has been restored or not.
-                verify(mNetd, times(shouldChangeMtu ? 1 : 0))
-                        .interfaceSetMtu(mIfaceName, TEST_DEFAULT_MTU);
+                assertEquals(NetworkInterface.getByName(mIfaceName).getMTU(), TEST_DEFAULT_MTU);
             }
             verifyAfterIpClientShutdown();
         } catch (Exception e) {
@@ -1975,15 +1975,6 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
-    public void testRestoreInitialInterfaceMtu_WithException() throws Exception {
-        doThrow(new RemoteException("NetdNativeService::interfaceSetMtu")).when(mNetd)
-                .interfaceSetMtu(mIfaceName, TEST_DEFAULT_MTU);
-
-        doRestoreInitialMtuTest(true /* shouldChangeMtu */, false /* shouldRemoveTestInterface */);
-        assertEquals(NetworkInterface.getByName(mIfaceName).getMTU(), TEST_MIN_MTU);
-    }
-
-    @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
     public void testRestoreInitialInterfaceMtu_NotFoundInterfaceWhenStopping() throws Exception {
         doRestoreInitialMtuTest(true /* shouldChangeMtu */, true /* shouldRemoveTestInterface */);
     }
@@ -2013,7 +2004,7 @@ public abstract class IpClientIntegrationTestCommon {
         assertIpMemoryStoreNetworkAttributes(TEST_LEASE_DURATION_S, currentTime, TEST_MIN_MTU);
 
         // Pretend that ConnectivityService set the MTU.
-        mNetd.interfaceSetMtu(mIfaceName, TEST_MIN_MTU);
+        NetlinkUtils.setInterfaceMtu(mIfaceName, TEST_MIN_MTU);
         assertEquals(NetworkInterface.getByName(mIfaceName).getMTU(), TEST_MIN_MTU);
 
         reset(mCb);
@@ -6320,17 +6311,18 @@ public abstract class IpClientIntegrationTestCommon {
             throws Exception {
         long when = (long) (System.currentTimeMillis() - SIX_HOURS_IN_MS * 0.9);
         long expiry = when + ONE_WEEK_IN_MS;
-        storeNudFailureEvents(when, expiry, 10, IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ORGANIC);
+        storeNudFailureEvents(when, expiry, 8, IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ORGANIC);
 
         runIpReachabilityMonitorAddressResolutionTest(IPV6_OFF_LINK_DNS_SERVER,
                 ROUTER_LINK_LOCAL /* targetIp */,
                 true /* expectNeighborLost */);
 
-        // Given that total NUD failure event counts in the past 6 hours has been up to the
-        // threshold, the new NUD failure event will not be written to db, then the retrieved
-        // event count should still be 10.
-        assertRetrievedNetworkEventCount(TEST_CLUSTER, 10 /* expectedCountInPastWeek */,
-                10 /* expectedCountInPastDay */, 10 /* expectedCountInPastSixHours */);
+        // Although the total NUD failure events count in the past 6 hours hasn't been up to the
+        // threshold, however, the experiment flag is disabled, therefore, the new NUD failure
+        // event will not be written to db, then the retrieved event count should still be 8 rather
+        // than 9.
+        assertRetrievedNetworkEventCount(TEST_CLUSTER, 8 /* expectedCountInPastWeek */,
+                8 /* expectedCountInPastDay */, 8 /* expectedCountInPastSixHours */);
     }
 
     @Test

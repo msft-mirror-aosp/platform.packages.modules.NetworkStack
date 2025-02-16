@@ -192,7 +192,7 @@ public class ApfTest {
         doReturn(readSocket).when(mDependencies).createPacketReaderSocket(anyInt());
         mCurrentTimeMs = SystemClock.elapsedRealtime();
         doReturn(mCurrentTimeMs).when(mDependencies).elapsedRealtime();
-        doReturn(true).when(mApfController).installPacketFilter(any());
+        doReturn(true).when(mApfController).installPacketFilter(any(), any());
         doAnswer((invocation) -> {
             synchronized (mApfFilterCreated) {
                 mApfFilterCreated.add(invocation.getArgument(0));
@@ -202,7 +202,7 @@ public class ApfTest {
         mHandlerThread = new HandlerThread("ApfTestThread");
         mHandlerThread.start();
         mHandler = new Handler(mHandlerThread.getLooper());
-        mApfTestHelpers = new ApfTestHelpers();
+        mApfTestHelpers = new ApfTestHelpers(6);
     }
 
     private void shutdownApfFilters() throws Exception {
@@ -2217,7 +2217,7 @@ public class ApfTest {
         clearInvocations(mApfController);
         pretendPacketReceived(packet.array());
         Thread.sleep(NO_CALLBACK_TIMEOUT_MS);
-        verify(mApfController, never()).installPacketFilter(any());
+        verify(mApfController, never()).installPacketFilter(any(), any());
     }
 
     @Test
@@ -2821,7 +2821,7 @@ public class ApfTest {
 
     @Test
     public void testInstallPacketFilterFailure() throws Exception {
-        doReturn(false).when(mApfController).installPacketFilter(any());
+        doReturn(false).when(mApfController).installPacketFilter(any(), any());
         final ApfConfiguration config = getDefaultConfig();
         final ApfFilter apfFilter = getApfFilter(config);
 
@@ -2983,7 +2983,7 @@ public class ApfTest {
         mApfTestHelpers.consumeInstalledProgram(mApfController, 1 /* installCnt */);
         pretendPacketReceived(raInvalid.build());
         Thread.sleep(NO_CALLBACK_TIMEOUT_MS);
-        verify(mApfController, never()).installPacketFilter(any());
+        verify(mApfController, never()).installPacketFilter(any(), any());
         pretendPacketReceived(raZeroRouterLifetime.build());
         mApfTestHelpers.consumeInstalledProgram(mApfController, 1 /* installCnt */);
         pretendPacketReceived(raZeroPioValidLifetime.build());
