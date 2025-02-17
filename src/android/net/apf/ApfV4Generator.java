@@ -37,16 +37,16 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
      * Jump to this label to terminate the program, increment the counter and indicate the packet
      * should be passed to the AP.
      */
-    private final int mCountAndDropLabelV4;
+    private final short mCountAndDropLabelV4;
 
     /**
      * Jump to this label to terminate the program, increment counter, and indicate the packet
      * should be dropped.
      */
-    private final int mCountAndPassLabelV4;
+    private final short mCountAndPassLabelV4;
 
-    public final int mCountAndDropLabel;
-    public final int mCountAndPassLabel;
+    public final short mCountAndDropLabel;
+    public final short mCountAndPassLabel;
 
     /**
      * Returns true if we support the specified {@code version}, otherwise false.
@@ -238,7 +238,7 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
         if (values.isEmpty()) {
             throw new IllegalArgumentException("values cannot be empty");
         }
-        int tgt = getUniqueLabel();
+        short tgt = getUniqueLabel();
         for (Long v : values) {
             addJumpIfR0Equals(v, tgt);
         }
@@ -253,7 +253,7 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
         if (values.isEmpty()) {
             throw new IllegalArgumentException("values cannot be empty");
         }
-        int tgt = getUniqueLabel();
+        short tgt = getUniqueLabel();
         for (Long v : values) {
             addJumpIfR0Equals(v, tgt);
         }
@@ -267,10 +267,10 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
             throws IllegalInstructionException {
         final List<byte[]> deduplicatedList = validateDeduplicateBytesList(bytesList);
         maybeAddLoadCounterOffset(R1, cnt);
-        int matchLabel = getUniqueLabel();
-        int allNoMatchLabel = getUniqueLabel();
+        short matchLabel = getUniqueLabel();
+        short allNoMatchLabel = getUniqueLabel();
         for (byte[] v : deduplicatedList) {
-            int notMatchLabel = getUniqueLabel();
+            short notMatchLabel = getUniqueLabel();
             addJumpIfBytesAtR0NotEqual(v, notMatchLabel);
             addJump(matchLabel);
             defineLabel(notMatchLabel);
