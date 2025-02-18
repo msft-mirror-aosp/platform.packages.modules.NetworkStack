@@ -33,18 +33,6 @@ import java.util.Set;
  */
 public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
 
-    /**
-     * Jump to this label to terminate the program, increment the counter and indicate the packet
-     * should be passed to the AP.
-     */
-    private final short mCountAndDropLabelV4;
-
-    /**
-     * Jump to this label to terminate the program, increment counter, and indicate the packet
-     * should be dropped.
-     */
-    private final short mCountAndPassLabelV4;
-
     public final short mCountAndDropLabel;
     public final short mCountAndPassLabel;
 
@@ -65,10 +53,8 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
             throws IllegalInstructionException {
         // make sure mVersion is not greater than 4 when using this class
         super(version > 4 ? 4 : version, ramSize, clampSize, disableCounterRangeCheck);
-        mCountAndDropLabelV4 = getUniqueLabel();
-        mCountAndPassLabelV4 = getUniqueLabel();
-        mCountAndDropLabel = version > 2 ? mCountAndDropLabelV4 : DROP_LABEL;
-        mCountAndPassLabel = version > 2 ? mCountAndPassLabelV4 : PASS_LABEL;
+        mCountAndDropLabel = version > 2 ? getUniqueLabel() : DROP_LABEL;
+        mCountAndPassLabel = version > 2 ? getUniqueLabel() : PASS_LABEL;
     }
 
     /**
@@ -369,12 +355,12 @@ public final class ApfV4Generator extends ApfV4GeneratorBase<ApfV4Generator> {
     @Override
     public ApfV4Generator addCountTrampoline() throws IllegalInstructionException {
         if (mVersion <= 2) return self();
-        return defineLabel(mCountAndPassLabelV4)
+        return defineLabel(mCountAndPassLabel)
                 .addLoadData(R0, 0)  // R0 = *(R1 + 0)
                 .addAdd(1)           // R0++
                 .addStoreData(R0, 0) // *(R1 + 0) = R0
                 .addJump(PASS_LABEL)
-                .defineLabel(mCountAndDropLabelV4)
+                .defineLabel(mCountAndDropLabel)
                 .addLoadData(R0, 0)  // R0 = *(R1 + 0)
                 .addAdd(1)           // R0++
                 .addStoreData(R0, 0) // *(R1 + 0) = R0
