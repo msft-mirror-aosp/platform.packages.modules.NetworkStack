@@ -44,6 +44,12 @@ import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_NATT_KEEPALIVE
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_NON_DHCP4
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_PING_REQUEST_REPLIED
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV4_TCP_PORT7_UNICAST
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_ICMP6_ECHO_REQUEST_INVALID
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_ICMP6_ECHO_REQUEST_REPLIED
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_MLD_INVALID
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_MLD_REPORT
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_MLD_V1_GENERAL_QUERY_REPLIED
+import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_MLD_V2_GENERAL_QUERY_REPLIED
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_MULTICAST_NA
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NON_ICMP_MULTICAST
 import android.net.apf.ApfCounterTracker.Counter.DROPPED_IPV6_NS_INVALID
@@ -59,6 +65,7 @@ import android.net.apf.ApfCounterTracker.Counter.PASSED_ETHER_OUR_SRC_MAC
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV4
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV4_FROM_DHCPV4_SERVER
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV4_UNICAST
+import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_HOPOPTS
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_ICMP
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NON_ICMP
 import android.net.apf.ApfCounterTracker.Counter.PASSED_IPV6_NS_DAD
@@ -92,6 +99,8 @@ import com.android.net.module.util.NetworkStackConstants.ARP_REQUEST
 import com.android.net.module.util.NetworkStackConstants.ETHER_HEADER_LEN
 import com.android.net.module.util.NetworkStackConstants.ICMPV6_NA_HEADER_LEN
 import com.android.net.module.util.NetworkStackConstants.ICMPV6_NS_HEADER_LEN
+import com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ALL_NODES_MULTICAST
+import com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_NODE_LOCAL_ALL_NODES_MULTICAST
 import com.android.net.module.util.NetworkStackConstants.IPV6_HEADER_LEN
 import com.android.net.module.util.arp.ArpPacket
 import com.android.networkstack.metrics.NetworkQuirkMetrics
@@ -124,6 +133,7 @@ import org.mockito.ArgumentMatchers.anyLong
 import org.mockito.ArgumentMatchers.eq
 import org.mockito.Mock
 import org.mockito.Mockito
+import org.mockito.Mockito.clearInvocations
 import org.mockito.Mockito.doAnswer
 import org.mockito.Mockito.doReturn
 import org.mockito.Mockito.never
@@ -281,7 +291,7 @@ class ApfFilterTest {
     }
     private val handler by lazy { Handler(handlerThread.looper) }
     private var writerSocket = FileDescriptor()
-    private var igmpWriteSocket = FileDescriptor()
+    private var mcastWriteSocket = FileDescriptor()
     private lateinit var apfTestHelpers: ApfTestHelpers
 
     @Before
@@ -305,9 +315,12 @@ class ApfFilterTest {
         val readSocket = FileDescriptor()
         Os.socketpair(AF_UNIX, SOCK_STREAM, 0, writerSocket, readSocket)
         doReturn(readSocket).`when`(dependencies).createPacketReaderSocket(anyInt())
-        val igmpReadSocket = FileDescriptor()
-        Os.socketpair(AF_UNIX, SOCK_STREAM, 0, igmpWriteSocket, igmpReadSocket)
-        doReturn(igmpReadSocket).`when`(dependencies).createEgressIgmpReportsReaderSocket(anyInt())
+        val mcastReadSocket = FileDescriptor()
+        Os.socketpair(AF_UNIX, SOCK_STREAM, 0, mcastWriteSocket, mcastReadSocket)
+        doReturn(mcastReadSocket)
+                .`when`(dependencies).createEgressIgmpReportsReaderSocket(anyInt())
+        doReturn(mcastReadSocket)
+                .`when`(dependencies).createEgressMulticastReportsReaderSocket(anyInt())
         doReturn(nsdManager).`when`(context).getSystemService(NsdManager::class.java)
     }
 
@@ -334,7 +347,7 @@ class ApfFilterTest {
     @After
     fun tearDown() {
         IoUtils.closeQuietly(writerSocket)
-        IoUtils.closeQuietly(igmpWriteSocket)
+        IoUtils.closeQuietly(mcastWriteSocket)
         shutdownApfFilters()
         handler.waitForIdle(TIMEOUT_MS)
         Mockito.framework().clearInlineMocks()
@@ -490,7 +503,12 @@ class ApfFilterTest {
 
     private fun updateIPv4MulticastAddrs(apfFilter: ApfFilter, mcastAddrs: List<Inet4Address>) {
         doReturn(mcastAddrs).`when`(dependencies).getIPv4MulticastAddresses(any())
-        apfFilter.updateIPv4MulticastAddrs()
+        apfFilter.updateMulticastAddrs()
+    }
+
+    private fun updateIPv6MulticastAddrs(apfFilter: ApfFilter, mcastAddrs: List<Inet6Address>) {
+        doReturn(mcastAddrs).`when`(dependencies).getIPv6MulticastAddresses(any())
+        apfFilter.updateMulticastAddrs()
     }
 
     @Test
@@ -1341,6 +1359,468 @@ class ApfFilterTest {
         )
     }
 
+    private fun getMldApfFilter(): ApfFilter {
+        val mcastAddrs = listOf(
+            InetAddress.getByName("ff12::1:1111:1111") as Inet6Address,
+            InetAddress.getByName("ff12::1:2222:2222") as Inet6Address,
+            InetAddress.getByName("ff12::1:3333:3333") as Inet6Address,
+        )
+        val apfConfig = getDefaultConfig()
+        apfConfig.handleMldOffload = true
+
+        // mock IPv6 multicast address from /proc/net/igmp6
+        doReturn(mcastAddrs).`when`(dependencies).getIPv6MulticastAddresses(any())
+        val apfFilter = getApfFilter(apfConfig)
+        val ipv6LinkAddress = LinkAddress(hostLinkLocalIpv6Address, 64)
+        val lp = LinkProperties()
+        lp.addLinkAddress(ipv6LinkAddress)
+        apfFilter.setLinkProperties(lp)
+        return apfFilter
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIPv6PacketWithNonMldHopByHopPassed() {
+        val apfFilter = getMldApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate MLDv1 general query with different HOPOPTS
+        //  ether = Ether(src='00:11:22:33:44:55', dst='33:33:11:11:11:11')
+        //  ipv6 = IPv6(src='fe80::fc01:83ff:fea6:3712', dst='ff02::1:1111:1111', hlim=1)
+        //  hopOpts = IPv6ExtHdrHopByHop(options=[RouterAlert(otype=3)])
+        //  mld = ICMPv6MLQuery()
+        //  pkt = ether/ipv6/hopOpts/mld
+        var invalidHopOptPkt = """
+            33331111111100112233445586dd6000000000200001fe80000000000000fc0183fffea63712ff020000
+            0000000000000001111111113a000302000001008200813b271000000000000000000000000000000000
+            0000
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(invalidHopOptPkt),
+            PASSED_IPV6_NON_ICMP
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testInvalidMldPacketDropped() {
+        val apfFilter = getMldApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate MLDv1 general query with invalid source addr
+        //  ether = Ether(src='00:11:22:33:44:55', dst='33:33:11:11:11:11')
+        //  ipv6 = IPv6(src='ff02::1:4444:4444', dst='ff02::1:1111:1111', hlim=1)
+        //  hopOpts = IPv6ExtHdrHopByHop(options=[RouterAlert(otype=5)])
+        //  mld = ICMPv6MLQuery()
+        //  pkt = ether/ipv6/hopOpts/mld
+        var invalidSrcIpPkt = """
+            33331111111100112233445586dd6000000000200001ff020000000000000000000144444444ff02000
+            00000000000000001111111113a000502000001008200adea2710000000000000000000000000000000
+            000000
+        """.replace("\\s+".toRegex(), "").trim().uppercase()
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(invalidSrcIpPkt),
+            DROPPED_IPV6_MLD_INVALID
+        )
+
+        // Using scapy to generate MLDv1 general query with invalid hoplimit
+        //  ether = Ether(src='00:11:22:33:44:55', dst='33:33:11:11:11:11')
+        //  ipv6 = IPv6(src='fe80::fc01:83ff:fea6:3712', dst='ff02::1:1111:1111', hlim=5)
+        //  hopOpts = IPv6ExtHdrHopByHop(options=[RouterAlert(otype=5)])
+        //  mld = ICMPv6MLQuery()
+        //  pkt = ether/ipv6/hopOpts/mld
+        var invalidHopLimitPkt = """
+            33331111111100112233445586dd6000000000200005fe80000000000000fc0183fffea63712ff02000
+            00000000000000001111111113a000502000001008200813b2710000000000000000000000000000000
+            000000
+        """.replace("\\s+".toRegex(), "").trim()
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(invalidHopLimitPkt),
+            DROPPED_IPV6_MLD_INVALID
+        )
+
+        // Using scapy to generate MLDv1 general query packet with invalid destination address
+        //  ether = Ether(src='00:11:22:33:44:55', dst='33:33:00:00:00:01')
+        //  ipv6 = IPv6(src='fe80::fc01:83ff:fea6:3712', dst='ff03::1', hlim=1)
+        //  hopOpts = IPv6ExtHdrHopByHop(options=[RouterAlert(otype=5)])
+        //  mld = ICMPv6MLQuery()
+        //  pkt = ether/ipv6/hopOpts/mld
+        var pkt = """
+            33330000000100112233445586dd6000000000200001fe80000000000000fc0183fffea63712ff03000
+            00000000000000000000000013a000502000001008200a35c2710000000000000000000000000000000
+            000000
+        """.replace("\\s+".toRegex(), "").trim()
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            DROPPED_IPV6_MLD_INVALID
+        )
+
+        // Using scapy to generate MLD message with invalid payload length 27
+        //  ether = Ether(src='00:11:22:33:44:55', dst='33:33:00:00:00:01')
+        //  ipv6 = IPv6(src='fe80::fc01:83ff:fea6:3712', dst='ff03::1', hlim=1)
+        //  hopOpts = IPv6ExtHdrHopByHop(options=[RouterAlert(otype=5)])
+        //  mld = ICMPv6MLQuery()
+        //  pkt = ether/ipv6/hopOpts/mld (and drop last byte)
+        var invalidPayloadLength27Pkt = """
+            33330000000100112233445586dd6000000000240001fe80000000000000fc0183fffea63712ff0200000
+            000000000000000000000013a000502000001008200a35927100000000000000000000000000000000000
+            00000000
+        """.replace("\\s+".toRegex(), "").trim()
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(invalidPayloadLength27Pkt),
+            DROPPED_IPV6_MLD_INVALID
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testMldV1ReportDropped() {
+        val apfFilter = getMldApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate MLDv1 report
+        //  ether = Ether(src='00:11:22:33:44:55', dst='33:33:11:11:11:11')
+        //  ipv6 = IPv6(src='fe80::fc01:83ff:fea6:3712', dst='ff12::1:1111:1111', hlim=1)
+        //  hopOpts = IPv6ExtHdrHopByHop(options=[RouterAlert(otype=5)])
+        //  mld = ICMPv6MLReport(mladdr='ff12::1:1111:1111')
+        //  pkt = ether/ipv6/hopOpts/mld
+        var pkt = """
+            33331111111100112233445586dd6000000000200001fe80000000000000fc0183fffea63712ff12000
+            00000000000000001111111113a000502000001008300860500000000ff120000000000000000000111
+            111111
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            DROPPED_IPV6_MLD_REPORT
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testMldV1DoneDropped() {
+        val apfFilter = getMldApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate MLDv1 done
+        //  ether = Ether(src='00:11:22:33:44:55', dst='33:33:00:00:00:02')
+        //  ipv6 = IPv6(src='fe80::fc01:83ff:fea6:3712', dst='ff02::2', hlim=1)
+        //  hopOpts = IPv6ExtHdrHopByHop(options=[RouterAlert(otype=5)])
+        //  mld = ICMPv6MLDone(mladdr='ff12::1:1111:1111')
+        //  pkt = ether/ipv6/hopOpts/mld
+        var pkt = """
+            33330000000200112233445586dd6000000000200001fe80000000000000fc0183fffea63712ff020000
+            0000000000000000000000023a000502000001008400a73600000000ff12000000000000000000011111
+            1111
+        """.replace("\\s+".toRegex(), "").trim()
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            DROPPED_IPV6_MLD_REPORT
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testMldV2ReportDropped() {
+        val apfFilter = getMldApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate MLDv2 report
+        //  ether = Ether(src='00:11:22:33:44:55', dst='33:33:00:00:00:16')
+        //  ipv6 = IPv6(src='fe80::fc01:83ff:fea6:3712', dst='ff02::16', hlim=1)
+        //  hopOpts = IPv6ExtHdrHopByHop(options=[RouterAlert(otype=5)])
+        //  mld = ICMPv6MLReport2(records=[ICMPv6MLDMultAddrRec(dst='ff02::1:1111:1111')])
+        //  pkt = ether/ipv6/hopOpts/mld
+        var pkt = """
+            33330000001600112233445586dd6000000000240001fe80000000000000fc0183fffea63712ff020000
+            0000000000000000000000163a000502000001008f00982d0000000104000000ff020000000000000000
+            000111111111
+        """.replace("\\s+".toRegex(), "").trim()
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            DROPPED_IPV6_MLD_REPORT
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testMldV1GeneralQueryReplied() {
+        val apfFilter = getMldApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate MLDv1 general query
+        //  ether = Ether(src='00:11:22:33:44:55', dst='33:33:00:00:00:01')
+        //  ipv6 = IPv6(src='fe80::fc01:83ff:fea6:3712', dst='ff02::1', hlim=1)
+        //  hopOpts = IPv6ExtHdrHopByHop(options=[RouterAlert(otype=5)])
+        //  mld = ICMPv6MLQuery()
+        //  pkt = ether/ipv6/hopOpts/mld
+        var pkt = """
+            33330000000100112233445586dd6000000000200001fe80000000000000fc0183fffea63712ff02000
+            00000000000000000000000013a000502000001008200a35d2710000000000000000000000000000000
+            000000
+        """.replace("\\s+".toRegex(), "").trim()
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            DROPPED_IPV6_MLD_V1_GENERAL_QUERY_REPLIED
+        )
+
+        val mldV1ReportPkts = setOf(
+            //  ###[ Ethernet ]###
+            //    dst       = 33:33:11:11:11:11
+            //    src       = 02:03:04:05:06:07
+            //    type      = IPv6
+            //  ###[ IPv6 ]###
+            //       version   = 6
+            //       tc        = 0
+            //       fl        = 0
+            //       plen      = None
+            //       nh        = Hop-by-Hop Option Header
+            //       hlim      = 1
+            //       src       = fe80::3
+            //       dst       = ff12::1:1111:1111
+            //  ###[ IPv6 Extension Header - Hop-by-Hop Options Header ]###
+            //          nh        = ICMPv6
+            //          len       = None
+            //          autopad   = On
+            //          \options   \
+            //           |###[ Router Alert ]###
+            //           |  otype     = Router Alert [00: skip, 0: Don't change en-route]
+            //           |  optlen    = 2
+            //           |  value     = None
+            //  ###[ MLD - Multicast Listener Report ]###
+            //             type      = MLD Report
+            //             code      = 0
+            //             cksum     = None
+            //             mrd       = 0
+            //             reserved  = 0
+            //             mladdr    = ff12::1:1111:1111
+            """
+            33331111111102030405060786dd6000000000200001fe800000000000000000000000000003ff120000
+            0000000000000001111111113a0005020000010083003bbd00000000ff12000000000000000000011111
+            1111
+            """.replace("\\s+".toRegex(), "").trim().uppercase(),
+            //  ###[ Ethernet ]###
+            //    dst       = 33:33:22:22:22:22
+            //    src       = 02:03:04:05:06:07
+            //    type      = IPv6
+            //  ###[ IPv6 ]###
+            //       version   = 6
+            //       tc        = 0
+            //       fl        = 0
+            //       plen      = None
+            //       nh        = Hop-by-Hop Option Header
+            //       hlim      = 1
+            //       src       = fe80::3
+            //       dst       = ff12::1:2222:2222
+            //  ###[ IPv6 Extension Header - Hop-by-Hop Options Header ]###
+            //          nh        = ICMPv6
+            //          len       = None
+            //          autopad   = On
+            //          \options   \
+            //           |###[ Router Alert ]###
+            //           |  otype     = Router Alert [00: skip, 0: Don't change en-route]
+            //           |  optlen    = 2
+            //           |  value     = None
+            //  ###[ MLD - Multicast Listener Report ]###
+            //             type      = MLD Report
+            //             code      = 0
+            //             cksum     = None
+            //             mrd       = 0
+            //             reserved  = 0
+            //             mladdr    = ff12::1:2222:2222
+            """
+            33332222222202030405060786dd6000000000200001fe800000000000000000000000000003ff120000
+            0000000000000001222222223a000502000001008300f77800000000ff12000000000000000000012222
+            2222
+            """.replace("\\s+".toRegex(), "").trim().uppercase(),
+            //  ###[ Ethernet ]###
+            //    dst       = 33:33:33:33:33:33
+            //    src       = 02:03:04:05:06:07
+            //    type      = IPv6
+            //  ###[ IPv6 ]###
+            //       version   = 6
+            //       tc        = 0
+            //       fl        = 0
+            //       plen      = None
+            //       nh        = Hop-by-Hop Option Header
+            //       hlim      = 1
+            //       src       = fe80::3
+            //       dst       = ff12::1:3333:3333
+            //  ###[ IPv6 Extension Header - Hop-by-Hop Options Header ]###
+            //          nh        = ICMPv6
+            //          len       = None
+            //          autopad   = On
+            //          \options   \
+            //           |###[ Router Alert ]###
+            //           |  otype     = Router Alert [00: skip, 0: Don't change en-route]
+            //           |  optlen    = 2
+            //           |  value     = None
+            //  ###[ MLD - Multicast Listener Report ]###
+            //             type      = MLD Report
+            //             code      = 0
+            //             cksum     = None
+            //             mrd       = 0
+            //             reserved  = 0
+            //             mladdr    = ff12::1:3333:3333
+            """
+            33333333333302030405060786dd6000000000200001fe800000000000000000000000000003ff120000
+            0000000000000001333333333a000502000001008300b33400000000ff12000000000000000000013333
+            3333
+            """.replace("\\s+".toRegex(), "").trim().uppercase()
+        )
+
+        val transmitPackets = apfTestHelpers.getAllTransmittedPackets()
+            .map { HexDump.toHexString(it).uppercase() }.toSet()
+        assertEquals(mldV1ReportPkts, transmitPackets)
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testMldV2GeneralQueryReplied() {
+        val apfFilter = getMldApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate MLDv2 general query
+        //  ether = Ether(src='00:11:22:33:44:55', dst='33:33:00:00:00:01')
+        //  ipv6 = IPv6(src='fe80::fc01:83ff:fea6:3712', dst='ff02::1', hlim=1)
+        //  hopOpts = IPv6ExtHdrHopByHop(options=[RouterAlert(otype=5)])
+        //  mld = ICMPv6MLQuery2()
+        //  pkt = ether/ipv6/hopOpts/mld
+        var pkt = """
+            33330000000100112233445586dd6000000000240001fe80000000000000fc0183fffea63712ff02000
+            00000000000000000000000013a000502000001008200a3592710000000000000000000000000000000
+            00000000000000
+        """.replace("\\s+".toRegex(), "").trim()
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            DROPPED_IPV6_MLD_V2_GENERAL_QUERY_REPLIED
+        )
+
+        val transmittedMldV2Reports = apfTestHelpers.consumeTransmittedPackets(1)
+        //  ###[ Ethernet ]###
+        //    dst       = 33:33:00:00:00:16
+        //    src       = 02:03:04:05:06:07
+        //    type      = IPv6
+        //  ###[ IPv6 ]###
+        //       version   = 6
+        //       tc        = 0
+        //       fl        = 0
+        //       plen      = None
+        //       nh        = Hop-by-Hop Option Header
+        //       hlim      = 1
+        //       src       = fe80::3
+        //       dst       = ff02::16
+        //  ###[ IPv6 Extension Header - Hop-by-Hop Options Header ]###
+        //          nh        = ICMPv6
+        //          len       = None
+        //          autopad   = On
+        //          \options   \
+        //           |###[ Router Alert ]###
+        //           |  otype     = Router Alert [00: skip, 0: Don't change en-route]
+        //           |  optlen    = 2
+        //           |  value     = None
+        //  ###[ MLDv2 - Multicast Listener Report ]###
+        //             type      = MLD Report Version 2
+        //             res       = 0
+        //             cksum     = None
+        //             reserved  = 0
+        //             records_number= None
+        //             \records   \
+        //              |###[ ICMPv6 MLDv2 - Multicast Address Record ]###
+        //              |  rtype     = 2
+        //              |  auxdata_len= None
+        //              |  sources_number= None
+        //              |  dst       = ff12::1:1111:1111
+        //              |  sources   = [  ]
+        //              |  auxdata   = b''
+        //              |###[ ICMPv6 MLDv2 - Multicast Address Record ]###
+        //              |  rtype     = 2
+        //              |  auxdata_len= None
+        //              |  sources_number= None
+        //              |  dst       = ff12::1:2222:2222
+        //              |  sources   = [  ]
+        //              |  auxdata   = b''
+        //              |###[ ICMPv6 MLDv2 - Multicast Address Record ]###
+        //              |  rtype     = 2
+        //              |  auxdata_len= None
+        //              |  sources_number= None
+        //              |  dst       = ff12::1:3333:3333
+        //              |  sources   = [  ]
+        //              |  auxdata   = b''
+        val mldV2ReportPkt = """
+            33330000001602030405060786dd60000000004c0001fe800000000000000000000000000003ff020000
+            0000000000000000000000163a000502000001008f00a2d80000000302000000ff120000000000000000
+            00011111111102000000ff12000000000000000000012222222202000000ff1200000000000000000001
+            33333333
+        """.replace("\\s+".toRegex(), "").trim()
+        assertContentEquals(
+            HexDump.hexStringToByteArray(mldV2ReportPkt),
+            transmittedMldV2Reports[0]
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testMldV1GroupSpecificQueryPassed() {
+        val apfFilter = getMldApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate MLDv1 group specific query
+        //  ether = Ether(src='00:11:22:33:44:55', dst='33:33:00:00:00:01')
+        //  ipv6 = IPv6(src='fe80::fc01:83ff:fea6:3712', dst='ff02::1:1111:1111', hlim=1)
+        //  hopOpts = IPv6ExtHdrHopByHop(options=[RouterAlert(otype=5)])
+        //  mld = ICMPv6MLQuery(mladdr='ff02::1:1111:1111')
+        //  pkt = ether/ipv6/hopOpts/mld
+        var pkt = """
+            33330000000100112233445586dd6000000000200001fe80000000000000fc0183fffea63712ff020000
+            0000000000000001111111113a000502000001008200601527100000ff02000000000000000000011111
+            1111
+        """.replace("\\s+".toRegex(), "").trim()
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            PASSED_MLD
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testMldV2GroupSpecificQueryPassed() {
+        val apfFilter = getMldApfFilter()
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate MLDv2 group specific query
+        //  ether = Ether(src='00:11:22:33:44:55', dst='33:33:00:00:00:01')
+        //  ipv6 = IPv6(src='fe80::fc01:83ff:fea6:3712', dst='ff02::1:1111:1111', hlim=1)
+        //  hopOpts = IPv6ExtHdrHopByHop(options=[RouterAlert(otype=5)])
+        //  mld = ICMPv6MLQuery2(mladdr='ff02::1:1111:1111')
+        //  pkt = ether/ipv6/hopOpts/mld
+        var pkt = """
+            33330000000100112233445586dd6000000000240001fe80000000000000fc0183fffea63712ff020000
+            0000000000000001111111113a000502000001008200601127100000ff02000000000000000000011111
+            111100000000
+        """.replace("\\s+".toRegex(), "").trim()
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            PASSED_MLD
+        )
+    }
+
     @Test
     fun testIPv4MulticastPacketFilter() {
         val apfConfig = getDefaultConfig()
@@ -1845,7 +2325,7 @@ class ApfFilterTest {
             APF_VERSION_6,
             program,
             HexDump.hexStringToByteArray(ipv6WithHopByHopOptionPkt),
-            PASSED_MLD
+            PASSED_IPV6_HOPOPTS
         )
     }
 
@@ -2801,6 +3281,144 @@ class ApfFilterTest {
         }
     }
 
+    private fun getApfWithIpv6PingOffloadEnabled(
+        enableMultiCastFilter: Boolean = true
+    ): Pair<ApfFilter, ByteArray> {
+        val apfConfig = getDefaultConfig()
+        apfConfig.multicastFilter = enableMultiCastFilter
+        apfConfig.handleIpv6PingOffload = true
+        val apfFilter = getApfFilter(apfConfig)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
+        val lp = LinkProperties()
+        lp.addLinkAddress(LinkAddress(hostLinkLocalIpv6Address, 64))
+        apfFilter.setLinkProperties(lp)
+        val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
+        return Pair(apfFilter, program)
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIpv6EchoRequestReplied() {
+        doReturn(64).`when`(dependencies).getIpv6DefaultHopLimit(ifParams.name)
+        val (apfFilter, program) = getApfWithIpv6PingOffloadEnabled()
+        // Using scapy to generate IPv6 echo request packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="02:03:04:05:06:07")
+        // ip = IPv6(src="fe80::1", dst="fe80::03")
+        // icmp = ICMPv6EchoRequest(id=1, seq=123)
+        // pkt = eth/ip/icmp/b"hello"
+        val ipv6EchoRequestPkt = """
+            02030405060701020304050686dd60000000000d3a40fe80000000000000000
+            0000000000001fe80000000000000000000000000000380003e640001007b68
+            656c6c6f
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(ipv6EchoRequestPkt),
+            DROPPED_IPV6_ICMP6_ECHO_REQUEST_REPLIED
+        )
+        val transmitPkt = apfTestHelpers.consumeTransmittedPackets(1)[0]
+
+        // ###[ Ethernet ]###
+        //  dst       = 01:02:03:04:05:06
+        //  src       = 02:03:04:05:06:07
+        //  type      = IPv6
+        // ###[ IPv6 ]###
+        //      version   = 6
+        //      tc        = 0
+        //      fl        = 0
+        //      plen      = 13
+        //      nh        = ICMPv6
+        //      hlim      = 64
+        //      src       = fe80::3
+        //      dst       = fe80::1
+        // ###[ ICMPv6 Echo Reply ]###
+        //         type      = Echo Reply
+        //         code      = 0
+        //         cksum     = 0x3d64
+        //         id        = 0x1
+        //         seq       = 0x7b
+        //         data      = b'hello'
+        val expectedReply = """
+            01020304050602030405060786DD60000000000D3A40FE80000000000000000
+            0000000000003FE80000000000000000000000000000181003D640001007B68
+            656C6C6F
+        """.replace("\\s+".toRegex(), "").trim()
+        assertContentEquals(
+            HexDump.hexStringToByteArray(expectedReply),
+            transmitPkt
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testCorruptedIpv6IcmpPacketDropped() {
+        val (apfFilter, program) = getApfWithIpv6PingOffloadEnabled()
+        // Using scapy to generate corrupted IPv6 ping packet
+        // eth = Ether(src="01:02:03:04:05:06", dst="02:03:04:05:06:07")
+        // ip = IPv6(src="fe80::1", dst="ff02::fb")
+        // icmp = ICMPv6EchoRequest(id=1, seq=123)
+        // pkt = eth/ip/icmp
+        // (drop the last byte in the packet)
+        val ipv6EchoRequestPkt = """
+            02030405060701020304050686dd6000000000083a40fe80000000000000000
+            0000000000001fe8000000000000000000000000000038000823b000100
+        """.replace("\\s+".toRegex(), "").trim()
+
+         apfTestHelpers.verifyProgramRun(
+             apfFilter.mApfVersionSupported,
+             program,
+             HexDump.hexStringToByteArray(ipv6EchoRequestPkt),
+             DROPPED_IPV6_ICMP6_ECHO_REQUEST_INVALID
+         )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIpv6EchoRequestToOtherHostPassed() {
+        val (apfFilter, program) = getApfWithIpv4PingOffloadEnabled()
+        // Using scapy to generate IPv6 echo request packet to other host:
+        // eth = Ether(src="01:02:03:04:05:06", dst="02:03:04:05:06:07")
+        // ip = IPv6(src="fe80::1", dst="fe80::02")
+        // icmp = ICMPv6EchoRequest(id=1, seq=123)
+        // pkt = eth/ip/icmp/b"hello"
+        val ipv6EchoRequestPkt = """
+            02030405060701020304050686dd60000000000d3a40fe80000000000000000
+            0000000000001fe80000000000000000000000000000280003e650001007b68
+            656c6c6f
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(ipv6EchoRequestPkt),
+            PASSED_IPV6_ICMP
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testIpv6EchoReplyPassed() {
+        val (apfFilter, program) = getApfWithIpv4PingOffloadEnabled()
+        // Using scapy to generate IPv6 echo reply packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="02:03:04:05:06:07")
+        // ip = IPv6(src="fe80::1", dst="fe80::03")
+        // icmp = ICMPv6EchoReply(id=1, seq=123)
+        // pkt = eth/ip/icmp
+        val ipv6EchoReplyPkt = """
+            02030405060701020304050686dd6000000000083a40fe80000000000000000
+            0000000000001fe8000000000000000000000000000038100813b0001007b
+        """.replace("\\s+".toRegex(), "").trim()
+
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(ipv6EchoReplyPkt),
+            PASSED_IPV6_ICMP
+        )
+    }
+
     private fun getApfWithIpv4PingOffloadEnabled(
         enableMultiCastFilter: Boolean = true
     ): Pair<ApfFilter, ByteArray> {
@@ -3110,6 +3728,14 @@ class ApfFilterTest {
             0,
             OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
         )
+        val manySubtypeOffloadInfo = OffloadServiceInfo(
+            OffloadServiceInfo.Key("gambit", "_testsubtype._tcp"),
+            listOf("subtype1", "subtype2", "subtype3", "subtype4", "subtype5"),
+            "Android_f47ac10b58cc4b88bc3f5e7a81e59872.local",
+            HexDump.hexStringToByteArray(castOffloadPayload),
+            0,
+            OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
+        )
 
         visibleOnHandlerThread(handler) {
             offloadEngine.onOffloadServiceUpdated(castOffloadInfo)
@@ -3117,10 +3743,11 @@ class ApfFilterTest {
             if (removeTvRemoteRecord) {
                 offloadEngine.onOffloadServiceRemoved(tvRemoteOffloadInfo)
             }
+            offloadEngine.onOffloadServiceUpdated(manySubtypeOffloadInfo)
         }
         val program = apfTestHelpers.consumeInstalledProgram(
             apfController,
-            installCnt = if (removeTvRemoteRecord) 3 else 2
+            installCnt = if (removeTvRemoteRecord) 4 else 3
         )
         return Pair(apfFilter, program)
     }
@@ -3957,6 +4584,47 @@ class ApfFilterTest {
         )
     }
 
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testMdnsOffloadFailOpenForTooManySubtype() {
+        val (apfFilter, program) = getApfWithMdnsOffloadEnabled()
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
+        // ip = IP(src="10.0.0.3", dst="224.0.0.251")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="_testsubtype._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val typePtrQuery = """
+            01005e0000fb0102030405060800450000450001000040118fa90a000003e00
+            000fb14e914e900319b020000010000010000000000000c5f74657374737562
+            74797065045f746370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(typePtrQuery),
+            PASSED_MDNS
+        )
+
+        // Using scapy to generate packet:
+        // eth = Ether(src="01:02:03:04:05:06", dst="01:00:5e:00:00:fb")
+        // ip = IP(src="10.0.0.3", dst="224.0.0.251")
+        // udp = UDP(dport=5353, sport=5353)
+        // dns = DNS(qd=DNSQR(qname="sub1._sub._testsubtype._tcp.local", qtype="PTR"))
+        // pkt = eth/ip/udp/dns
+        val subTypePtrQuery = """
+            01005e0000fb01020304050608004500004f0001000040118f9f0a000003e00
+            000fb14e914e9003b1b3f0000010000010000000000000473756231045f7375
+            620c5f7465737473756274797065045f746370056c6f63616c00000c0001
+        """.replace("\\s+".toRegex(), "").trim()
+        apfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(subTypePtrQuery),
+            PASSED_MDNS
+        )
+    }
+
     @Test
     fun testApfProgramUpdate() {
         val apfFilter = getApfFilter()
@@ -4020,16 +4688,54 @@ class ApfFilterTest {
         mcastAddrs.add(addr)
         doReturn(mcastAddrs).`when`(dependencies).getIPv4MulticastAddresses(any())
         val testPacket = HexDump.hexStringToByteArray("000000")
-        Os.write(igmpWriteSocket, testPacket, 0, testPacket.size)
+        Os.write(mcastWriteSocket, testPacket, 0, testPacket.size)
         apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
 
-        Os.write(igmpWriteSocket, testPacket, 0, testPacket.size)
+        Os.write(mcastWriteSocket, testPacket, 0, testPacket.size)
         Thread.sleep(NO_CALLBACK_TIMEOUT_MS)
         verify(apfController, never()).installPacketFilter(any(), any())
 
         mcastAddrs.remove(addr)
         doReturn(mcastAddrs).`when`(dependencies).getIPv4MulticastAddresses(any())
-        Os.write(igmpWriteSocket, testPacket, 0, testPacket.size)
+        Os.write(mcastWriteSocket, testPacket, 0, testPacket.size)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testApfProgramUpdateWithIPv6MulticastAddressChange() {
+        val mcastAddrs = mutableListOf(
+            IPV6_ADDR_ALL_NODES_MULTICAST,
+            IPV6_ADDR_NODE_LOCAL_ALL_NODES_MULTICAST
+        )
+        doReturn(mcastAddrs).`when`(dependencies).getIPv6MulticastAddresses(any())
+        val apfConfig = getDefaultConfig()
+        apfConfig.handleMldOffload = true
+        val apfFilter = getApfFilter(apfConfig)
+        val ipv6LinkAddress = LinkAddress(hostLinkLocalIpv6Address, 64)
+        val lp = LinkProperties()
+        lp.addLinkAddress(ipv6LinkAddress)
+        apfFilter.setLinkProperties(lp)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        val addr = InetAddress.getByName("ff0e::1") as Inet6Address
+        mcastAddrs.add(addr)
+        updateIPv6MulticastAddrs(apfFilter, mcastAddrs)
+        val testPacket = HexDump.hexStringToByteArray("000000")
+        Os.write(mcastWriteSocket, testPacket, 0, testPacket.size)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
+
+        var solicitedNodeMcastAddr = InetAddress.getByName("ff02::1:ff12:3456") as Inet6Address
+        mcastAddrs.add(solicitedNodeMcastAddr)
+        Os.write(mcastWriteSocket, testPacket, 0, testPacket.size)
+        apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
+
+        Os.write(mcastWriteSocket, testPacket, 0, testPacket.size)
+        Thread.sleep(NO_CALLBACK_TIMEOUT_MS)
+        verify(apfController, never()).installPacketFilter(any(), any())
+
+        mcastAddrs.remove(addr)
+        updateIPv6MulticastAddrs(apfFilter, mcastAddrs)
+        Os.write(mcastWriteSocket, testPacket, 0, testPacket.size)
         apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
     }
 
@@ -4083,12 +4789,43 @@ class ApfFilterTest {
     @Test
     fun testApfFailOpenOnLimitedRAM() {
         val apfConfig = getDefaultConfig()
-        apfConfig.apfRamSize = 256
+        apfConfig.apfRamSize = 512
         val apfFilter = getApfFilter(apfConfig)
         val program = apfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
         assertContentEquals(
             ByteArray(apfConfig.apfRamSize - ApfCounterTracker.Counter.totalSize()) { 0 },
             program
         )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
+    fun testCreateEgressReportReaderSocket() {
+        var apfFilter = getApfFilter()
+        verify(dependencies, never()).createEgressIgmpReportsReaderSocket(anyInt())
+        verify(dependencies, never()).createEgressMulticastReportsReaderSocket(anyInt())
+        clearInvocations(dependencies)
+
+        val apfConfig = getDefaultConfig()
+        apfConfig.handleMldOffload = true
+        apfFilter = getApfFilter(apfConfig)
+
+        verify(dependencies, never()).createEgressIgmpReportsReaderSocket(anyInt())
+        verify(dependencies, times(1)).createEgressMulticastReportsReaderSocket(anyInt())
+        clearInvocations(dependencies)
+
+        apfConfig.handleIgmpOffload = true
+        apfConfig.handleMldOffload = false
+        apfFilter = getApfFilter(apfConfig)
+
+        verify(dependencies, never()).createEgressMulticastReportsReaderSocket(anyInt())
+        verify(dependencies, times(1)).createEgressIgmpReportsReaderSocket(anyInt())
+        clearInvocations(dependencies)
+
+        apfConfig.handleIgmpOffload = true
+        apfConfig.handleMldOffload = true
+        apfFilter = getApfFilter(apfConfig)
+        verify(dependencies, never()).createEgressIgmpReportsReaderSocket(anyInt())
+        verify(dependencies, times(1)).createEgressMulticastReportsReaderSocket(anyInt())
     }
 }
