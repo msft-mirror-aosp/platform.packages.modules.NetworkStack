@@ -361,6 +361,11 @@ public class NetworkStackUtils {
      */
     public static final String APF_HANDLE_IGMP_OFFLOAD = "apf_handle_igmp_offload";
 
+    /**
+     * Kill switch flag to disable the feature of handle MLD offload in Apf.
+     */
+    public static final String APF_HANDLE_MLD_OFFLOAD = "apf_handle_mld_offload";
+
     static {
         System.loadLibrary("networkstackutilsjni");
     }

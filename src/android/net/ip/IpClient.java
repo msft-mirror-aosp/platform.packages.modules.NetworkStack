@@ -85,6 +85,7 @@ import static com.android.networkstack.apishim.ConstantsShim.IFA_F_NOPREFIXROUTE
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ARP_OFFLOAD;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_IGMP_OFFLOAD;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_IGMP_OFFLOAD_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_MLD_OFFLOAD;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_MLD_OFFLOAD_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ND_OFFLOAD;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_PING4_OFFLOAD_VERSION;
@@ -1107,8 +1108,10 @@ public class IpClient extends StateMachine {
                         || mDependencies.isFeatureEnabled(context, APF_HANDLE_IGMP_OFFLOAD_VERSION)
                     );
         mApfHandleMldOffload =
-                isAtLeast25Q2() || mDependencies.isFeatureEnabled(context,
-                        APF_HANDLE_MLD_OFFLOAD_VERSION);
+                mDependencies.isFeatureNotChickenedOut(mContext, APF_HANDLE_MLD_OFFLOAD)
+                    && (isAtLeast25Q2()
+                        || mDependencies.isFeatureEnabled(context, APF_HANDLE_MLD_OFFLOAD_VERSION)
+                    );
         mApfHandleIpv4PingOffload =
                 isAtLeast25Q2() || mDependencies.isFeatureEnabled(context,
                         APF_HANDLE_PING4_OFFLOAD_VERSION);
