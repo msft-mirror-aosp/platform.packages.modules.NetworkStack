@@ -82,10 +82,17 @@ import static com.android.net.module.util.NetworkStackConstants.RFC7421_PREFIX_L
 import static com.android.net.module.util.NetworkStackConstants.VENDOR_SPECIFIC_IE_ID;
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_MANAGETEMPADDR;
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_NOPREFIXROUTE;
+import static com.android.networkstack.util.NetworkStackUtils.APF_ENABLE;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ARP_OFFLOAD;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_IGMP_OFFLOAD;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_IGMP_OFFLOAD_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_MLD_OFFLOAD;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_MLD_OFFLOAD_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ND_OFFLOAD;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_PING4_OFFLOAD;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_PING4_OFFLOAD_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_PING6_OFFLOAD;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_PING6_OFFLOAD_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.APF_POLLING_COUNTERS_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PD_PREFERRED_FLAG_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION;
@@ -812,6 +819,7 @@ public class IpClient extends StateMachine {
     private final boolean mIsAcceptRaMinLftEnabled;
     private final boolean mEnableApfPollingCounters;
     private final boolean mPopulateLinkAddressLifetime;
+    private final boolean mEnableApf;
     private final boolean mApfHandleArpOffload;
     private final boolean mApfHandleNdOffload;
     private final boolean mApfHandleMdnsOffload;
@@ -1091,6 +1099,7 @@ public class IpClient extends StateMachine {
         mIsAcceptRaMinLftEnabled =
                 SdkLevel.isAtLeastV() || mDependencies.isFeatureEnabled(context,
                         IPCLIENT_IGNORE_LOW_RA_LIFETIME_VERSION);
+        mEnableApf = mDependencies.isFeatureNotChickenedOut(mContext, APF_ENABLE);
         mApfHandleArpOffload = mDependencies.isFeatureNotChickenedOut(
                 mContext, APF_HANDLE_ARP_OFFLOAD);
         mApfHandleNdOffload = mDependencies.isFeatureNotChickenedOut(
@@ -1099,13 +1108,25 @@ public class IpClient extends StateMachine {
         mApfHandleMdnsOffload = isAtLeast25Q2() && context.getPackageManager().hasSystemFeature(
                 FEATURE_LEANBACK);
         mApfHandleIgmpOffload =
-                isAtLeast25Q2() || mDependencies.isFeatureEnabled(context,
-                        APF_HANDLE_IGMP_OFFLOAD_VERSION);
-        mApfHandleMldOffload = isAtLeast25Q2();
+                mDependencies.isFeatureNotChickenedOut(mContext, APF_HANDLE_IGMP_OFFLOAD)
+                    && (isAtLeast25Q2()
+                        || mDependencies.isFeatureEnabled(context, APF_HANDLE_IGMP_OFFLOAD_VERSION)
+                    );
+        mApfHandleMldOffload =
+                mDependencies.isFeatureNotChickenedOut(mContext, APF_HANDLE_MLD_OFFLOAD)
+                    && (isAtLeast25Q2()
+                        || mDependencies.isFeatureEnabled(context, APF_HANDLE_MLD_OFFLOAD_VERSION)
+                    );
         mApfHandleIpv4PingOffload =
-                isAtLeast25Q2() || mDependencies.isFeatureEnabled(context,
-                        APF_HANDLE_PING4_OFFLOAD_VERSION);
-        mApfHandleIpv6PingOffload = isAtLeast25Q2();
+                mDependencies.isFeatureNotChickenedOut(mContext, APF_HANDLE_PING4_OFFLOAD)
+                    && (isAtLeast25Q2()
+                        || mDependencies.isFeatureEnabled(context, APF_HANDLE_PING4_OFFLOAD_VERSION)
+                    );
+        mApfHandleIpv6PingOffload =
+                mDependencies.isFeatureNotChickenedOut(mContext, APF_HANDLE_PING6_OFFLOAD)
+                    && (isAtLeast25Q2()
+                        || mDependencies.isFeatureEnabled(context, APF_HANDLE_PING6_OFFLOAD_VERSION)
+                );
         mPopulateLinkAddressLifetime = mDependencies.isFeatureEnabled(context,
                 IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION);
         mIgnoreNudFailureEnabled = mDependencies.isFeatureEnabled(mContext,
@@ -2764,7 +2785,7 @@ public class IpClient extends StateMachine {
     @Nullable
     private ApfFilter maybeCreateApfFilter(final ApfCapabilities apfCaps) {
         ApfFilter.ApfConfiguration apfConfig = new ApfFilter.ApfConfiguration();
-        if (apfCaps == null) {
+        if (apfCaps == null || !mEnableApf) {
             return null;
         }
         // For now only support generating programs for Ethernet frames. If this restriction is
