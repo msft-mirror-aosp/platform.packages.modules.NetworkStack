@@ -375,8 +375,6 @@ public class ApfFilter {
     }
 
     private static final String TAG = "ApfFilter";
-    private static final boolean DBG = true;
-    private static final boolean VDBG = false;
 
     private final int mApfRamSize;
     private final int mMaximumApfProgramSize;
@@ -3687,7 +3685,7 @@ public class ApfFilter {
                 ra.generateFilter(gen, timeSeconds);
                 // Stop if we get too big.
                 if (gen.programLengthOverEstimate() > mMaximumApfProgramSize) {
-                    if (VDBG) Log.d(TAG, "Past maximum program size, skipping RAs");
+                    Log.i(TAG, "Past maximum program size, skipping RAs");
                     sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_OVER_SIZE_FAILURE);
                     break;
                 }
@@ -3720,9 +3718,6 @@ public class ApfFilter {
         mLastInstalledProgram = program;
         mMaxProgramSize = Math.max(mMaxProgramSize, program.length);
 
-        if (VDBG) {
-            hexDump("Installing filter: ", program, program.length);
-        }
     }
 
     private void hexDump(String msg, byte[] packet, int length) {
@@ -3749,8 +3744,6 @@ public class ApfFilter {
      */
     @VisibleForTesting
     public void processRa(byte[] packet, int length) {
-        if (VDBG) hexDump("Read packet = ", packet, length);
-
         final Ra ra;
         try {
             ra = new Ra(packet, length);
@@ -4240,12 +4233,10 @@ public class ApfFilter {
             pw.increaseIndent();
             pw.println(String.format(
                     "Last seen %ds ago", secondsSinceBoot() - ra.mLastSeen));
-            if (DBG) {
-                pw.println("Last match:");
-                pw.increaseIndent();
-                pw.println(ra.getLastMatchingPacket());
-                pw.decreaseIndent();
-            }
+            pw.println("Last match:");
+            pw.increaseIndent();
+            pw.println(ra.getLastMatchingPacket());
+            pw.decreaseIndent();
             pw.decreaseIndent();
         }
         pw.decreaseIndent();
@@ -4276,12 +4267,10 @@ public class ApfFilter {
         }
         pw.decreaseIndent();
 
-        if (DBG) {
-            pw.println("Last program:");
-            pw.increaseIndent();
-            pw.println(HexDump.toHexString(mLastInstalledProgram, false /* lowercase */));
-            pw.decreaseIndent();
-        }
+        pw.println("Last program:");
+        pw.increaseIndent();
+        pw.println(HexDump.toHexString(mLastInstalledProgram, false /* lowercase */));
+        pw.decreaseIndent();
 
         pw.println("APF packet counters: ");
         pw.increaseIndent();
@@ -4359,10 +4348,6 @@ public class ApfFilter {
                 }
             } catch (ArrayIndexOutOfBoundsException e) {
                 pw.println("Uh-oh: " + e);
-            }
-            if (VDBG) {
-                pw.println("Raw data dump: ");
-                pw.println(HexDump.dumpHexString(mDataSnapshot));
             }
         }
         pw.decreaseIndent();
