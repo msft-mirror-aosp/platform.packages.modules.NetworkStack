@@ -461,14 +461,6 @@ public class IpReachabilityMonitor {
         maybeRestoreNeighborParameters();
     }
 
-    private boolean shouldIgnoreIncompleteNeighbor(@Nullable final NeighborEvent prev,
-            @NonNull final NeighborEvent event) {
-        // mIgnoreNeverReachableNeighbor already takes care of incomplete IPv6 neighbors, so do not
-        // apply this logic.
-        // TODO: clean up the flags related to the incomplete IPv6 neighbors.
-        return false;
-    }
-
     private void handleNeighborLost(@Nullable final NeighborEvent prev,
             @NonNull final NeighborEvent event) {
         final LinkProperties whatIfLp = new LinkProperties(mLinkProperties);
@@ -505,38 +497,10 @@ public class IpReachabilityMonitor {
             }
         }
 
-        // TODO: cleanup below code(checking if the incomplete IPv6 neighbor should be ignored)
-        // once the feature of ignoring the neighbor was never ever reachable rolls out.
-        final boolean ignoreIncompleteIpv6DnsServer = isNeighborDnsServer(event)
-                && shouldIgnoreIncompleteNeighbor(prev, event);
-
-        // Generally Router Advertisement should take SLLA option, then device won't do address
-        // resolution for default router's IPv6 link-local address automatically. But sometimes
-        // it may miss SLLA option, also add a flag to check these cases.
-        final boolean ignoreIncompleteIpv6DefaultRouter = isNeighborDefaultRouter(event)
-                        && shouldIgnoreIncompleteNeighbor(prev, event);
-
-        // Only ignore the incomplete IPv6 neighbor iff IPv4 is still provisioned. For IPv6-only
-        // networks, we MUST not ignore any incomplete IPv6 neighbor.
-        final boolean ignoreIncompleteIpv6Neighbor =
-                (ignoreIncompleteIpv6DnsServer || ignoreIncompleteIpv6DefaultRouter)
-                        && whatIfLp.isIpv4Provisioned();
-
-        // It's better to remove the incompleted on-link IPv6 DNS server or default router from
-        // watch list, otherwise, when wifi invokes probeAll later (e.g. post roam) to send probe
-        // to an incompleted on-link DNS server or default router, it should fail to send netlink
-        // message to kernel as there is no neighbor cache entry for it at all.
-        if (ignoreIncompleteIpv6Neighbor) {
-            Log.d(TAG, "remove incomplete IPv6 neighbor " + event.ip
-                    + " which fails to respond to address resolution from watch list.");
-            mNeighborWatchList.remove(event.ip);
-        }
-
         final boolean lostIpv4Provisioning =
                 mLinkProperties.isIpv4Provisioned() && !whatIfLp.isIpv4Provisioned();
         final boolean lostIpv6Provisioning =
-                mLinkProperties.isIpv6Provisioned() && !whatIfLp.isIpv6Provisioned()
-                        && !ignoreIncompleteIpv6Neighbor;
+                mLinkProperties.isIpv6Provisioned() && !whatIfLp.isIpv6Provisioned();
         final boolean lostProvisioning = lostIpv4Provisioning || lostIpv6Provisioning;
         final NudEventType type = getNudFailureEventType(isFromProbe(),
                 isNudFailureDueToRoam(), lostProvisioning);
