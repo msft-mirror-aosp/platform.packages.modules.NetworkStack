@@ -4018,7 +4018,7 @@ public class ApfFilter {
 
     @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)
     private boolean enableArpOffload() {
-        return mHandleArpOffload && useApfV6Generator();
+        return mHandleArpOffload && useApfV6Generator() && mIPv4Address != null;
     }
 
     @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)
