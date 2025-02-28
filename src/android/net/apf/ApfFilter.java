@@ -1141,13 +1141,6 @@ public class ApfFilter {
             return lifetime;
         }
 
-        /**
-         * Return the minimum lifetime in RDNSSs
-         */
-        public long minRdnssLifetime() {
-            return mMinRdnssLifetime;
-        }
-
         // Note that this parses RA and may throw InvalidRaException (from
         // Buffer.position(int) or due to an invalid-length option) or IndexOutOfBoundsException
         // (from ByteBuffer.get(int) ) if parsing encounters something non-compliant with
@@ -3792,7 +3785,7 @@ public class ApfFilter {
         mLowestRioRouteLifetimeSeconds = getMinForPositiveValue(
                 mLowestRioRouteLifetimeSeconds, ra.mMinRioRouteLifetime);
         mLowestRdnssLifetimeSeconds = getMinForPositiveValue(
-                mLowestRdnssLifetimeSeconds, ra.minRdnssLifetime());
+                mLowestRdnssLifetimeSeconds, ra.mMinRdnssLifetime);
 
         // Remove all expired RA filters before trying to match the new RA.
         // TODO: matches() still checks that the old RA filter has not expired. Consider removing
