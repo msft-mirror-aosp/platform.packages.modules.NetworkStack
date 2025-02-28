@@ -947,11 +947,11 @@ public class ApfFilter {
         // Router lifetime in packet
         private final int mRouterLifetime;
         // Minimum valid lifetime of PIOs in packet, Long.MAX_VALUE means not seen.
-        private long mMinPioValidLifetime = Long.MAX_VALUE;
+        private final long mMinPioValidLifetime;
         // Minimum route lifetime of RIOs in packet, Long.MAX_VALUE means not seen.
-        private long mMinRioRouteLifetime = Long.MAX_VALUE;
+        private final long mMinRioRouteLifetime;
         // Minimum lifetime of RDNSSs in packet, Long.MAX_VALUE means not seen.
-        private long mMinRdnssLifetime = Long.MAX_VALUE;
+        private final long mMinRdnssLifetime;
         // The time in seconds in which some of the information contained in this RA expires.
         private final int mExpirationTime;
         // When the packet was last captured, in seconds since Unix Epoch
@@ -1214,6 +1214,10 @@ public class ApfFilter {
             // Add remaining fields (reachable time and retransmission timer) to match section.
             addMatchUntil(ICMP6_RA_OPTION_OFFSET);
 
+            long minPioValidLifetime = Long.MAX_VALUE;
+            long minRioRouteLifetime = Long.MAX_VALUE;
+            long minRdnssLifetime = Long.MAX_VALUE;
+
             while (mPacket.hasRemaining()) {
                 final int position = mPacket.position();
                 final int optionType = getUint8(mPacket, position);
@@ -1233,8 +1237,8 @@ public class ApfFilter {
                         lifetime = getUint32(mPacket, mPacket.position());
                         addLifetimeSection(ICMP6_PREFIX_OPTION_VALID_LIFETIME_LEN,
                                 lifetime, mAcceptRaMinLft);
-                        mMinPioValidLifetime = getMinForPositiveValue(
-                                mMinPioValidLifetime, lifetime);
+                        minPioValidLifetime = getMinForPositiveValue(
+                                minPioValidLifetime, lifetime);
                         if (lifetime == 0) mNumZeroLifetimeRas++;
 
                         // Parse preferred lifetime
@@ -1252,14 +1256,14 @@ public class ApfFilter {
                     case ICMP6_RDNSS_OPTION_TYPE:
                         mRdnssOptionOffsets.add(position);
                         lifetime = add4ByteLifetimeOption(optionLength, mMinRdnssLifetimeSec, true);
-                        mMinRdnssLifetime = getMinForPositiveValue(mMinRdnssLifetime, lifetime);
+                        minRdnssLifetime = getMinForPositiveValue(minRdnssLifetime, lifetime);
                         if (lifetime == 0) mNumZeroLifetimeRas++;
                         break;
                     case ICMP6_ROUTE_INFO_OPTION_TYPE:
                         mRioOptionOffsets.add(position);
                         lifetime = add4ByteLifetimeOption(optionLength, mAcceptRaMinLft, false);
-                        mMinRioRouteLifetime = getMinForPositiveValue(
-                                mMinRioRouteLifetime, lifetime);
+                        minRioRouteLifetime = getMinForPositiveValue(
+                                minRioRouteLifetime, lifetime);
                         if (lifetime == 0) mNumZeroLifetimeRas++;
                         break;
                     case ICMP6_SOURCE_LL_ADDRESS_OPTION_TYPE:
@@ -1280,6 +1284,10 @@ public class ApfFilter {
                         break;
                 }
             }
+
+            mMinPioValidLifetime = minPioValidLifetime;
+            mMinRioRouteLifetime = minRioRouteLifetime;
+            mMinRdnssLifetime = minRdnssLifetime;
             mExpirationTime = getExpirationTime();
         }
 
