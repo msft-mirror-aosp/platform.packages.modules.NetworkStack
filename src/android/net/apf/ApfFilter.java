@@ -1142,13 +1142,6 @@ public class ApfFilter {
         }
 
         /**
-         * Return the router lifetime of the RA
-         */
-        public int routerLifetime() {
-            return mRouterLifetime;
-        }
-
-        /**
          * Return the minimum route lifetime in RIOs
          */
         public long minRioRouteLifetime() {
@@ -3800,7 +3793,7 @@ public class ApfFilter {
 
         // Update info for Metrics
         mLowestRouterLifetimeSeconds = getMinForPositiveValue(
-                mLowestRouterLifetimeSeconds, ra.routerLifetime());
+                mLowestRouterLifetimeSeconds, ra.mRouterLifetime);
         mLowestPioValidLifetimeSeconds = getMinForPositiveValue(
                 mLowestPioValidLifetimeSeconds, ra.mMinPioValidLifetime);
         mLowestRioRouteLifetimeSeconds = getMinForPositiveValue(
