@@ -270,6 +270,18 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
     }
 
     /**
+     * Add the content to the data region if it wasn't exist.
+     */
+    public final Type maybeUpdateDataRegion(@NonNull byte[] content)
+            throws IllegalInstructionException {
+        if (mInstructions.isEmpty()) {
+            throw new IllegalInstructionException("There are no instructions");
+        }
+        mInstructions.get(0).maybeUpdateBytesImm(content, 0, content.length);
+        return self();
+    }
+
+    /**
      * Add an instruction to the end of the program to copy data from APF program/data region to
      * output buffer and auto-increment the output buffer pointer.
      *
@@ -367,6 +379,15 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
         return append(new Instruction(ExtendedOpcodes.JDNSQMATCHSAFE, Rbit0).setTargetLabel(
                 tgt).addU8(qtype).setBytesImm(qnames));
     }
+
+    /**
+     * Appends a conditional jump instruction to the program: Jumps to {@code tgt} if the UDP
+     * payload's DNS questions contain the QNAMEs specified in {@code qnames} and qtype
+     * equals any of {@code qtypes}. Examines the payload starting at the offset in R0.
+     * Drops packets if packets are corrupted.
+     */
+    public abstract Type addJumpIfPktAtR0ContainDnsQ(@NonNull byte[] qnames, @NonNull int[] qtypes,
+            short tgt);
 
     /**
      * Appends a conditional jump instruction to the program: Jumps to {@code tgt} if the UDP
@@ -488,10 +509,11 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
 
 
     /**
-     * Check if the byte is valid dns character: A-Z,0-9,-,_
+     * Check if the byte is valid dns character: A-Z,0-9,-,_,%,@
      */
     private static boolean isValidDnsCharacter(byte c) {
-        return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '%';
+        return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '%'
+                || c == '@';
     }
 
     private static void validateNames(@NonNull byte[] names) {
