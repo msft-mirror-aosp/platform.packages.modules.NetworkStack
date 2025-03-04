@@ -409,7 +409,9 @@ class ApfFilterTest {
         handlerThread.join()
     }
 
-    private fun getDefaultConfig(apfVersion: Int = APF_VERSION_6): ApfFilter.ApfConfiguration {
+    private fun getDefaultConfig(
+        apfVersion: Int = apfInterpreterVersion
+    ): ApfFilter.ApfConfiguration {
         val config = ApfFilter.ApfConfiguration()
         config.apfVersionSupported = apfVersion
         // 4K is the highly recommended value in APFv6 for vendor
@@ -423,7 +425,7 @@ class ApfFilterTest {
     }
 
     private fun getApfFilter(
-            apfCfg: ApfFilter.ApfConfiguration = getDefaultConfig(APF_VERSION_6)
+            apfCfg: ApfFilter.ApfConfiguration = getDefaultConfig(apfInterpreterVersion)
     ): ApfFilter {
         lateinit var apfFilter: ApfFilter
         handler.post {
