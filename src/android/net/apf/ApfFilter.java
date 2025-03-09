@@ -3809,6 +3809,7 @@ public class ApfFilter {
                 }
 
                 ra.generateFilter(gen, timeSeconds);
+                programMinLft = Math.min(programMinLft, ra.getRemainingFilterLft(timeSeconds));
                 rasToFilter.add(ra);
             }
 
@@ -3818,20 +3819,7 @@ public class ApfFilter {
                         mNumOfMdnsRuleToOffload);
             }
 
-            // Step 2: Actually generate the program
-            gen = createApfGenerator();
-            labelCheckMdnsQueryPayload = gen.getUniqueLabel();
-            emitPrologue(gen, labelCheckMdnsQueryPayload);
             mNumFilteredRas = rasToFilter.size();
-            for (Ra ra : rasToFilter) {
-                ra.generateFilter(gen, timeSeconds);
-                programMinLft = Math.min(programMinLft, ra.getRemainingFilterLft(timeSeconds));
-            }
-            gen.addDefaultPacketHandling();
-            if (enableMdns4Offload() || enableMdns6Offload()) {
-                generateMdnsQueryOffload((ApfV6GeneratorBase<?>) gen, labelCheckMdnsQueryPayload,
-                        mNumOfMdnsRuleToOffload);
-            }
             mOverEstimatedProgramSize = gen.programLengthOverEstimate();
             program = gen.generate();
         } catch (IllegalInstructionException | IllegalStateException | IllegalArgumentException e) {
