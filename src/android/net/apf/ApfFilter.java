@@ -3808,7 +3808,14 @@ public class ApfFilter {
                     break;
                 }
 
+                ra.generateFilter(gen, timeSeconds);
                 rasToFilter.add(ra);
+            }
+
+            gen.addDefaultPacketHandling();
+            if (enableMdns4Offload() || enableMdns6Offload()) {
+                generateMdnsQueryOffload((ApfV6GeneratorBase<?>) gen, labelCheckMdnsQueryPayload,
+                        mNumOfMdnsRuleToOffload);
             }
 
             // Step 2: Actually generate the program
