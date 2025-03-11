@@ -3492,7 +3492,10 @@ public class IpClient extends StateMachine {
         private ConnectivityPacketTracker createPacketTracker() {
             try {
                 return new ConnectivityPacketTracker(
-                        getHandler(), mInterfaceParams, mConnectivityPacketLog);
+                        getHandler(),
+                        mInterfaceParams,
+                        mConnectivityPacketLog,
+                        true /* attachFilter */);
             } catch (IllegalArgumentException e) {
                 return null;
             }
