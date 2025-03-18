@@ -15,6 +15,7 @@
  */
 package android.net.apf;
 
+import static android.net.apf.BaseApfGenerator.Rbit.Rbit1;
 import static android.net.apf.BaseApfGenerator.Register.R0;
 
 import androidx.annotation.NonNull;
@@ -42,37 +43,31 @@ public abstract class ApfV61GeneratorBase<Type extends ApfV61GeneratorBase<Type>
 
     @Override
     public final Type addCountAndDropIfR0Equals(long val, ApfCounterTracker.Counter cnt) {
-        checkDropCounterRange(cnt);
         return addJumpIfR0Equals(val, cnt.getJumpDropLabel());
     }
 
     @Override
     public final Type addCountAndPassIfR0Equals(long val, ApfCounterTracker.Counter cnt) {
-        checkPassCounterRange(cnt);
         return addJumpIfR0Equals(val, cnt.getJumpPassLabel());
     }
 
     @Override
     public final Type addCountAndDropIfR0NotEquals(long val, ApfCounterTracker.Counter cnt) {
-        checkDropCounterRange(cnt);
         return addJumpIfR0NotEquals(val, cnt.getJumpDropLabel());
     }
 
     @Override
     public final Type addCountAndPassIfR0NotEquals(long val, ApfCounterTracker.Counter cnt) {
-        checkPassCounterRange(cnt);
         return addJumpIfR0NotEquals(val, cnt.getJumpPassLabel());
     }
 
     @Override
     public Type addCountAndDropIfR0AnyBitsSet(long val, ApfCounterTracker.Counter cnt) {
-        checkDropCounterRange(cnt);
         return addJumpIfR0AnyBitsSet(val, cnt.getJumpDropLabel());
     }
 
     @Override
     public Type addCountAndPassIfR0AnyBitsSet(long val, ApfCounterTracker.Counter cnt) {
-        checkPassCounterRange(cnt);
         return addJumpIfR0AnyBitsSet(val, cnt.getJumpPassLabel());
     }
 
@@ -81,7 +76,6 @@ public abstract class ApfV61GeneratorBase<Type extends ApfV61GeneratorBase<Type>
         if (val <= 0) {
             throw new IllegalArgumentException("val must > 0, current val: " + val);
         }
-        checkDropCounterRange(cnt);
         return addJumpIfR0LessThan(val, cnt.getJumpDropLabel());
     }
 
@@ -90,7 +84,6 @@ public abstract class ApfV61GeneratorBase<Type extends ApfV61GeneratorBase<Type>
         if (val <= 0) {
             throw new IllegalArgumentException("val must > 0, current val: " + val);
         }
-        checkPassCounterRange(cnt);
         return addJumpIfR0LessThan(val, cnt.getJumpPassLabel());
     }
 
@@ -99,7 +92,6 @@ public abstract class ApfV61GeneratorBase<Type extends ApfV61GeneratorBase<Type>
         if (val < 0 || val >= 4294967295L) {
             throw new IllegalArgumentException("val must >= 0 and < 2^32-1, current val: " + val);
         }
-        checkDropCounterRange(cnt);
         return addJumpIfR0GreaterThan(val, cnt.getJumpDropLabel());
     }
 
@@ -108,21 +100,18 @@ public abstract class ApfV61GeneratorBase<Type extends ApfV61GeneratorBase<Type>
         if (val < 0 || val >= 4294967295L) {
             throw new IllegalArgumentException("val must >= 0 and < 2^32-1, current val: " + val);
         }
-        checkPassCounterRange(cnt);
         return addJumpIfR0GreaterThan(val, cnt.getJumpPassLabel());
     }
 
     @Override
     public final Type addCountAndDropIfBytesAtR0NotEqual(byte[] bytes,
             ApfCounterTracker.Counter cnt) {
-        checkDropCounterRange(cnt);
         return addJumpIfBytesAtR0NotEqual(bytes, cnt.getJumpDropLabel());
     }
 
     @Override
     public final Type addCountAndPassIfBytesAtR0NotEqual(byte[] bytes,
             ApfCounterTracker.Counter cnt) {
-        checkPassCounterRange(cnt);
         return addJumpIfBytesAtR0NotEqual(bytes, cnt.getJumpPassLabel());
     }
 
@@ -135,7 +124,6 @@ public abstract class ApfV61GeneratorBase<Type extends ApfV61GeneratorBase<Type>
         if (values.size() == 1) {
             return addCountAndPassIfR0Equals(values.iterator().next(), cnt);
         }
-        checkPassCounterRange(cnt);
         return addJumpIfOneOf(R0, values, cnt.getJumpPassLabel());
     }
 
@@ -148,7 +136,6 @@ public abstract class ApfV61GeneratorBase<Type extends ApfV61GeneratorBase<Type>
         if (values.size() == 1) {
             return addCountAndDropIfR0Equals(values.iterator().next(), cnt);
         }
-        checkDropCounterRange(cnt);
         return addJumpIfOneOf(R0, values, cnt.getJumpDropLabel());
     }
 
@@ -161,35 +148,30 @@ public abstract class ApfV61GeneratorBase<Type extends ApfV61GeneratorBase<Type>
         if (values.size() == 1) {
             return addCountAndPassIfR0NotEquals(values.iterator().next(), cnt);
         }
-        checkPassCounterRange(cnt);
         return addJumpIfNoneOf(R0, values, cnt.getJumpPassLabel());
     }
 
     @Override
     public Type addCountAndDropIfBytesAtR0EqualsAnyOf(@NonNull List<byte[]> bytesList,
             ApfCounterTracker.Counter cnt) {
-        checkDropCounterRange(cnt);
         return addJumpIfBytesAtR0EqualsAnyOf(bytesList, cnt.getJumpDropLabel());
     }
 
     @Override
     public Type addCountAndPassIfBytesAtR0EqualsAnyOf(@NonNull List<byte[]> bytesList,
             ApfCounterTracker.Counter cnt) {
-        checkPassCounterRange(cnt);
         return addJumpIfBytesAtR0EqualsAnyOf(bytesList, cnt.getJumpPassLabel());
     }
 
     @Override
     public Type addCountAndDropIfBytesAtR0EqualsNoneOf(@NonNull List<byte[]> bytesList,
             ApfCounterTracker.Counter cnt) {
-        checkDropCounterRange(cnt);
         return addJumpIfBytesAtR0EqualNoneOf(bytesList, cnt.getJumpDropLabel());
     }
 
     @Override
     public Type addCountAndPassIfBytesAtR0EqualsNoneOf(@NonNull List<byte[]> bytesList,
             ApfCounterTracker.Counter cnt) {
-        checkPassCounterRange(cnt);
         return addJumpIfBytesAtR0EqualNoneOf(bytesList, cnt.getJumpPassLabel());
     }
 
@@ -202,15 +184,31 @@ public abstract class ApfV61GeneratorBase<Type extends ApfV61GeneratorBase<Type>
         if (values.size() == 1) {
             return addCountAndDropIfR0NotEquals(values.iterator().next(), cnt);
         }
-        checkDropCounterRange(cnt);
         return addJumpIfNoneOf(R0, values, cnt.getJumpDropLabel());
     }
 
     @Override
     public final Type addJumpIfPktAtR0ContainDnsQ(byte[] qnames, int[] qtypes, short tgt) {
-        for (int qtype : qtypes) {
-            addJumpIfPktAtR0ContainDnsQ(qnames, qtype, tgt);
+        for (int i = 0; i < qtypes.length; i += 2) {
+            if (i == qtypes.length - 1) {
+                addJumpIfPktAtR0ContainDnsQ(qnames, qtypes[i], tgt);
+            } else {
+                addJumpIfPktAtR0ContainDnsQ2(qnames, qtypes[i], qtypes[i + 1], tgt);
+            }
         }
         return self();
+    }
+
+    /**
+     * Appends a conditional jump instruction to the program: Jumps to {@code tgt} if the UDP
+     * payload's DNS questions contain the QNAMEs specified in {@code qnames} and qtype
+     * equals {@code qtype1} or {@code qtype2}. Examines the payload starting at the offset in R0.
+     * Drops packets if packets are corrupted.
+     */
+    public final Type addJumpIfPktAtR0ContainDnsQ2(@android.annotation.NonNull byte[] qnames,
+            int qtype1, int qtype2, short tgt) {
+        validateNames(qnames);
+        return append(new Instruction(ExtendedOpcodes.JDNSQMATCH2, Rbit1).setTargetLabel(tgt)
+                .addU8(qtype1).addU8(qtype2).setBytesImm(qnames));
     }
 }

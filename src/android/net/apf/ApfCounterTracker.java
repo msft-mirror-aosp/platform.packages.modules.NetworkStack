@@ -45,6 +45,7 @@ public class ApfCounterTracker {
         PASSED_ALLOCATE_FAILURE, // hardcoded in APFv6 interpreter
         PASSED_TRANSMIT_FAILURE, // hardcoded in APFv6 interpreter
         CORRUPT_DNS_PACKET,      // hardcoded in APFv6 interpreter
+        EXCEPTIONS,              // hardcoded in APFv6.1 interpreter
         FILTER_AGE_SECONDS,
         FILTER_AGE_16384THS,
         APF_VERSION,
@@ -141,11 +142,20 @@ public class ApfCounterTracker {
             return RESERVED_OOB;
         }
 
+        private void checkCounterRange(Counter lowerBound, Counter upperBound) {
+            if (value() < lowerBound.value() || value() > upperBound.value()) {
+                throw new IllegalArgumentException(
+                        String.format("Counter %s, is not in range [%s, %s]", this,
+                                lowerBound, upperBound));
+            }
+        }
+
         /**
          * Return the label such that if we jump to it, the counter will be increased by 1 and
          * the packet will be passed.
          */
         public short getJumpPassLabel() {
+            checkCounterRange(MIN_PASS_COUNTER, MAX_PASS_COUNTER);
             return (short) (2 * this.value());
         }
 
@@ -154,6 +164,7 @@ public class ApfCounterTracker {
          * the packet will be dropped.
          */
         public short getJumpDropLabel() {
+            checkCounterRange(MIN_DROP_COUNTER, MAX_DROP_COUNTER);
             return (short) (2 * this.value() + 1);
         }
     }
