@@ -394,6 +394,45 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
             short tgt);
 
     /**
+     * Add an instruction to the end of the program to count and drop if the bytes of the
+     * packet at an offset specified by {@code offset} match any of the elements in
+     * {@code bytesList}.
+     * This method will use JBSPTRMATCH in APFv6.1 when possible.
+     */
+    public abstract Type addCountAndDropIfBytesAtOffsetEqualsAnyOf(int offset,
+            @NonNull List<byte[]> bytesList, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException;
+
+    /**
+     * Add an instruction to the end of the program to count and pass if the bytes of the
+     * packet at an offset specified by {@code offset} match any of the elements in
+     * {@code bytesList}.
+     * This method will use JBSPTRMATCH in APFv6.1 when possible.
+     */
+    public abstract Type addCountAndPassIfBytesAtOffsetEqualsAnyOf(int offset,
+            @NonNull List<byte[]> bytesList, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException;
+
+    /**
+     * Add an instruction to the end of the program to count and drop if the bytes of the
+     * packet at an offset specified by {@code offset} match none the elements in {@code bytesList}.
+     * This method will use JBSPTRMATCH in APFv6.1 when possible.
+     */
+    public abstract Type addCountAndDropIfBytesAtOffsetEqualsNoneOf(int offset,
+            @NonNull List<byte[]> bytesList, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException;
+
+    /**
+     * Add an instruction to the end of the program to count and pass if the bytes of the
+     * packet at an offset specified by {@code offset} match none of the elements in
+     * {@code bytesList}.
+     * This method will use JBSPTRMATCH in APFv6.1 when possible.
+     */
+    public abstract Type addCountAndPassIfBytesAtOffsetEqualsNoneOf(int offset,
+            @NonNull List<byte[]> bytesList, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException;
+
+    /**
      * Appends a conditional jump instruction to the program: Jumps to {@code tgt} if the UDP
      * payload's DNS questions contain the QNAMEs specified in {@code qnames} and qtype
      * equals {@code qtype}. Examines the payload starting at the offset in R0.

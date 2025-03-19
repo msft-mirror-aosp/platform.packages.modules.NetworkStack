@@ -234,6 +234,34 @@ public final class ApfV6Generator extends ApfV6GeneratorBase<ApfV6Generator> {
     }
 
     @Override
+    public ApfV6Generator addCountAndDropIfBytesAtOffsetEqualsAnyOf(int offset,
+            List<byte[]> bytesList, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        return addLoadImmediate(R0, offset).addCountAndDropIfBytesAtR0EqualsAnyOf(bytesList, cnt);
+    }
+
+    @Override
+    public ApfV6Generator addCountAndPassIfBytesAtOffsetEqualsAnyOf(int offset,
+            List<byte[]> bytesList, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        return addLoadImmediate(R0, offset).addCountAndPassIfBytesAtR0EqualsAnyOf(bytesList, cnt);
+    }
+
+    @Override
+    public ApfV6Generator addCountAndDropIfBytesAtOffsetEqualsNoneOf(int offset,
+            List<byte[]> bytesList, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        return addLoadImmediate(R0, offset).addCountAndDropIfBytesAtR0EqualsNoneOf(bytesList, cnt);
+    }
+
+    @Override
+    public ApfV6Generator addCountAndPassIfBytesAtOffsetEqualsNoneOf(int offset,
+            List<byte[]> bytesList, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException {
+        return addLoadImmediate(R0, offset).addCountAndPassIfBytesAtR0EqualsNoneOf(bytesList, cnt);
+    }
+
+    @Override
     public ApfV6Generator addCountAndDropIfR0IsNoneOf(@NonNull Set<Long> values,
             ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
         if (values.isEmpty()) {

@@ -15,11 +15,13 @@
  */
 package android.net.apf;
 
+import static android.net.apf.BaseApfGenerator.Rbit.Rbit0;
 import static android.net.apf.BaseApfGenerator.Rbit.Rbit1;
 import static android.net.apf.BaseApfGenerator.Register.R0;
 
 import androidx.annotation.NonNull;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
@@ -205,6 +207,100 @@ public abstract class ApfV61GeneratorBase<Type extends ApfV61GeneratorBase<Type>
         return append(new Instruction(Opcodes.ALLOC_XMIT, Rbit1).addUnsigned(imm));
     }
 
+    private List<byte[]> addJumpIfBytesAtOffsetEqualsHelper(int offset,
+            @NonNull List<byte[]> bytesList, short tgt, boolean jumpOnMatch)
+            throws IllegalInstructionException {
+        final List<byte[]> deduplicatedList =
+                bytesList.size() == 1 ? bytesList : validateDeduplicateBytesList(bytesList);
+        if (offset < 0 || offset > 255) {
+            return deduplicatedList;
+        }
+        final int count = deduplicatedList.size();
+        final int compareLength = deduplicatedList.get(0).length;
+        if (compareLength > 16) {
+            return deduplicatedList;
+        }
+        final List<byte[]> failbackList = new ArrayList<>();
+        final List<Integer> ptrs = new ArrayList<>();
+        for (int i = 0; i < count; ++i) {
+            final byte[] bytes = deduplicatedList.get(i);
+            int relativeOffset = mInstructions.get(0).findMatchInDataBytes(bytes, 0, bytes.length);
+            if (relativeOffset < 0 || relativeOffset % 2 == 1 || relativeOffset > 510) {
+                failbackList.add(bytes);
+                continue;
+            }
+            ptrs.add(relativeOffset / 2);
+        }
+        final Rbit rbit = jumpOnMatch ? Rbit1 : Rbit0;
+        int totalPtrs = ptrs.size();
+        for (int i = 0; i < totalPtrs; i += 16) {
+            final int currentCount = Math.min(totalPtrs - i, 16);
+            final Instruction instruction = new Instruction(Opcodes.JBSPTRMATCH, rbit)
+                    .addU8(offset)
+                    .addU8((currentCount - 1) * 16 + (compareLength - 1))
+                    .setTargetLabel(tgt);
+            for (int j = 0; j < currentCount; j++) {
+                instruction.addU8(ptrs.get(i + j));
+            }
+            append(instruction);
+        }
+        return failbackList;
+    }
+
+    /**
+     * Add an instruction to the end of the program to jump to {@code tgt} if the bytes of the
+     * packet at an offset specified by {@code offset} match any of the elements in
+     * {@code bytesList}.
+     */
+    public Type addJumpIfBytesAtOffsetEqualsAnyOf(int offset, @NonNull List<byte[]> bytesList,
+            short tgt) throws IllegalInstructionException {
+        final List<byte[]> failbackList = addJumpIfBytesAtOffsetEqualsHelper(offset, bytesList, tgt,
+                true /* jumpOnMatch */);
+        if (failbackList.isEmpty()) {
+            return self();
+        }
+        return addLoadImmediate(R0, offset).addJumpIfBytesAtR0EqualsAnyOf(failbackList, tgt);
+    }
+
+    /**
+     * Add an instruction to the end of the program to jump to {@code tgt} if the bytes of the
+     * packet at an offset specified by {@code offset} match none of the elements in
+     * {@code bytesList}.
+     */
+    public Type addJumpIfBytesAtOffsetEqualsNoneOf(int offset, @NonNull List<byte[]> bytesList,
+            short tgt) throws IllegalInstructionException {
+        final List<byte[]> failbackList = addJumpIfBytesAtOffsetEqualsHelper(offset, bytesList, tgt,
+                false /* jumpOnMatch */);
+        if (failbackList.isEmpty()) {
+            return self();
+        }
+        return addLoadImmediate(R0, offset).addJumpIfBytesAtR0EqualsNoneOf(failbackList, tgt);
+    }
+
+    @Override
+    public Type addCountAndDropIfBytesAtOffsetEqualsAnyOf(int offset, List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        return addJumpIfBytesAtOffsetEqualsAnyOf(offset, bytesList, cnt.getJumpDropLabel());
+    }
+
+    @Override
+    public Type addCountAndPassIfBytesAtOffsetEqualsAnyOf(int offset, List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        return addJumpIfBytesAtOffsetEqualsAnyOf(offset, bytesList, cnt.getJumpPassLabel());
+    }
+
+    @Override
+    public Type addCountAndDropIfBytesAtOffsetEqualsNoneOf(int offset, List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        return addJumpIfBytesAtOffsetEqualsNoneOf(offset, bytesList, cnt.getJumpDropLabel());
+    }
+
+    @Override
+    public Type addCountAndPassIfBytesAtOffsetEqualsNoneOf(int offset, List<byte[]> bytesList,
+            ApfCounterTracker.Counter cnt) throws IllegalInstructionException {
+        return addJumpIfBytesAtOffsetEqualsNoneOf(offset, bytesList, cnt.getJumpPassLabel());
+    }
+
     /**
      * Appends a conditional jump instruction to the program: Jumps to {@code tgt} if the UDP
      * payload's DNS questions contain the QNAMEs specified in {@code qnames} and qtype
@@ -216,5 +312,13 @@ public abstract class ApfV61GeneratorBase<Type extends ApfV61GeneratorBase<Type>
         validateNames(qnames);
         return append(new Instruction(ExtendedOpcodes.JDNSQMATCH2, Rbit1).setTargetLabel(tgt)
                 .addU8(qtype1).addU8(qtype2).setBytesImm(qnames));
+    }
+
+    /**
+     * Preload the content of the data region.
+     */
+    public Type addPreloadData(@NonNull byte[] data) throws IllegalInstructionException {
+        mInstructions.get(0).maybeUpdateBytesImm(data, 0, data.length);
+        return self();
     }
 }
