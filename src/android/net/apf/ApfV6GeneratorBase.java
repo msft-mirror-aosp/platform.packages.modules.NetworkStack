@@ -150,9 +150,7 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
      * Add an instruction to the end of the program to transmit the allocated buffer without
      * checksum.
      */
-    public final Type addTransmitWithoutChecksum() {
-        return addTransmit(-1 /* ipOfs */);
-    }
+    public abstract Type addTransmitWithoutChecksum();
 
     /**
      * Add an instruction to the end of the program to transmit the allocated buffer.

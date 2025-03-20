@@ -207,6 +207,11 @@ public abstract class ApfV61GeneratorBase<Type extends ApfV61GeneratorBase<Type>
         return append(new Instruction(Opcodes.ALLOC_XMIT, Rbit1).addUnsigned(imm));
     }
 
+    @Override
+    public Type addTransmitWithoutChecksum() {
+        return append(new Instruction(Opcodes.ALLOC_XMIT, Rbit0));
+    }
+
     private List<byte[]> addJumpIfBytesAtOffsetEqualsHelper(int offset,
             @NonNull List<byte[]> bytesList, short tgt, boolean jumpOnMatch)
             throws IllegalInstructionException {

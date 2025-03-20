@@ -287,4 +287,9 @@ public final class ApfV6Generator extends ApfV6GeneratorBase<ApfV6Generator> {
         // Rbit1 means the extra be16 immediate is present
         return append(new Instruction(ExtendedOpcodes.ALLOCATE, Rbit1).addU16(size));
     }
+
+    @Override
+    public ApfV6Generator addTransmitWithoutChecksum() {
+        return addTransmit(-1 /* ipOfs */);
+    }
 }
