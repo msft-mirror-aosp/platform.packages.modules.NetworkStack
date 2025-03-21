@@ -212,6 +212,25 @@ public abstract class ApfV61GeneratorBase<Type extends ApfV61GeneratorBase<Type>
         return append(new Instruction(Opcodes.ALLOC_XMIT, Rbit0));
     }
 
+    @Override
+    protected boolean handleOptimizedTransmit(int ipOfs, int csumOfs, int csumStart,
+                                              int partialCsum, boolean isUdp) {
+        if (ipOfs != 14) return false;
+        int v = -1;
+        if ( isUdp && csumStart == 26 && csumOfs == 40) v = 0;  // ether/ipv4/udp
+        if (!isUdp && csumStart == 26 && csumOfs == 44) v = 1;  // ether/ipv4/tcp
+        if (!isUdp && csumStart == 34 && csumOfs == 36) v = 2;  // ether/ipv4/icmp
+        if (!isUdp && csumStart == 38 && csumOfs == 40) v = 3;  // ether/ipv4/routeralert/icmp
+        if ( isUdp && csumStart == 22 && csumOfs == 60) v = 4;  // ether/ipv6/udp
+        if (!isUdp && csumStart == 22 && csumOfs == 64) v = 5;  // ether/ipv6/tcp
+        if (!isUdp && csumStart == 22 && csumOfs == 56) v = 6;  // ether/ipv6/icmp
+        if (!isUdp && csumStart == 22 && csumOfs == 64) v = 7;  // ether/ipv6/routeralert/icmp
+        if (v < 0) return false;
+        v |= partialCsum << 3;
+        append(new Instruction(Opcodes.ALLOC_XMIT, Rbit0).addUnsigned(v));
+        return true;
+    }
+
     private List<byte[]> addJumpIfBytesAtOffsetEqualsHelper(int offset,
             @NonNull List<byte[]> bytesList, short tgt, boolean jumpOnMatch)
             throws IllegalInstructionException {

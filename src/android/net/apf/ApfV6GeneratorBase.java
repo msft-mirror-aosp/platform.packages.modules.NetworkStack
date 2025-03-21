@@ -163,6 +163,8 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
         return append(new Instruction(ExtendedOpcodes.TRANSMIT, Rbit0).addU8(ipOfs).addU8(255));
     }
 
+    protected abstract boolean handleOptimizedTransmit(int ipOfs, int csumOfs, int csumStart, int partialCsum, boolean isUdp);
+
     /**
      * Add an instruction to the end of the program to transmit the allocated buffer.
      */
@@ -176,6 +178,8 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
             throw new IllegalArgumentException("L4 checksum requires csum offset of "
                                                + csumOfs + " < 255");
         }
+        if (handleOptimizedTransmit(ipOfs, csumOfs, csumStart, partialCsum, isUdp))
+            return self();
         return append(new Instruction(ExtendedOpcodes.TRANSMIT, isUdp ? Rbit1 : Rbit0)
                 .addU8(ipOfs).addU8(csumOfs).addU8(csumStart).addU16(partialCsum));
     }

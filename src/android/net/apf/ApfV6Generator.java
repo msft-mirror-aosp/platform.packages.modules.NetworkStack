@@ -292,4 +292,10 @@ public final class ApfV6Generator extends ApfV6GeneratorBase<ApfV6Generator> {
     public ApfV6Generator addTransmitWithoutChecksum() {
         return addTransmit(-1 /* ipOfs */);
     }
+
+    @Override
+    protected boolean handleOptimizedTransmit(int ipOfs, int csumOfs, int csumStart,
+                                              int partialCsum, boolean isUdp) {
+        return false;
+    }
 }
